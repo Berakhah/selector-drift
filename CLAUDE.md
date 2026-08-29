@@ -16,6 +16,23 @@ The briefs win over anything summarised here. This file exists so a fresh sessio
 
 superpowers, in order: `brainstorming` → `using-git-worktrees` → `writing-plans` → `subagent-driven-development` → `test-driven-development` → `requesting-code-review` → `verification-before-completion`. TDD is RED-GREEN-REFACTOR, no exceptions.
 
+## Skill map
+
+At `requesting-code-review` time, match the module a change touches and also invoke the agent(s) below — this augments the default review pass, it doesn't replace it. Skip whatever doesn't apply to the diff.
+
+| Path touched | Stack | Also invoke |
+|---|---|---|
+| Any `.py` under `selector_drift/` | Python 3.12 | `ecc:python-reviewer` |
+| `scope/`, `browser/`, `heallog/`, `api/` | credential/auth/redaction surface | `ecc:security-reviewer` |
+| `api/` | FastAPI | `ecc:fastapi-reviewer` |
+| `resolve/` rung 5 (visual grounding) | LLM call surface | `agent-security-super-skill` *before* writing the call (prompt-injection/redaction posture), `ecc:security-reviewer` after |
+| `db/`, any schema or migration | Postgres | `ecc:database-reviewer` |
+| Any `Dockerfile` / `compose.yaml` (esp. `browser/`) | container hardening | `ecc:security-reviewer` — seccomp, `cap_drop`, non-root, `shm_size` |
+| `web/` | Next.js 15 + bok-ui | `ecc:react-reviewer`; `frontend-design` for new screens; `ecc:accessibility` for axe |
+| `testbench/portal` | Next.js, mutation-served | `ecc:e2e-runner` / `webapp-testing` for Playwright coverage |
+| `testbench/mutations/` | Python + lxml | `ecc:python-reviewer`, re-check against the adversarial-mutation bar below |
+| CI, the always-on VM | GH Actions / Fly.io / Oracle VM | `ecc:deployment-patterns` |
+
 ## The two facts that dominate the design
 
 1. **Self-healing's failure mode is worse than breaking.** A broken selector throws and someone fixes it. A wrongly-healed selector silently returns plausible, incorrect data into a client's system for weeks. The validation gate is the product; the write-back to cache is trivial.
