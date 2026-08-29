@@ -4,14 +4,18 @@ version = "0.1.0"
 description = "Self-healing extraction for business systems with no API."
 requires-python = ">=3.12"
 license = "Apache-2.0"
-# TEMPORARY: bok-core is not on PyPI yet (P-1). It should be a git dependency on the
-# bok-core-minimal branch of the sibling backoffice-kit repo -- BLOCKED, see
-# .superpowers/sdd/2024-11-07-selector-drift/task-1-report.md for the reproduced uv panic
-# (git+file:// URL + any pinned ref crashes uv 0.11.21 on Windows: AmbiguousAuthority in
-# crates/uv-pypi-types/src/parsed_url.rs). Re-add "bok-core" here once that's resolved,
-# and re-point at a real PyPI release once bok-core publishes.
+# TEMPORARY: bok-core is not on PyPI yet (P-1). A git dependency on the bok-core-minimal
+# branch was tried first and hit a reproducible uv 0.11.21 panic on any git+file:// URL
+# with a pinned ref (AmbiguousAuthority in crates/uv-pypi-types/src/parsed_url.rs, not a
+# path-encoding issue -- see .superpowers/sdd/2024-11-07-selector-drift/task-1-report.md).
+# Using an editable path dependency into the sibling backoffice-kit repo's own
+# .worktrees/bok-core-minimal worktree instead -- sidesteps git-URL parsing entirely and
+# needs no pinned ref, at the cost of depending on a worktree that lives outside this repo.
+# Unblocked by either: the bok-core-minimal branch merging to backoffice-kit's main, or a
+# real PyPI release -- switch this source back to a normal PyPI dependency at that point.
 dependencies = [
     "alembic>=1.19.1",
+    "bok-core",
     "cryptography>=50.0.1",
     "duckdb>=1.5.5",
     "fastapi>=0.141.1",
@@ -83,3 +87,6 @@ markers = [
 # ms-playwright/chromium-1234). B8: an unpinned browser turns a UI-change test into a
 # browser-change test.
 playwright_chromium_revision = "1234"
+
+[tool.uv.sources]
+bok-core = { path = "../../../../backoffice-kit/.worktrees/bok-core-minimal", editable = true }
