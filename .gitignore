@@ -3,3 +3,9 @@ __pycache__/
 node_modules/
 .env
 .DS_Store
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/

@@ -1,0 +1,68 @@
+[importlinter]
+# NOTE: import-linter 2.14's ini reader only splits a value into a list on embedded
+# newlines, never on commas (see importlinter.adapters.user_options._clean_section_config).
+# The plan text's single-line `root_packages = selector_drift, testbench` is therefore
+# parsed as one literal package name ("selector_drift, testbench") and iterating over that
+# string yields individual characters -- reproduced as `Could not find package 's'`. Same
+# two root packages, syntax the installed version actually accepts.
+root_packages =
+    selector_drift
+    testbench
+# REQUIRED (M21). Without it the bok_core.gateway contract names a module outside the graph,
+# matches nothing, and reports "kept" — a green tick with no test behind it.
+include_external_packages = True
+
+[importlinter:contract:resolver-cannot-write]
+name = A resolver cannot write
+type = forbidden
+source_modules = selector_drift.resolve
+forbidden_modules = selector_drift.land
+
+[importlinter:contract:judged-cannot-call-judge]
+name = The judged cannot call the judge
+type = forbidden
+source_modules = selector_drift.resolve
+forbidden_modules = selector_drift.validate
+
+[importlinter:contract:heallog-cannot-refetch]
+name = Replay uses stored evidence, never a live page
+type = forbidden
+source_modules = selector_drift.heallog
+forbidden_modules = selector_drift.browser
+# NB (C6): forbidden contracts report INDIRECT imports by default. Task 19's replay imports
+# resolve.cascade, so this contract only holds because Task 13 moves PageSource out of browser/
+# into resolve/page.py. Do not add allow_indirect_imports to make this pass — that would be
+# suppressing the finding rather than fixing it.
+
+[importlinter:contract:judge-reaches-rungs-only-by-protocol]
+name = validate/ may reach rungs only via the public Rung protocol
+type = forbidden
+source_modules = selector_drift.validate
+forbidden_modules = selector_drift.resolve.rungs
+# Design 3.4 claims this contract; without this stanza it was never implemented (M22).
+# Concrete rungs are constructed in orchestrate/ and injected; validate/ sees only Rung + Family.
+
+[importlinter:contract:answer-key-isolation]
+name = The resolver cannot see the answer key
+type = forbidden
+source_modules = selector_drift
+forbidden_modules = testbench.answers
+
+# DEFERRED (not one of the "5 kept" this task verifies -- see task-1-report.md).
+# import-linter 2.14's ForbiddenContract hard-refuses any forbidden_modules entry that is
+# a *subpackage* of an external package -- only the bare top-level name is a valid
+# forbidden-module value when include_external_packages = True (see
+# importlinter.contracts.forbidden.ForbiddenContract._check_external_forbidden_modules,
+# which raises unconditionally for "bok_core.gateway", independent of whether bok_core is
+# even installed). bok_core is also not installed right now (Task 1's git-dependency
+# blocker -- see the report). Re-enable once bok_core is a real dependency, as:
+#   forbidden_modules = bok_core
+#   ignore_imports =
+#       selector_drift.** -> bok_core.provenance.**
+#       selector_drift.** -> bok_core.boundary.**
+#   unmatched_ignore_imports_alerting = none   # until every module that needs it exists
+# [importlinter:contract:no-model-calls]
+# name = v1 makes zero model calls
+# type = forbidden
+# source_modules = selector_drift
+# forbidden_modules = bok_core.gateway
