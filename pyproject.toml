@@ -1,0 +1,85 @@
+[project]
+name = "selector-drift"
+version = "0.1.0"
+description = "Self-healing extraction for business systems with no API."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+# TEMPORARY: bok-core is not on PyPI yet (P-1). It should be a git dependency on the
+# bok-core-minimal branch of the sibling backoffice-kit repo -- BLOCKED, see
+# .superpowers/sdd/2024-11-07-selector-drift/task-1-report.md for the reproduced uv panic
+# (git+file:// URL + any pinned ref crashes uv 0.11.21 on Windows: AmbiguousAuthority in
+# crates/uv-pypi-types/src/parsed_url.rs). Re-add "bok-core" here once that's resolved,
+# and re-point at a real PyPI release once bok-core publishes.
+dependencies = [
+    "alembic>=1.19.1",
+    "cryptography>=50.0.1",
+    "duckdb>=1.5.5",
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "lxml>=6.1.2",
+    "numpy>=2.5.2",
+    "playwright>=1.62.0",
+    "prefect>=3.8.4",
+    "psycopg>=3.3.4",
+    "pyarrow>=25.0.1",
+    "pydantic>=2.13.5",
+    "pyyaml>=6.0.3",
+    "sqlalchemy>=2.0.52",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.165.10",
+    "import-linter>=2.14",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "pytest-httpx>=0.36.2",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.16.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# testbench.portal is a Next.js app, not a Python package -- excluded on purpose (L8: grimp
+# must never be given a reason to walk node_modules).
+packages = ["selector_drift", "testbench"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# ruff 0.16 formats fenced ```python blocks inside Markdown by default -- scope both
+# check and format to the code this repo actually owns, not the plan/spec docs.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests/test_import_contracts.py is copied verbatim from the plan (already audited) --
+# SIM115 (context manager for open()) is a style nit, not worth diverging from that text.
+"tests/**" = ["SIM115"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: no external dependencies -- no browser, no Postgres, no network",
+    "integration: may touch Postgres, the lake, or a local bench fixture",
+    "e2e: a real browser and a served UI -- unbounded runtime, CI only",
+]
+
+[tool.selector-drift]
+# Printed by `uv run playwright install --with-deps chromium`: Chrome for Testing
+# 151.0.7922.34, playwright chromium build v1234 (installed to
+# ms-playwright/chromium-1234). B8: an unpinned browser turns a UI-change test into a
+# browser-change test.
+playwright_chromium_revision = "1234"
