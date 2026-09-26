@@ -1,8 +1,13 @@
 # Selector Drift — Design
 
-**Status:** approved 2024-11-07 · **Phase:** weeks 13–20 · **Capacity:** 35–40 h/week (~300 h)
+**Status:** approved 2024-11-07 · **amended 2026-08-29** ([audit](../reviews/2026-08-29-plan-audit.md)) · **Phase:** build weeks 1–8 · **Capacity:** 35–40 h/week (~300 h)
 **Depends on:** `../Starting_Documents/00-SHARED-FOUNDATION.md`, `../Starting_Documents/03-SELECTOR-DRIFT.md`
-**Licence:** Apache-2.0 · **Repo visibility:** public at first release (week 20) · **Accent:** drift indigo `oklch(0.55 0.14 268)`
+**Licence:** Apache-2.0 · **Repo visibility:** public at first release (build week 8) · **Accent:** drift indigo `oklch(0.55 0.14 268)`
+
+> **Week numbering, decided 2026-08-29 (audit OQ1).** This project runs **out of programme order,
+> first** — weeks 1–12 have not run. Week numbers here and in the plan are project-relative (the
+> brief's "weeks 13–20" is build weeks 1–8) and **no calendar date is assumed**. The log's start date
+> is whatever Task 6's first cron fire records.
 
 Self-healing extraction for business systems with no API.
 
@@ -26,7 +31,7 @@ Both are enforced structurally, not by discipline — see §3.
 
 | # | Decision | Answer |
 |---|---|---|
-| Q1 | Ninety-day log targets | `testbench` (treatment arm) + `agent-perimeter` and `ledger-sense` demo deployments (control arm). All `self-owned`. An uncontrolled target may be added later with its own honest start date. |
+| Q1 | Ninety-day log targets | `testbench` (treatment arm) + two self-owned deployed applications (control arm). All `self-owned`. An uncontrolled target may be added later with its own honest start date. **Amended 2026-08-29 (OQ1):** the original answer named the `agent-perimeter` and `ledger-sense` demos, which do not exist and are ~12 weeks away now that this project runs first. Plan precondition P-3 names two existing self-owned deployments instead; the control arm's requirement — targets we own, whose deploy history we can read — is unchanged. |
 | Q2 | Credential posture | Three tiers behind one protocol: `SessionInjection` (default offer), `ClientBroker` (demo this), `EncryptedStore` (last resort, written acknowledgement). **No code path stores a TOTP seed.** MFA is satisfied by asking the client's broker for a fresh code, or the target is out of scope in v1. |
 | Q3 | Write-back | Never write into a client portal. v1 ships a **reviewable change-set export** — extracted rows plus a diff against a client-supplied prior snapshot, per-row accept/reject, in their import format. Their system applies it. We never hold write credentials. |
 | Q4 | Orchestrator | **Prefect 3.** Named in the strongest demand evidence in the brief; fits the `docker compose up` constraint; its persistence satisfies B8. |
@@ -136,8 +141,8 @@ Every extracted value is a `Claim` with `method=DETERMINISTIC` and therefore `co
 target: testbench
 basis: self-owned                # enum, not free text
 authorising_party: <name>
-authorised_on: 2026-09-07
-expires_on: 2027-09-07
+authorised_on: <the day the record is signed>   # never a future date (audit B4)
+expires_on: <authorised_on + 1 year>
 evidence_uri: null               # REQUIRED when basis == client-authorised
 rate_limit: { requests: 1, per_seconds: 30 }
 user_agent_contact: https://...
@@ -164,15 +169,32 @@ Unknown target → refuse. Expired authorisation → refuse. Basis not in the v1
 
 ### 5.1 The rungs
 
-| Rung | Method | Family | Fooled by | Survives |
+| Rung | Method | Family | Defeated by | Survives |
 |---|---|---|---|---|
-| 1 `cache` | Stored selector **+ stored anchor evidence**, both re-verified; must match exactly one element and satisfy assertions | — | — | nothing changing |
-| 2 `axtree` | ARIA role + accessible name + relationship | text-semantic | label rewording | restyling, DOM restructure, class churn, id churn |
-| 3 `anchors` | Text anchor + structural relation | text-semantic | label rewording, layout inversion | class renames, id churn, framework swap, table→div |
-| 4 `heuristics` | `data-testid`, id patterns, header position, column index **with header verification** | structural | column reorder | label rewording, restyling |
+| 1 `cache` | Stored selector **+ stored anchor evidence**, both re-verified; must match exactly one **visible** element and satisfy assertions | — | — | nothing changing |
+| 2 `axtree` | ARIA role + accessible name + relationship | text-semantic | label rewording (**fails**, does not mis-resolve) | restyling, DOM restructure, class churn, id churn |
+| 3 `anchors` | Text anchor + structural relation | text-semantic | label rewording (**fails**); layout inversion (**mis-resolves**) | class renames, id churn, framework swap, table→div |
+| 4 `heuristics` | `data-testid`, id patterns, header position, column index **with header verification** | structural | column reorder (**mis-resolves**) | label rewording, restyling |
 | 5 `visual` | v1: records the case with full evidence, raises `EscalateToHuman` | — | — | — |
 
-Rung 1's "**exactly one**" is load-bearing. A selector matching two elements after a change is a failure, not a first match.
+**"Defeated by" now distinguishes *fails* from *mis-resolves*, and the distinction is load-bearing**
+(audit L6, C3). On a label rewording rungs 2 and 3 return `None` — they do not point somewhere wrong.
+That matters because §5.6's confirmer table assumed they would still resolve; they do not, so the
+text-semantic family is *absent* rather than *wrong*, and with only two families the gate has no
+confirmer left. See §5.6a.
+
+Rung 1's "**exactly one**" is load-bearing. A selector matching two elements after a change is a
+failure, not a first match.
+
+**Every rung filters candidates through a visibility precondition** — non-zero box, no `aria-hidden`,
+no `display:none` ancestor (audit H9). Without it a hidden element carrying `aria-label="Claim
+Number"` — a stale template, a print-only block, a screen-reader helper, or a decoy — resolves ahead
+of the real one at rung 2, and every value it yields can satisfy the format assertion.
+
+**Rungs take a `PageSource`, not a live browser handle** (audit C6/P1). Two implementations: live
+Playwright, and static parsed DOM with a computed role/accessible-name mapping. This is what makes
+§6's replay legal under §3.4's import contracts, lets the mutation suite run without a browser, and
+turns hundreds of CDP round-trips per run into one snapshot.
 
 ### 5.2 Rung 1 verifies provenance, not just the selector
 
@@ -213,6 +235,7 @@ Each is an `Assertion` returning a **`Verdict`** — never a boolean. A `Verdict
 4. **`IndependentRungAgreement`** — see §5.6.
 5. **`DistributionalAssertion`** — PSI (or KS), documented threshold, warm-up period, **persistence across runs required before alerting**, client can mark an alert expected (B7).
 6. **`FirstHealConfirmation`** — first heal to a *new* selector completes into quarantine pending a human, subject to the scope record's `first_heal_policy`.
+7. **`RowKeyContinuity`** — **added 2026-08-29 (audit C3).** Joins this run's rows to the previous accepted run's on the spec's `natural_key`; for keys present in both, requires the healed field's values to agree at or above a stated rate. This is the second half of brief §5's *"do fields co-vary as they did historically?"*, which check 3 above implemented only as intra-row footing. See §5.6a.
 
 ### 5.6 `IndependentRungAgreement` — the check that does the real work
 
@@ -231,6 +254,44 @@ This is the direct answer to §5's "most common and most dangerous silent failur
 If no cross-family confirmer can resolve at all, the verdict is `INSUFFICIENT`, never `PASS` — which under §5.7 quarantines the heal. Conservative and correct: that *is* the adjacent-column scenario.
 
 The §3.4 import contract is what keeps this from decaying into the resolver marking its own work.
+Agreement is compared on **node identity**, never on selector text (audit C5): `#claim` and
+`td:nth-child(1)` routinely name the same node, and the same selector string can be produced against
+different snapshots. The `PageSource` mints a `node_id`; the check compares those.
+
+### 5.6a `Family.VALUE` — amendment of 2026-08-29 (audit C3). **Signed off 2026-08-29 (OQ3).**
+
+**With two families, a plain label rewording quarantines every time, forever.** Rungs 2 and 3 both
+*fail* on a reword (§5.1), rung 4 heals structurally, the confirmer must be text-semantic, and there
+is none — so `INSUFFICIENT`, which §5.7 turns into `FAIL` on a heal. Label rewording is the most
+common real UI change there is. On the bench, mutations re-seed daily, so it recurs with fresh
+strings; `first_heal_policy: auto_promote` does **not** rescue it, because that policy satisfies only
+check 6 while check 4 still fails. §14's mitigation for "log stalls on quarantine backlog" therefore
+does not work, and the ninety-day log backs up in week 14.
+
+The fix is a third signal family, and the brief already asked for it:
+
+| Family | Signal | Independent of |
+|---|---|---|
+| `TEXT_SEMANTIC` | accessible name, label text | — |
+| `STRUCTURAL` | `data-testid`, id pattern, header-verified column position | text |
+| **`VALUE`** | row-key continuity against the previous accepted run | **both** — it reads the data, not the page |
+
+| Mutation | Text | Structural | `VALUE` | Outcome |
+|---|---|---|---|---|
+| label reword | fails | heals | values unchanged, **confirms** | accepted |
+| column reorder | heals | fails | values unchanged, confirms | accepted |
+| decoy adjacent column | → Amount | → Prior Amount | values differ, **refuses** | quarantined |
+| value swap between same-format columns | agrees | agrees | **refuses — the only check that sees it** | quarantined |
+
+`VALUE` is a *stronger* discriminator for the adjacent-column case than DOM agreement, because it
+looks at the data rather than at the page — and the last row is a case nothing else catches.
+
+**The conservative alternative was considered and rejected (OQ3):** keep two families and state the
+behaviour honestly — *"a label change costs one human confirmation, once, and never again."* That is
+defensible on a client portal that reskins twice a year. It is not defensible on the bench, which
+re-seeds its mutations daily — the same reword returns with a fresh string, so the confirmation is
+nightly rather than once and the log stalls exactly as §14 says it must not. `VALUE` is also the only
+family that sees a value swap between two same-format columns.
 
 ### 5.7 The asymmetry — how the gate avoids crying wolf
 
@@ -245,6 +306,17 @@ Strictness depends on whether anything healed:
 This single decision makes B7 tractable. The distributional check — the one that *will* cry wolf on month-end, seasonality and genuine business change — **only gates a write when the selector actually changed.** A steady-state run with a cache hit and a genuinely shifted distribution raises a quality alert; it does not block. A heal into a shifted distribution blocks. The client never receives an alert they want to mute, because the blocking version fires only on the rare event where blocking is obviously right.
 
 Warm-up falls out for free: with no history, `DistributionalAssertion` returns `INSUFFICIENT`, so **any heal during warm-up quarantines** — correct, because there is no basis to trust it yet.
+
+**Two corrections of 2026-08-29 (audit M17, M18).**
+
+- **Persistence-across-runs governs alerting, not blocking.** Requiring two consecutive breaches
+  before `FAIL` means a heal into an immediately shifted distribution passes on run one — the only run
+  that matters, since the first day's bad data is written by then. On a heal, a **single-run breach is
+  `FAIL`**; in steady state, persistence still applies and still solves B7.
+- **Warm-up length lives on the scope record, not as a global 30.** Thirty daily runs is thirty days
+  of quarantining every heal. The synthetic bench, which has a known answer key, warms up in 5; client
+  targets keep 30. Like `first_heal_policy`, putting it on the scope record means it cannot be quietly
+  lowered for a client target.
 
 ### 5.8 First-heal policy lives on the scope record
 
@@ -288,13 +360,13 @@ testbench/
 
 **Adversarial class:** decoy adjacent column carrying plausible values. Every adversarial mutation gets a test asserting the gate **refuses**. Brief §11 says this set matters more than the heal set, and it is the set §5.6 exists for.
 
-Deployed from the subdirectory to Vercel free tier at a stable URL. Bundled in this repo; lifted out with its history later if it earns it.
+**Deployed as a container on the same always-on VM as the scheduler (§9.2), at a stable URL** — decided 2026-08-29 (OQ4). Vercel's Hobby tier is non-commercial and the bench is the artifact a paying buyer is handed; self-hosting on a machine that has to exist anyway costs nothing, removes a second free-tier quota from the nightly path (`00` B6), and lets the browser's origin allowlist name a single host. Mutation is a runtime transform driven by a date-derived seed, so the bench needs no platform feature beyond serving HTTP. Bundled in this repo; lifted out with its history later if it earns it.
 
 ---
 
 ## 8. The ninety-day log
 
-**Task 1 of the plan. Day one of week 13, running whatever exists.** What must exist on day one:
+**Task 1 of the plan. Day one, running whatever exists.** What must exist on day one:
 
 1. Three `scope.yaml` records, `basis: self-owned`, gate refusing everything else.
 2. A browser driver that opens an `AuthorisedTarget` and loads a page.
@@ -311,7 +383,7 @@ No cascade. Day one logs *run succeeded / run failed*. Heal events begin appeari
 | Arm | Targets | Ground truth | What it proves |
 |---|---|---|---|
 | Treatment | `testbench` | the seeded answer key | heals are correct, adversarial heals are refused |
-| Control | `agent-perimeter`, `ledger-sense` demos | **deploy history** | no spurious heals |
+| Control | two self-owned deployments (named in plan P-3) | **deploy history** | no spurious heals |
 
 The control arm is the half nobody else has. A resolver that heals correctly and one that heals constantly look identical if every target is churning. Its claim is **"heals fired only on runs following an actual deploy, verified against deploy history"** — not "zero heals," because dependency bumps and platform changes will churn markup, and a heal there is the best evidence in the log precisely because it is a real change we did not author.
 
@@ -335,7 +407,17 @@ All three day-one targets carry `SYNTHETIC`/`PUBLIC` data by construction, so th
 
 **Lake:** one Parquet file per run into a partitioned tree. DuckDB is the *query* layer over it, **never a shared file written by parallel flows.** A compaction flow folds small files on a schedule.
 
-**Idempotency (B9):** deterministic run key `(target, spec_version, window)` plus upsert on the natural key. Late records land in their correct partition and mark it dirty for recompaction; a closed partition is never mutated in place. Tested by deliberately replaying a run.
+**Idempotency (B9):** deterministic run key `(target, spec_version, window)` plus dedup on the spec's
+declared `natural_key`. **Files are append-only** — `{run_key}-{attempt}-{ulid}.parquet` — and the
+`lake` view keeps the row with the greatest `ingested_at` per natural key. Late records land in their
+correct partition and mark it dirty for recompaction; a closed partition is never mutated in place.
+Compaction writes to a sibling directory and swaps atomically, so a concurrent reader never globs a
+file that has just been unlinked. Tested by deliberately replaying a run.
+
+*Amended 2026-08-29 (audit M6, M5, L7): "one Parquet file per run" and "never mutated in place" were
+mutually exclusive — re-writing a run's file to make a replay idempotent is mutation in place — and
+"the natural key" was named in three places while no schema anywhere defined one. It is now a required
+field on `TaskSpec`.*
 
 **Change-set export (§2.1 Q3):** reads from the lake, diffs against a client-supplied prior snapshot, emits per-row accept/reject in their import format. Thin by design — no connectors in v1.
 
@@ -343,7 +425,30 @@ All three day-one targets carry `SYNTHETIC`/`PUBLIC` data by construction, so th
 
 Prefect 3, one deployment per `(target, spec)`, Postgres shared with the application on a separate schema.
 
-Playwright per B8: pinned browser version, **one context per run**, hard memory and pid limits and a timeout set at the deployment level, non-root, read-only rootfs, tmpfs scratch, seccomp default (`00` §8), aggressive reaping. A scheduled runner survives host restarts via Prefect's own persistence — never a `while true` loop.
+Playwright per B8: pinned browser version, **one context per run**, hard memory and pid limits and a
+timeout set at the deployment level, non-root, read-only rootfs, tmpfs scratch, **seccomp default —
+never `unconfined`** (`00` §8), `cap_drop: [ALL]`, `no-new-privileges`, an explicit `shm_size`
+(Chromium's Docker default of 64 MB is a known crash source) and `PLAYWRIGHT_BROWSERS_PATH` so a
+non-root uid can reach browsers installed at build time. Aggressive reaping.
+
+**The browser is confined to the authorised origins** by a route handler built from the
+`AuthorisedTarget` (audit H2). The scope gate guarantees no page without a scope record — true of the
+first navigation and of nothing after it; a redirect, an SSO hop or an absolute URL in a nav step
+walks off the target while still inside an authorised context. The **rate limit** from the scope
+record is enforced by a persistent token bucket, not a per-run one (audit H4): `1 req / 30 s` inside a
+run says nothing about ten runs starting at once.
+
+A scheduled runner survives host restarts via Prefect's own persistence — never a `while true` loop.
+**Prefect persistence solves a restart, not an absent host.** Ninety consecutive daily runs need a
+machine that is on at 04:12 every night.
+
+**Decided 2026-08-29 (audit OQ2): a free always-on VM** — Oracle Cloud Always Free or Fly.io — which
+also hosts the test bench (§7). Its disk budget and retention policy are named in
+`docs/methodology.md`, and missed runs are published rather than hidden (audit B3). Three properties of
+that choice bind the container work: the free Oracle shape is `arm64`, so the pinned Playwright image
+must be built for it; the host clock is set to UTC, because 04:12 in an assumed timezone shifts the
+entire log; and free tiers may reclaim instances they judge idle, which belongs in the methodology as a
+known gap rather than arriving as a surprise in build week 6.
 
 ### 9.3 Four terminal states, no fifth
 
@@ -404,7 +509,12 @@ Record quote, URL and read-date in `docs/methodology.md`. The date is the point 
 Brief §11, plus what this design adds:
 
 - **Mutation suite** — every mutation class heals correctly.
-- **Adversarial suite** — every adversarial mutation is **refused** by the gate. *This set matters more.*
+- **Adversarial suite** — every adversarial mutation is **refused** by the gate. *This set matters more.* **Seven classes**, not one: decoy adjacent column, hidden decoy with a matching accessible name, duplicate label, value swap between same-format columns, locale flip, virtualised rows, image header. One adversarial case tests one branch of one check.
+- **Acceptance suite** — every *benign* mutation is **accepted** by the gate, with its confirmer named. **Added 2026-08-29 (audit C3):** without it a resolver that quarantines 100% of legitimate heals passes every other test here, and the headline *"zero manual selector fixes"* is only true because a human cleared the queue by hand each night. The refusal rate and the acceptance rate mean nothing apart — refusing everything scores 100% on the first and 0% on the second.
+- **End-to-end pipeline** — a clean run writes; a healed run writes, records a heal and updates the cache; a quarantined run writes nothing **and does not touch the selector cache**. That last clause is the ordering the whole design rests on (audit C2): a rejected heal that reaches the cache becomes a rung-1 hit tomorrow, records no heal, and never engages §5.7 again.
+- **Rate limit and origin allowlist** — the limit is read from the `AuthorisedTarget`, is persistent across processes, and a navigation off the authorised origin is aborted (audit H4, H2).
+- **API authentication** — no route serves evidence or extracted rows to an anonymous caller, and `actor` is never accepted from a request body (audit H3).
+- **Evidence carries no credentials** — no session cookie, CSRF token or password-field value survives into a stored snapshot (audit H6), and `CLIENT_CONFIDENTIAL` evidence cannot reach the demo plane, enforced by `bok_core.boundary.egress.guard_write` rather than a local guard.
 - **Scope gate** — unknown target refused, expired authorisation refused, rate limit enforced, **basis outside the v1 enum refused** (§4.2).
 - **Mint sites** — constructing `AuthorisedTarget` outside `scope/` raises; constructing `ValidatedExtraction` outside `validate/` raises.
 - **Import contracts** — `import-linter` in CI, including answer-key isolation.
@@ -414,7 +524,7 @@ Brief §11, plus what this design adds:
 - **Quarantine** — a failing gate never writes; promotion re-runs the gate; promotion audited.
 - **Idempotency** — replay a run, assert no duplicates; late record does not corrupt a closed partition.
 - **Data quality** — synthetic shift detected; synthetic seasonality not falsely alerted after warm-up.
-- **Degraded mode** — trivially satisfied (no models), **kept as a regression guard** against a model dependency creeping in.
+- **Degraded mode** — `test_degraded_mode_still_produces_findings` under `bok_core.testing.degraded.blackout()`, asserting this repo's floor and unit from `INTERFACE-CONTRACT.md` §5: *majority of mutation classes healed by rungs 1–4*. Trivially satisfied (no models), **kept as a regression guard** against a model dependency creeping in — and it must actually exist, which it did not before the 2026-08-29 revision (audit M3).
 - **Replay** — a stored heal replays to the same rung and element; a corrupted evidence blob is reported non-reproducible, not silently counted.
 - **E2E** — Playwright driving the UI, fixtures kept separate from the driver's own.
 - **Accessibility** — axe, zero serious/critical.
@@ -449,4 +559,11 @@ Coverage floor 75%.
 | Same-family confirmation proves nothing | cross-family requirement | §5.6 |
 | Distribution alerting cries wolf and gets muted | blocking only on heal; alerting otherwise | §5.7 |
 | Playwright in containers | pinned version, one context, hard limits, reaping | §9.2 |
-| Terms unreviewed (Q7) | scope gate narrowed to two bases; `client-authorised` requires countersigned evidence | §4.2 |
+| Terms unreviewed (Q7) | scope gate narrowed to two bases; `client-authorised` requires countersigned evidence **whose SHA-256 is recorded and re-verified at authorise time** | §4.2 |
+| **A label reword quarantines forever, stalling the log in build week 2** | third signal family, `RowKeyContinuity` (adopted, OQ3) | §5.6a |
+| **A quarantined heal poisons the selector cache and goes silent permanently** | `cache.put()` takes a `ValidatedExtraction`; there is no way to spell the write that does not first spell "the gate passed" | plan Task 17, 26A |
+| **The rung distribution, run-success rate and manual-fix count have no source** | `resolutions`, `run_attempts`, `interventions`, `deploys` ship in the day-one frozen schema | plan Task 3 |
+| **A `sensitivity` typo publishes a client portal** | derived from `basis`, not authored; redaction unconditional; publication gated on an allowlist | §4.1, §6 |
+| **The substrate does not exist yet** | day-one blocking surface narrowed to `boundary.sensitivity` + `provenance`; the rest is not needed until weeks 17–18 | plan preconditions |
+| **No host is named for a ninety-day nightly cron** | free always-on VM (OQ2), `arm64` image, UTC clock; disk budget and retention in `docs/methodology.md`; missed runs published, not hidden | §9.2 |
+| **The bench sits on a non-commercial free tier while being sold from** | bench self-hosted on the same VM (OQ4) | §7, §9.2 |
