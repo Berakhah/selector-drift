@@ -1,6 +1,6 @@
 # Selector Drift — Design
 
-**Status:** approved 2024-11-07 · **amended 2026-08-29** ([audit](../reviews/2026-08-29-plan-audit.md)) · **Phase:** build weeks 1–8 · **Capacity:** 35–40 h/week (~300 h)
+**Status:** approved 2024-11-07 · **amended 2026-08-29** ([audit](../reviews/2026-08-29-plan-audit.md)) · **sub-specs added 2026-09-26** (§3.3) · **Phase:** build weeks 1–8 · **Capacity:** 35–40 h/week (~300 h)
 **Depends on:** `../Starting_Documents/00-SHARED-FOUNDATION.md`, `../Starting_Documents/03-SELECTOR-DRIFT.md`
 **Licence:** Apache-2.0 · **Repo visibility:** public at first release (build week 8) · **Accent:** drift indigo `oklch(0.55 0.14 268)`
 
@@ -107,9 +107,22 @@ selector_drift/
   orchestrate/   Prefect 3 flows, scheduling, retries, quota accounting
   heallog/       heal events, evidence storage, redaction, diffing, replay
   api/           FastAPI
-testbench/       the mutating portal + mutation engine  (shipped artifact)
+testbench/       the mutating portal + mutation engine  (shipped artifact; Python SSR — §7)
 web/             Next.js 15 + bok-ui
 ```
+
+**Sub-specs, added 2026-09-26.** Four areas this design left thin are specified in their own
+documents, written contract-first so the UI, the published log and the fixtures share one shape:
+
+| Sub-spec | Covers | Plan tasks |
+|---|---|---|
+| [API contract and evidence bundle](2026-09-26-selector-drift-api-contract.md) | routes, read models, auth and the audit actor, errors, `derive.py`, the evidence bundle and retention, generated TS types | 3, 19, 26A, 33, 34, 34B, 40A |
+| [Web UI](2026-09-26-selector-drift-web-ui.md) | Next.js architecture, every screen, designed states, `00` §5 cross-cutting requirements, E2E fixtures | 35–39A |
+| [Test-bench portal](2026-09-26-selector-drift-testbench-portal.md) | server-rendered portal, request path, synthetic dataset, served-equals-tested test, deployment | 7, 8, 12 |
+| [`bok-ui` slice](2026-09-26-selector-drift-bok-ui-slice.md) | the minimal `bok-ui` built in `backoffice-kit`, component contracts, the contract change it implies | 34A |
+
+Where a sub-spec and this document disagree, the sub-spec is newer and wins; each disagreement is
+also corrected here.
 
 **Departure from the brief's tree:** `validate.py` and `quarantine.py` move out of `resolve/` into their own `validate/` package. A module that resolves selectors and also judges its own resolutions is one refactor away from a shortcut, and §5.6's independence argument requires the separation to be real.
 
@@ -121,15 +134,24 @@ web/             Next.js 15 + bok-ui
 | `resolve/` must not import `validate/` | The judged cannot call the judge. |
 | `validate/` may reach rungs only via the public `Rung` protocol | §5.6's independence must be structural. |
 | `heallog/` must not import `browser/` | Replay must use stored evidence, not re-fetch. |
-| `selector_drift/*` must not import `testbench/answers/*` | The answer key is unreachable from the resolver. **Without this the ninety-day log is worthless as evidence.** |
+| `selector_drift/*` must not import `testbench/answers/*` | The answer key is unreachable from the resolver. **Without this the ninety-day log is worthless as evidence.** Widened 2026-09-26 to all of `testbench.*` ([bench spec](2026-09-26-selector-drift-testbench-portal.md) §2). |
+| `selector_drift/*` may import from `bok_core` **only** the allow-listed submodules | **Amended 2026-09-26 from the Task 1 ledger.** The original contract forbade `bok_core.gateway` by name, which import-linter cannot express: with `include_external_packages` it squashes an external package to its top-level node and cannot tell `bok_core.gateway` from `bok_core.provenance`. The implemented contract forbids `bok_core` outright and allow-lists `boundary.sensitivity` and `provenance` via `ignore_imports`, adding `boundary.redact`, `boundary.egress` and `findings` when Tasks 29 and 33 need them. Strictly stronger: it blocks `gateway` and anything else not named. |
+| `api/` must not import `browser/`, `resolve/` or `orchestrate/` | The API reports on runs and never starts one ([API spec](2026-09-26-selector-drift-api-contract.md) §2). |
 
-### 3.5 What this consumes from `bok-core`
+### 3.5 What this consumes from `bok-core` and `bok-ui`
 
-`boundary/` (Sensitivity, redaction + its verification pass), `provenance/` (`Claim`), `obs/`, `findings/` (severity ladder + SARIF for quality violations).
+`boundary/` (Sensitivity, redaction + its verification pass, `egress.guard_write`), `provenance/` (`Claim`, `DomSource`), `obs/`, `findings/` (severity ladder + SARIF for quality violations).
 
 **It does not consume `gateway/`.** No lanes, no probe, no quota governor, no response cache — v1 makes zero model calls. This project can be built end to end even if `bok-core`'s gateway is unfinished or a provider vanishes mid-phase.
 
-Every extracted value is a `Claim` with `method=DETERMINISTIC` and therefore `confidence=None` — the honest encoding, which makes `ConfidenceMeter` correctly render as uncalibrated (`00` B10).
+**How it is consumed, until the packages publish (Task 1 ledger, 2026-09-26).** Neither `bok-core` nor
+`bok-ui` is on PyPI or npm. Both are hand-built as minimal slices in `backoffice-kit`
+(`bok-core-minimal`, `bok-ui-minimal`) and consumed as **absolute-path** dependencies (`uv add
+--editable`; `"file:"` in `web/package.json`). A `git+file://` dependency was tried first and hit a
+reproducible `uv` panic; a relative path breaks on worktree merge. The exit is one line per package
+when they publish. The `bok-ui` slice is specified in its [own document](2026-09-26-selector-drift-bok-ui-slice.md).
+
+Every extracted value is a `Claim` with `method=DETERMINISTIC` and therefore `confidence=None` — the honest encoding (`00` B10). **No confidence element is rendered anywhere**, not even a greyed-out `ConfidenceMeter`: there is no score in this product (§5.4), and a meter reading "uncalibrated" would imply one exists. Superseded 2026-09-26; the earlier text said `ConfidenceMeter` would render as uncalibrated.
 
 ---
 
@@ -144,12 +166,21 @@ authorising_party: <name>
 authorised_on: <the day the record is signed>   # never a future date (audit B4)
 expires_on: <authorised_on + 1 year>
 evidence_uri: null               # REQUIRED when basis == client-authorised
+evidence_sha256: null            # REQUIRED with evidence_uri; re-verified at authorise time (audit H10)
+origins: [https://bench.example] # the browser's allowlist (audit H2)
 rate_limit: { requests: 1, per_seconds: 30 }
 user_agent_contact: https://...
 first_heal_policy: auto_promote  # required | auto_promote   (see 5.8)
+warmup_runs: 5                   # bench 5, client targets 30 (5.7)
+evidence_retention_days: null    # null only for self-owned; REQUIRED for client-authorised (API spec 7.4)
 legal_review: self_drafted       # none | self_drafted | reviewed_by:<firm>
-sensitivity: SYNTHETIC           # SYNTHETIC | PUBLIC | CLIENT_CONFIDENTIAL
+# no `sensitivity:` key — it is DERIVED from basis and cannot be authored (audit R4/H7)
 ```
+
+*Corrected 2026-09-26: this example still carried an author-writable `sensitivity: SYNTHETIC` line,
+which the 2026-08-29 revision removed from `ScopeRecord` — one typo in that field would publish a
+client portal. It also lacked `origins`, `evidence_sha256` and `warmup_runs`, which the revision
+added, and `evidence_retention_days`, which the API spec adds.*
 
 ### 4.2 Two authorisation bases in v1, not three
 
@@ -338,6 +369,15 @@ Empty state reads *"Nothing quarantined"* with the count of runs that passed val
 
 Stored per heal: redacted DOM snapshot, redacted-and-verified screenshot, full `CascadeTrace`, every `Verdict`, before/after selector, before/after anchor evidence, content hashes.
 
+**Where "before" comes from — added 2026-09-26.** A heal's "before" is the page on the last
+*accepted* run, and in the first revision that page was never stored. Every run now keeps a rolling,
+redacted snapshot of its last accepted page per target; a heal copies it into a **heal bundle**
+alongside this run's capture, with a manifest of SHA-256s and the bounding box of every resolved node,
+recorded from the live page at capture time. A quarantined run never replaces the last-accepted
+snapshot — the C2 ordering rule applied to evidence. Bundle layout, the read path that refuses to
+serve a tampered file, and the retention policy that closes audit M30 are in the
+[API spec](2026-09-26-selector-drift-api-contract.md) §7.
+
 **Replay** re-runs the cascade against the *stored DOM* and asserts the same rung fires and the same element resolves. `heallog/` cannot import `browser/` (§3.4), so replay structurally uses stored evidence. A heal that fails to replay is **marked non-reproducible in the log rather than quietly counted** — B5 says an unreproducible heal is an anecdote, so the log says so.
 
 **The reuse that pays for this: the mutation regression suite and the replay path are the same code.** A mutation test is "replay the cascade against this captured DOM, assert this rung and this verdict set." Each mutation class costs one fixture, not one harness.
@@ -348,11 +388,21 @@ Stored per heal: redacted DOM snapshot, redacted-and-verified screenshot, full `
 
 ```
 testbench/
-  portal/        next.js: login - search - results table - detail - export
+  portal/        FastAPI + Jinja2, server-rendered: login - search - results - detail - export
   mutations/     one module per class, each a pure markup transform
   schedule.py    seed = f(date, target) -> the mutation set for a day
   answers/       ground truth for a seed   <- unreachable from selector_drift/ (3.4)
+  score.py       judges each bench run; the only bench module that reads the product's tables
 ```
+
+**The portal is server-rendered Python, not Next.js — decided 2026-09-26.** The audit's C7 fix routed
+Next.js-rendered HTML through a Python mutator from `middleware.ts`. That cannot work: Next middleware
+runs *before* rendering and cannot rewrite a page body, and even with the proxy reversed, Next's
+client-side hydration re-renders the mutated page back to the unmutated one in the browser — the
+very browser the resolver drives — while every HTTP-level test passes. The portal now renders with
+Jinja2 and every HTML response passes through the same `apply()` chain in the same process: *served
+equals tested* by construction, and the guarding test compares the DOM **in a browser**. Full
+specification: [test-bench spec](2026-09-26-selector-drift-testbench-portal.md).
 
 **Mutations are a runtime markup transform driven by a seeded, date-derived schedule** — not a build-time source rewrite committed to git. Deterministic and replayable from the seed alone; no git noise from ninety days of mutation commits; tests pin the seed and get the exact DOM the log saw; zero Actions minutes consumed, leaving quota for the nightly runs. Real deploy mechanics were never what is being tested — DOM change is.
 
@@ -391,6 +441,13 @@ The control arm is the half nobody else has. A resolver that heals correctly and
 
 All three day-one targets carry `SYNTHETIC`/`PUBLIC` data by construction, so the **published heal log can contain real screenshots with no redaction argument.** B4 dissolves. A consenting client portal added later is `CLIENT_CONFIDENTIAL` and contributes **counts only** — no screenshots, no DOM, ever.
 
+**Where the publisher runs — corrected 2026-09-26.** The static export is built by a weekly Prefect
+deployment **on the VM**, which is where Postgres and the evidence live, and pushed to the `gh-pages`
+branch. The plan's first draft scheduled it as a GitHub Actions workflow, which cannot reach a
+compose-only database on a private VM. Every figure it publishes comes from the same `derive.py` the
+operator UI uses ([API spec](2026-09-26-selector-drift-api-contract.md) §6), so the public log and the
+screen cannot disagree.
+
 ### 8.3 Headline shape
 
 > *"90 days. 41 UI changes across the bench, zero manual selector fixes, 2 correct quarantines — and 90 days against two production apps where heals fired only on real deploys."*
@@ -403,7 +460,7 @@ All three day-one targets carry `SYNTHETIC`/`PUBLIC` data by construction, so th
 
 ### 9.1 Storage
 
-**Postgres, compose-only, never Supabase** (§2.2 Q4): run history, heal events, selector cache, quarantine, scope records, audit log. Alembic migrations, least-privilege role, no superuser.
+**Postgres, compose-only, never Supabase** (§2.2 Q4): run history, heal events, selector cache, quarantine, scope records, audit log, and operator accounts and hashed sessions ([API spec](2026-09-26-selector-drift-api-contract.md) §3). Alembic migrations, least-privilege role, no superuser. Evidence bundles live on disk beside the lake, not in Postgres (API spec §7).
 
 **Lake:** one Parquet file per run into a partitioned tree. DuckDB is the *query* layer over it, **never a shared file written by parallel flows.** A compaction flow folds small files on a schedule.
 
@@ -486,6 +543,12 @@ Screen 2 is the expensive one and the least load-bearing: in a bespoke-integrati
 
 Light-first editorial instrument. Indigo for the heal state only. Severity and provenance state never encoded in colour alone.
 
+**Added 2026-09-26.** The architecture, every screen's designed states, the `00` §5 cross-cutting
+requirements this section did not scope (provenance rail, `cmdk` palette, print, 375px, density), and
+the E2E fixtures are in the [web UI spec](2026-09-26-selector-drift-web-ui.md). The components come
+from a minimal `bok-ui` slice built in `backoffice-kit` ([`bok-ui` spec](2026-09-26-selector-drift-bok-ui-slice.md)),
+because `bok-ui` does not exist yet now that this project runs first.
+
 ---
 
 ## 11. Provider inventory — not needed for this project
@@ -562,8 +625,12 @@ Coverage floor 75%.
 | Terms unreviewed (Q7) | scope gate narrowed to two bases; `client-authorised` requires countersigned evidence **whose SHA-256 is recorded and re-verified at authorise time** | §4.2 |
 | **A label reword quarantines forever, stalling the log in build week 2** | third signal family, `RowKeyContinuity` (adopted, OQ3) | §5.6a |
 | **A quarantined heal poisons the selector cache and goes silent permanently** | `cache.put()` takes a `ValidatedExtraction`; there is no way to spell the write that does not first spell "the gate passed" | plan Task 17, 26A |
-| **The rung distribution, run-success rate and manual-fix count have no source** | `resolutions`, `run_attempts`, `interventions`, `deploys` ship in the day-one frozen schema | plan Task 3 |
+| **The rung distribution, run-success rate and manual-fix count have no source** | `resolutions`, `run_attempts`, `interventions`, `deploys` — and, added 2026-09-26, `heartbeats`, the missed-run denominator ([API spec](2026-09-26-selector-drift-api-contract.md) §6.1) — ship in the day-one frozen schema | plan Task 3 |
 | **A `sensitivity` typo publishes a client portal** | derived from `basis`, not authored; redaction unconditional; publication gated on an allowlist | §4.1, §6 |
 | **The substrate does not exist yet** | day-one blocking surface narrowed to `boundary.sensitivity` + `provenance`; the rest is not needed until weeks 17–18 | plan preconditions |
 | **No host is named for a ninety-day nightly cron** | free always-on VM (OQ2), `arm64` image, UTC clock; disk budget and retention in `docs/methodology.md`; missed runs published, not hidden | §9.2 |
 | **The bench sits on a non-commercial free tier while being sold from** | bench self-hosted on the same VM (OQ4) | §7, §9.2 |
+| **Hydration re-renders the mutated bench back to the original in the browser**, so the log scores heals against a page the resolver never saw (found 2026-09-26) | server-rendered Python portal, engine in-process; served-equals-tested asserted on the browser DOM | §7, bench spec §1, §6.1 |
+| **The heal screen has no "before"** because the prior page was never stored | last-accepted snapshot per target, copied into a heal bundle | §6, API spec §7 |
+| **UI components do not exist** — `bok-ui` is scheduled for programme weeks 3 and 13, and this project runs first | minimal `bok-ui` slice in `backoffice-kit`, props pinned to contract §6; contract edit drafted for sign-off | §3.5, `bok-ui` spec |
+| **Aggregate figures cannot be `Claim`s** — no `Source` variant for a query over our own tables | plain figures with a method link; `QuerySource` amendment proposed, not assumed | API spec §6.2 |
