@@ -134,8 +134,15 @@ a framework's.
   5 new claims are filed, about 3 close. A real portal is not static, and the delta keeps
   `RowKeyContinuity` honest: on a benign day ~98% of keys agree, above its 0.95 threshold; after a
   decoy or swap, agreement collapses.
-- The delta is a pure function of `(day)`; `data.py` can materialise any day's dataset, so any day's
-  page is reproducible from the date alone.
+- Claims whose `Filed` date falls more than three years before the day are **archived** (dropped from
+  the result set) by the same delta. Without it, "filed within the last 3 years" and a dataset that
+  only grows cannot both hold over ninety days.
+- The delta is a pure function of `(day)`, and the mutation set is a pure function of `(day, target)`
+  **and the mutation catalogue at the commit that served the page**. Adding a mutation class changes
+  the schedule for past days too, so a day's DOM is reproducible from **the date plus the serving
+  commit**, not the date alone. The `sd-mutation-seed` meta tag records the applied mutation names; the
+  serving commit is the bench container's image tag, which Task 12's deploy records with its deploy
+  time in `docs/methodology.md`; `testbench/README.md` states the rule.
 
 ---
 
@@ -165,9 +172,12 @@ def test_the_page_a_browser_sees_is_what_the_engine_produced(bench_server, brows
     page.goto(f"{bench_server}/results")
     seen = normalise(page.evaluate("document.documentElement.outerHTML"))
     expected = normalise(render_in_browser(browser,                  # same engine, rendered locally
-                   apply_all(mutations_for(day, "testbench"), render_results(day))))
+                   mutate_html(day, render_results(day))))           # apply_all + the seed meta tag
     assert seen == expected
 ```
+
+`mutate_html` is exactly what the response hook calls: `apply_all(mutations_for(day, target), html)`
+plus the `sd-mutation-seed` tag. Comparing against `apply_all` alone would fail on the tag.
 
 It compares **the DOM after load in a real browser**, not the HTTP body. The first draft's test
 compared bodies, which is exactly the comparison hydration defeats. Both sides go through a browser so
@@ -191,7 +201,9 @@ that `VirtualisedRows`' script runs on both.
 - `test_an_unsigned_date_override_is_ignored`, `test_a_signed_date_override_is_honoured`
 - `test_the_dataset_for_a_day_is_reproducible`
 - `test_benign_daily_delta_keeps_key_agreement_above_threshold` — ≥ 0.95 across 90 consecutive days
-- `test_value_swap_is_invisible_to_cross_field_checks` — proves §4's no-relation property holds
+- `test_amount_and_reserve_have_no_arithmetic_relation` — §4's no-relation property, on the data (Task 7).
+  The markup half of `ValueSwap` is tested with the mutation (Task 11A), and the refusal by
+  `RowKeyContinuity` in the adversarial suite (Task 26), once the gate exists.
 - `test_the_bench_ships_no_javascript_of_its_own` — scans templates and static
 - `test_the_runner_identifies_itself_to_the_bench` — the bench's access log records the product's
   `User-Agent` with its contact URL (brief §3.3)
