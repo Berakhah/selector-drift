@@ -43,10 +43,18 @@ selector_drift/api/
     targets.py  runs.py  heals.py  quarantine.py  quality.py  specs.py  stats.py
 ```
 
-`api/` may import `db/`, `heallog/` (read side), `validate/quarantine.py` (promote/discard only),
-`spec/`, `scope/` (read-only loaders — never `authorise()`). It must not import `browser/`,
-`resolve/`, or `orchestrate/`: the API reports on runs, it never starts one. New import-linter
-contract `api-is-read-side`.
+`api/` may import `db/`, `heallog/` (read side), `validate/` (types and `quarantine`),
+`spec/`, `scope/` (read-only loaders — never `authorise()`), and **`resolve/trace.py` only** — for the
+plain types `Family` and `AnchorEvidence` that `views.py` re-exports. It must not import `browser/`,
+the rest of `resolve/`, `land/`, or `orchestrate/`: the API reports on runs, it never starts one.
+New import-linter contract `api-is-read-side`.
+
+**Promotion lands data, and the API may not import `land/` or `orchestrate/` — resolved by
+injection (2026-09-26).** `create_app(actions: QuarantineActions)` receives the promote/discard
+implementation built in `orchestrate/` (which may import everything); `python -m selector_drift
+serve-api` wires it. The API calls `actions.promote(run_key, actor, reason)`; the protocol lives in
+`api/`, the implementation does not. `validate.quarantine.promote()` re-runs the gate and returns the
+`ValidatedExtraction`; `orchestrate` lands it through the same `accept()` a scheduled run uses.
 
 ---
 
@@ -108,7 +116,7 @@ A non-matching parameter is `422`, never a lookup. `test_a_traversing_run_key_ca
 | `GET /quarantine` | `QuarantineView[]` | unresolved rows only; `?resolved=true` for history |
 | `POST /quarantine/{run_key}/promote` | `QuarantineView` | body `{reason: str (1–500)}`; `409` `still-invalid` carries the failing `Verdict[]` |
 | `POST /quarantine/{run_key}/discard` | `QuarantineView` | body `{reason}` |
-| `GET /quality` | `Page[FindingView]` | query `run_key` or `target` |
+| `GET /quality` | `Page[FindingView]` | query `run_key` or `target`; reads the `findings` table (§4.4) |
 | `GET /specs/{target}` | `SpecView` | raw YAML text + `validation: Verdict[]` |
 | `GET /stats` | `StatsView` | everything from `derive.py`; query `target`, `from`, `to` |
 
@@ -296,6 +304,14 @@ which `selector_drift/` may not import (design §3.4). The bench scorer (`testbe
 its per-run judgement into `audit_log` as `action="scored"`; `derive.py` counts those rows. The answer
 key stays unreachable from the product.
 
+### 4.4 A `findings` table joins the day-one schema (added 2026-09-26)
+
+Task 29's `evaluate()` returns `list[Finding]` and nothing stored them, so `GET /quality` and
+`RunDetailView.finding_count` had no column behind them — a breach of rule 1 (§1). The frozen schema
+gains `findings(id PK text, run_key FK, severity, rule, payload JSONB, at)`, indexed on `run_key`;
+`payload` is the whole `Finding` as `model_dump(mode="json")`, so the `Claim` chain it carries is
+kept. The ORM class is `FindingRow`, not `Finding`, which is `bok_core.findings.Finding`.
+
 ---
 
 ## 5. Errors — RFC 9457 `problem+json`
@@ -318,6 +334,7 @@ key stays unreachable from the product.
 | already resolved | 409 | `already-resolved` |
 | login throttle | 429 | `throttled` |
 | bundle manifest mismatch | 200 with `available=false, unavailable_reason="corrupted"` on the view; `410` on the file route | `evidence-corrupted` |
+| bundle deleted under retention (§7.4) | 200 with `available=false, unavailable_reason="expired"` on the view; `410` on the file route | `evidence-expired` |
 
 The `type` URIs are relative to the configured public base URL and resolve to anchors in
 `docs/api.md`, so a reader of the error lands where the problem type is documented. (The domain in
@@ -420,6 +437,13 @@ Rules:
   reader never sees a half-written bundle.
 - **First heal of a target has no "before".** If `last-accepted/<target>/` is empty, the bundle's
   `before` block is absent and the view reports `unavailable_reason="not_captured"`.
+- **A corrupted "before" is recorded, not copied.** If `last-accepted/<target>/` fails its own hash
+  check at heal time, the bundle is written without `before.*` and the manifest carries
+  `"before_unavailable_reason": "corrupted"`; the view reports that reason. A heal is never blocked by
+  a fault in the evidence of the run before it.
+- **Screenshots are masked at capture.** Credential inputs and every node the PII masker flags are
+  masked in the screenshot before it leaves the browser, and `capture()` fails closed when an
+  identifier sits in an element it cannot mask. Redaction of the DOM text alone cannot reach pixels.
 
 ### 7.3 Read path (`api/evidence.py`)
 
