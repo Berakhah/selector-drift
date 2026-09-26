@@ -6,10 +6,10 @@
 
 **Architecture:** A type-gated spine. Each stage returns a type the next stage structurally requires, so the two safety gates cannot be bypassed by forgetting to call them. `scope/` is the only module that can mint an `AuthorisedTarget`; `validate/` is the only module that can mint a `ValidatedExtraction`; `land.write()` accepts nothing else. A five-rung resolution cascade heals broken selectors, and a six-check gate judges every heal — including a cross-family re-resolution that catches the adjacent-column failure with no history needed.
 
-**Tech Stack:** Python 3.12+, `uv`, `ruff`, `mypy --strict`, `import-linter`, Pydantic v2, Playwright (containerised, pinned), Prefect 3, Postgres + Alembic, Parquet + DuckDB, FastAPI, Next.js 15 + `bok-ui`, `bok-core` (PyPI), pytest + hypothesis, axe-core.
+**Tech Stack:** Python 3.12+, `uv`, `ruff`, `mypy --strict`, `import-linter`, Pydantic v2, Playwright (containerised, pinned), Prefect 3, Postgres + Alembic, Parquet + DuckDB, FastAPI, Next.js 15 + `bok-ui` (minimal slice, absolute `file:` path until published), `bok-core` (minimal slice, absolute editable path until published), test bench on FastAPI + Jinja2 + `lxml`, pytest + hypothesis, axe-core.
 
-**Spec:** [`docs/superpowers/specs/2024-11-07-selector-drift-design.md`](../specs/2024-11-07-selector-drift-design.md)
-**Audit:** [`docs/superpowers/reviews/2026-08-29-plan-audit.md`](../reviews/2026-08-29-plan-audit.md) — 63 findings; revisions R1–R17 are applied below and each carries its finding id.
+**Spec:** [`docs/superpowers/specs/2024-11-07-selector-drift-design.md`](../specs/2024-11-07-selector-drift-design.md), plus four sub-specs added 2026-09-26 that the rewritten tasks implement: [API contract and evidence bundle](../specs/2026-09-26-selector-drift-api-contract.md) · [web UI](../specs/2026-09-26-selector-drift-web-ui.md) · [test-bench portal](../specs/2026-09-26-selector-drift-testbench-portal.md) · [`bok-ui` slice](../specs/2026-09-26-selector-drift-bok-ui-slice.md). Executors read the design and the sub-spec named in their task.
+**Audit:** [`docs/superpowers/reviews/2026-08-29-plan-audit.md`](../reviews/2026-08-29-plan-audit.md) — 63 findings; revisions R1–R17 are applied below and each carries its finding id. The 2026-09-26 revision is logged at the end.
 
 ## Week numbering
 
@@ -35,6 +35,16 @@ No `bok_core`, no `template/`, no deployed demos. Tasks 1–6 cannot run until t
 `testing.degraded`) is **not needed until Tasks 29/33 in weeks 17–18**. That is the slack: day one
 needs two modules, not the whole substrate.
 
+**Status of the preconditions, 2026-09-26** (from the Task 1 SDD ledger in the implementation worktree):
+
+| # | Status | How it was resolved, or what remains |
+|---|---|---|
+| P-1 | **Resolved by a ruling, not by publication** | `bok-core` is hand-built as a minimal slice in `backoffice-kit` (branch `bok-core-minimal`) and consumed as an **absolute-path editable dependency**. A `git+file://` dependency hit a reproducible `uv 0.11.21` panic (`AmbiguousAuthority`). Re-pointing at PyPI later is one line in `pyproject.toml` |
+| P-2 | **Half resolved** | The repo was hand-scaffolded instead of running `copier` (Task 1). **The real GitHub account still has to replace `<real-account>`** before Task 5 — the contact URL must resolve |
+| P-3 | **Open — blocks Task 5** | Two self-owned deployed applications for the control arm are still unnamed |
+| P-4 | **Open — blocks Task 6 Step 5** | The VM is not yet provisioned |
+| P-5 | **New, not day-one** | The `bok-ui` slice (Task 34A) must exist before Task 35. Nothing before Phase G needs any UI |
+
 ## Global Constraints
 
 - Python 3.12+, `uv` for dependencies, `ruff` for lint+format, `mypy --strict` on every module. TypeScript strict mode, no `any` without a justifying comment.
@@ -52,7 +62,11 @@ needs two modules, not the whole substrate.
 - **No `eval`, no `exec`, no `yaml.load`.** Every YAML loader is `yaml.safe_load`; every spec-supplied expression goes through the restricted evaluator from Task 21. A task spec is config, and config must never be code. (R13/H5)
 - **The browser never leaves the authorised origin.** Every request is checked against an allowlist derived from the `AuthorisedTarget`; anything else is aborted. (R8/H2)
 - **The API authenticates, and `actor` is never taken from a request body.** (R16/H3)
-- **Every model of the world that a published number depends on is a table, not a log line.** `resolutions`, `run_attempts` and `deploys` ship on day one with the rest of the frozen schema. (R5/C4)
+- **Every model of the world that a published number depends on is a table, not a log line.** `resolutions`, `run_attempts`, `deploys` and `heartbeats` ship on day one with the rest of the frozen schema. (R5/C4; `heartbeats` added 2026-09-26)
+- **`bok_core` imports are allow-listed, not deny-listed.** `tests/test_bok_core_allowlist.py` (Task 1) AST-walks `selector_drift/` and fails on any `bok_core` import outside `ALLOWED`; adding a submodule is one line. Stronger than naming `gateway`, which import-linter cannot express for an external package. (Task 1 ledger, 2026-09-26)
+- **Every computed figure comes from `selector_drift/api/derive.py`** — the operator UI and the published heal log import the same function, so they cannot disagree. (Task 34B)
+- **The test bench ships no JavaScript of its own**, and *served equals tested* is asserted on the browser DOM, never the HTTP body. (bench spec §1)
+- **Evidence is never rendered as markup.** Stored DOM is a third party's page: the API serves it sandboxed and `nosniff`, and the UI shows it as escaped text. (API spec §4.2)
 
 **Standing verification commands.** Split by tier so the gate after each task stays under a minute
 and therefore actually gets run (M26). `pytest.ini` registers the markers; every test carries exactly
@@ -172,12 +186,56 @@ type = forbidden
 source_modules = selector_drift
 forbidden_modules = testbench.answers
 
-[importlinter:contract:no-model-calls]
-name = v1 makes zero model calls
-type = forbidden
-source_modules = selector_drift
-forbidden_modules = bok_core.gateway
+# NO no-model-calls stanza here -- see "Replaced 2026-09-26" below. It is enforced by
+# tests/test_bok_core_allowlist.py instead.
 ```
+
+**Replaced 2026-09-26 (Task 1 ledger).** The first text of this contract was
+`forbidden_modules = bok_core.gateway`, and import-linter cannot express it on any version:
+import-linter 2.14 refuses a subpackage of an external package as a forbidden module, and with
+`include_external_packages` every import of an external package is recorded against its **top-level
+node**, so the graph cannot tell `bok_core.gateway` from `bok_core.provenance`. For the same reason an
+`ignore_imports` allow-list naming `bok_core.provenance.**` cannot be relied on to match anything. The
+worktree currently has the stanza commented out and deferred.
+
+The replacement does not depend on import-linter at all. It is an AST walk, and it is **strictly
+stronger** than the original — it rejects `gateway` and every other `bok_core` submodule not named:
+
+```python
+# tests/test_bok_core_allowlist.py
+import ast
+from pathlib import Path
+import pytest
+
+# One line per submodule a task legitimately needs. Task 29 adds "bok_core.findings";
+# Task 33 adds "bok_core.boundary.redact" and "bok_core.boundary.egress".
+ALLOWED = {"bok_core.boundary.sensitivity", "bok_core.provenance"}
+
+def _imports(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            found.add(node.module)
+    return {m for m in found if m == "bok_core" or m.startswith("bok_core.")}
+
+@pytest.mark.unit
+def test_selector_drift_imports_only_allow_listed_bok_core_modules() -> None:
+    offenders = {
+        f"{p}: {m}"
+        for p in Path("selector_drift").rglob("*.py")
+        for m in _imports(p)
+        if not any(m == a or m.startswith(a + ".") for a in ALLOWED)
+    }
+    assert not offenders, f"bok_core import outside the allow-list (v1 makes zero model calls): {offenders}"
+```
+
+Two further deviations from Steps 1–2 below were ruled on in the same ledger: the repo was
+hand-scaffolded rather than produced by `copier` (P-2), and `bok-core` is an absolute-path editable
+dependency rather than a PyPI install (P-1). `root_packages` must be written one per line: 2.14 splits
+list values on newlines, never on commas.
 
 - [ ] **Step 4: Write the failing test**
 
@@ -204,9 +262,10 @@ Expected: FAIL — the packages named in `.importlinter` do not exist yet.
 mkdir -p selector_drift/{db,spec,scope,credentials,browser,resolve/rungs,validate/assertions,extract,quality,land,orchestrate,heallog,api}
 mkdir -p testbench/{portal,mutations,mutations/adversarial,answers}
 # db/ was missing and Task 3 writes into it (M24).
-# testbench/portal is a Next.js app: it must NOT become a Python package, or grimp walks
-# node_modules on every lint-imports run (L8).
-for d in $(find selector_drift testbench -type d -not -path 'testbench/portal*'); do
+# testbench/portal is a Python package since 2026-09-26 (bench spec §1: server-rendered FastAPI +
+# Jinja2, not Next.js), so audit L8's exclusion no longer applies. templates/ and static/ hold no
+# Python and get no __init__.py (Task 7 creates them).
+for d in $(find selector_drift testbench -type d -not -path '*/templates*' -not -path '*/static*'); do
   touch "$d/__init__.py"
 done
 ```
@@ -431,6 +490,111 @@ git add selector_drift/scope tests/scope
 git commit -m "feat(scope): authorisation gate, fails closed, two bases only"
 ```
 
+#### ScopeRecord additions for Task 2
+
+**Two fields join `ScopeRecord`, both for the same reason as `first_heal_policy`: a value that a
+client target must never quietly lower lives on the scope record, next to the authorisation basis.**
+
+- `warmup_runs: int` — `Field(default=30, ge=1)`. The bench's record sets `5` (design §5.7, M18);
+  client targets keep the default `30`. `ge=1` because `0` means "trust a heal with no history",
+  which is the thing warm-up exists to prevent.
+- `evidence_retention_days: int | None` — `Field(default=None, ge=1)`. `None` means "kept for the
+  life of the log" and is **permitted only for `self-owned`**. For `client-authorised` a missing
+  value is a **refusal at `authorise()`, not a default** (API spec §7.4, closes M30): an unbounded
+  retention of client screenshots is exactly what `00` B7 exists to prevent, and a default would be
+  the gate silently choosing a retention policy on a client's behalf.
+
+`AuthorisedTarget` gains the same two fields, **as its last two fields with defaults**
+(`warmup_runs: int = 30`, `evidence_retention_days: int | None = None`) so that
+`test_a_forged_token_is_rejected_by_identity_not_by_type` still reaches the identity check rather
+than failing on a missing argument. `authorise()` always passes both explicitly.
+
+The refusal table in Step 3 gains one row, **after** the `evidence_sha256` row and **before** the
+`origins` row (so the existing `evidence_uri` and `evidence_sha256` tests still match first):
+
+| Refusal | Audit |
+|---|---|
+| `basis is CLIENT_AUTHORISED and evidence_retention_days is None` — reason `"evidence_retention_days is required for a client-authorised target"` | API spec §7.4, M30 |
+
+Implementation, in `gate.py` at that position:
+
+```python
+    if record.basis is Basis.CLIENT_AUTHORISED and record.evidence_retention_days is None:
+        raise ScopeRefusal("evidence_retention_days is required for a client-authorised target")
+```
+
+and the mint call gains `warmup_runs=record.warmup_runs,
+evidence_retention_days=record.evidence_retention_days`.
+
+Add to `tests/scope/test_gate.py` (the `rec()` helper is unchanged — both new fields have defaults):
+
+```python
+import hashlib
+from pydantic import ValidationError
+
+
+def _client_rec(tmp_path, **kw):
+    doc = tmp_path / "authorisation.pdf"
+    doc.write_bytes(b"countersigned")
+    return rec(basis=Basis.CLIENT_AUTHORISED, evidence_uri=doc.as_uri(),
+               evidence_sha256=hashlib.sha256(b"countersigned").hexdigest(), **kw)
+
+
+@pytest.mark.unit
+def test_client_target_without_retention_days_is_refused(tmp_path):
+    """API spec 7.4 / M30. A refusal, not a default."""
+    with pytest.raises(ScopeRefusal, match="evidence_retention_days"):
+        authorise(_client_rec(tmp_path), today=TODAY)
+
+
+@pytest.mark.unit
+def test_client_target_with_retention_days_is_authorised(tmp_path):
+    t = authorise(_client_rec(tmp_path, evidence_retention_days=90), today=TODAY)
+    assert t.evidence_retention_days == 90
+
+
+@pytest.mark.unit
+def test_self_owned_target_may_keep_evidence_for_the_life_of_the_log():
+    assert authorise(rec(), today=TODAY).evidence_retention_days is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", [0, -1])
+def test_warmup_runs_must_be_at_least_one(bad):
+    with pytest.raises(ValidationError):
+        rec(warmup_runs=bad)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", [0, -30])
+def test_retention_days_must_be_positive_when_set(bad):
+    with pytest.raises(ValidationError):
+        rec(evidence_retention_days=bad)
+
+
+@pytest.mark.unit
+def test_warmup_defaults_to_thirty_and_reaches_the_authorised_target():
+    assert rec().warmup_runs == 30
+    assert authorise(rec(warmup_runs=5), today=TODAY).warmup_runs == 5
+```
+
+Every existing test in `tests/scope/test_gate.py` also gains `@pytest.mark.unit`. Step 4's expected
+count becomes **PASS, 17 tests**.
+
+**Task 5 follow-on (same change, three YAML lines).** `scopes/testbench.yaml` gains
+`warmup_runs: 5`; the two control-arm records gain `warmup_runs: 30` explicitly (so the value is
+visible in review, not implied by a default). All three are `self-owned`, so none sets
+`evidence_retention_days`. Add to `tests/scope/test_records_load.py`:
+
+```python
+@pytest.mark.unit
+def test_only_the_bench_warms_up_fast():
+    """M18. Five runs is permitted only because the bench has an answer key."""
+    fast = {load_scope(p).target for p in Path("scopes").glob("*.yaml")
+            if load_scope(p).warmup_runs < 30}
+    assert fast == {"testbench"}
+```
+
 ---
 
 ### Task 3: The full run and heal-event schema — day one, most columns null
@@ -555,6 +719,85 @@ Expected: PASS, 2 tests.
 git add selector_drift/db alembic tests/db
 git commit -m "feat(db): full run and heal-event schema, fixed for the 90-day log"
 ```
+
+#### Schema additions for Task 3
+
+**Four tables join the frozen day-one schema, and two columns join the `scope_records` mirror.**
+Task 3 has not been implemented yet, so adding them now costs nothing, and the freeze rule cuts the
+other way for one of them: a table missing on day one is missing for ninety days.
+
+| Table | Columns | Why on day one |
+|---|---|---|
+| **`operators`** | `id` (PK), `username` (UNIQUE, text), `password_hash` (text), `created_at`, `disabled_at` (nullable) | API spec §3 (closes H3). Holds no log data; added now because it is free |
+| **`sessions`** | `token_sha256` (PK, char(64)), `operator_id` (FK `operators.id`), `created_at`, `expires_at`, `revoked_at` (nullable) | API spec §3. **The SHA-256 of the cookie, never the cookie**, so a database read does not yield a usable session |
+| **`heartbeats`** | `id` (PK), `target` (text), `scheduled_for` (timestamptz), `fired_at` (timestamptz), `run_key` (text, nullable, **no FK** — a heartbeat is written before any `runs` row exists, and a fire whose spec did not load has no run key at all). Index **`ix_heartbeats_target_scheduled_for` on `(target, scheduled_for)`** | API spec §6.1. **This one is log data**: it is the denominator of the published missed-run count. Task 6's `heartbeat()` "writes a row every scheduled fire" into a table the first draft never named |
+| **`findings`** | `id` (PK, text — `Finding.id`), `run_key` (FK `runs.run_key`), `severity` (text), `rule` (text — `properties["rule"]`), `payload` (JSONB — the whole `Finding`, `model_dump(mode="json")`), `at` (timestamptz). Index `ix_findings_run_key` | **Found 2026-09-26, not in the API spec.** Task 29's `evaluate()` returns `list[Finding]` and nothing stores them, so `GET /quality` and `RunDetailView.finding_count` would have no column behind them — a breach of API spec §1 rule 1. Flagged for sign-off with the spec |
+
+`scope_records` (the `ScopeRecord` mirror) gains **`credential_posture` (text, not null, default `'session_injection'` — the field arrives in Task 32, the column now, because the schema freezes on day one)**, **`warmup_runs` (int, not null)** and
+**`evidence_retention_days` (int, nullable)**, matching the two `ScopeRecord` fields added to Task 2
+below. The mirror stores `origins` and `rate_limit` as JSONB (`rate_limit` as
+`{"requests": int, "per_seconds": int}`) and `basis`, `first_heal_policy` as their enum string values.
+
+**Model class names later tasks rely on — declare exactly these in `selector_drift/db/models.py`:**
+`Run`, `RunAttempt`, `Resolution`, `HealEvent`, `SelectorCacheEntry`, `Quarantine` (PK `run_key`),
+`AuditLog`, `ScopeRecordRow`, `Deploy`, `Intervention`, `Operator`, `OperatorSession` (table
+`sessions` — not `Session`, which is `db.session.Session`, the sessionmaker), `Heartbeat`, `Finding`
+is **not** used as a class name (it collides with `bok_core.findings.Finding`) — the model is
+`FindingRow` (table `findings`).
+
+Add to `tests/db/test_schema.py`:
+
+```python
+EXPECTED = {"runs", "run_attempts", "resolutions", "heal_events", "selector_cache",
+            "quarantine", "audit_log", "scope_records", "deploys", "interventions",
+            "operators", "sessions", "heartbeats", "findings"}
+
+
+@pytest.mark.integration
+def test_sessions_store_a_hash_and_never_a_token_column():
+    """API spec 3. A database read must not yield a usable cookie."""
+    cols = {c["name"] for c in inspect(engine).get_columns("sessions")}
+    assert {"token_sha256", "operator_id", "created_at", "expires_at", "revoked_at"} <= cols
+    assert not {"token", "session_token", "cookie"} & cols
+    assert inspect(engine).get_pk_constraint("sessions")["constrained_columns"] == ["token_sha256"]
+
+
+@pytest.mark.integration
+def test_operators_have_a_unique_username_and_no_plaintext_password():
+    cols = {c["name"] for c in inspect(engine).get_columns("operators")}
+    assert {"id", "username", "password_hash", "created_at", "disabled_at"} <= cols
+    assert "password" not in cols
+    uniques = inspect(engine).get_unique_constraints("operators")
+    indexes = inspect(engine).get_indexes("operators")
+    assert any(u["column_names"] == ["username"] for u in uniques) or any(
+        i["column_names"] == ["username"] and i["unique"] for i in indexes)
+
+
+@pytest.mark.integration
+def test_heartbeats_exist_on_day_one_indexed_by_target_and_slot():
+    """API spec 6.1. The missed-run denominator. Missing on day one = missing for 90 days."""
+    cols = {c["name"]: c for c in inspect(engine).get_columns("heartbeats")}
+    assert {"id", "target", "scheduled_for", "fired_at", "run_key"} <= cols.keys()
+    assert cols["run_key"]["nullable"] is True
+    idx = {i["name"]: i["column_names"] for i in inspect(engine).get_indexes("heartbeats")}
+    assert idx["ix_heartbeats_target_scheduled_for"] == ["target", "scheduled_for"]
+
+
+@pytest.mark.integration
+def test_findings_are_stored_so_the_quality_screen_has_a_column_behind_it():
+    cols = {c["name"] for c in inspect(engine).get_columns("findings")}
+    assert {"id", "run_key", "severity", "rule", "payload", "at"} <= cols
+
+
+@pytest.mark.integration
+def test_the_scope_mirror_carries_warmup_and_retention():
+    cols = {c["name"]: c for c in inspect(engine).get_columns("scope_records")}
+    assert cols["warmup_runs"]["nullable"] is False
+    assert cols["evidence_retention_days"]["nullable"] is True
+```
+
+Every existing test in `tests/db/test_schema.py` also gains `@pytest.mark.integration` (one marker
+per test — they read Postgres). Step 4's expected count becomes **PASS, 11 tests**.
 
 ---
 
@@ -962,6 +1205,128 @@ git add selector_drift/orchestrate selector_drift/__main__.py tests/orchestrate 
 git commit -m "feat(orchestrate): scheduled runs writing run records — 90-day log start"
 ```
 
+#### Task 6 amendment: `heartbeat()`
+
+**`heartbeat()` writes to `heartbeats(target, scheduled_for, fired_at, run_key)` — the table the
+first draft never named (API spec §6.1).** Replace the Task 6 interface line with:
+
+- `heartbeat(target: str, scheduled_for: datetime, run_key: str | None, *, fired_at: datetime | None = None) -> int` —
+  inserts one `Heartbeat` row and returns its id. `scheduled_for` is **the cron slot**, read from
+  `prefect.runtime.flow_run.scheduled_start_time` — not the wall clock — because `missed_runs`
+  (Task 34B) matches heartbeats to the slots the cron expected. `fired_at` defaults to
+  `datetime.now(UTC)`. It is **the first statement `extraction_flow` executes**, before the spec is
+  authorised and before a browser exists, so a refused, crashed or misconfigured run still leaves a
+  heartbeat; a host that was down leaves nothing, which `missed_runs` counts as missed — the honest
+  reading (design §9.2). `run_key` is `None` only when the spec itself failed to load.
+
+Implementation, in `selector_drift/orchestrate/flows.py`:
+
+```python
+from datetime import UTC, datetime
+from pathlib import Path
+
+from prefect.runtime import flow_run
+
+from selector_drift.db.models import Heartbeat
+from selector_drift.db.session import Session
+
+
+def heartbeat(target: str, scheduled_for: datetime, run_key: str | None,
+              *, fired_at: datetime | None = None) -> int:
+    row = Heartbeat(target=target, scheduled_for=scheduled_for,
+                    fired_at=fired_at or datetime.now(UTC), run_key=run_key)
+    with Session() as s:
+        s.add(row)
+        s.commit()
+        return row.id
+
+
+def _scheduled_for() -> datetime:
+    slot = flow_run.scheduled_start_time          # pendulum DateTime, tz-aware
+    return datetime.fromisoformat(slot.isoformat()) if slot is not None else datetime.now(UTC)
+```
+
+and the first lines of `extraction_flow`:
+
+```python
+    try:
+        spec = load_spec(Path(spec_path))
+    except Exception:
+        heartbeat(Path(spec_path).stem, _scheduled_for(), None)   # spec files are named <target>.yaml
+        raise
+    key = run_key(load_scope(Path(spec.scope_ref)).target, spec.version, window_for(_scheduled_for()))
+    heartbeat(load_scope(Path(spec.scope_ref)).target, _scheduled_for(), key)
+```
+
+where `window_for(slot: datetime) -> str` returns `slot.astimezone(UTC).date().isoformat()` (M20: the
+window is the UTC date of the slot, not of the fire).
+
+Add to `tests/orchestrate/test_run_record.py`:
+
+```python
+from selector_drift.db.models import Heartbeat
+
+
+@pytest.mark.integration
+def test_every_fire_writes_a_heartbeat_even_when_refused(expired_spec):
+    key = extraction_flow(expired_spec)
+    with Session() as s:
+        hb = s.query(Heartbeat).filter_by(run_key=key).one()
+    assert hb.fired_at >= hb.scheduled_for.replace(second=0, microsecond=0)
+
+
+@pytest.mark.integration
+def test_the_heartbeat_is_written_before_authorisation(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("scope gate unreachable")
+    monkeypatch.setattr("selector_drift.orchestrate.flows.authorise", boom)
+    with pytest.raises(RuntimeError):
+        extraction_flow("specs/testbench.yaml")
+    with Session() as s:
+        assert s.query(Heartbeat).filter_by(target="testbench").count() == 1
+
+
+@pytest.mark.integration
+def test_an_unloadable_spec_still_leaves_a_heartbeat(tmp_path):
+    bad = tmp_path / "ghost.yaml"
+    bad.write_text("version: [not, an, int]")
+    with pytest.raises(Exception):
+        extraction_flow(str(bad))
+    with Session() as s:
+        hb = s.query(Heartbeat).filter_by(target="ghost").one()
+    assert hb.run_key is None
+```
+
+The three existing tests in that file gain `@pytest.mark.integration`. Step 6's expected count
+becomes **PASS, 6 tests**. `expired_spec` is the Task 6 fixture already used by
+`test_a_refused_target_never_opens_a_browser`. Each test runs against truncated tables — add to
+`tests/orchestrate/conftest.py`:
+
+```python
+import pytest
+from sqlalchemy import text
+
+from selector_drift.db.session import engine
+
+
+@pytest.fixture(autouse=True)
+def clean_tables():
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE runs, run_attempts, heartbeats RESTART IDENTITY CASCADE"))
+    yield
+```
+
+**Amended 2026-09-26.**
+- `heartbeat()` writes `heartbeats(target, scheduled_for, fired_at, run_key)` — see
+  *"Task 6 amendment: `heartbeat()`"* below.
+- **`run_key()`, `record_attempt()` and `heartbeat()` live in `selector_drift/orchestrate/run_record.py`, not `flows.py`.** Task 26A's `pipeline.py` needs them and `flows.py` imports `pipeline.py`; keeping them in `flows.py` would make the import circular. `flows.py` imports them from `run_record.py`. Add `selector_drift/orchestrate/run_record.py` to this task's Create list.
+- **`record_attempt()` is called only after `authorise()` returns.** A refused run writes a `runs` row
+  with `state="refused"` and no `run_attempts` row — which is what lets `derive.fired_without_attempt`
+  (Task 34B) tell "the scope gate refused" from "the scheduler never fired".
+- **`rung_stats()` delegates to `selector_drift.api.derive.rung_shares()`** once Task 34B exists (its
+  last step makes the change). Until then it computes from `resolutions` as written. One published
+  number, one function.
+
 ---
 
 # Phase B — The test bench (weeks 13–14)
@@ -973,45 +1338,1512 @@ A prerequisite for testing the cascade, not a week-19 afterthought. You cannot t
 ### Task 7: The portal
 
 **Files:**
-- Create: `testbench/portal/app/login/page.tsx`, `app/search/page.tsx`, `app/results/page.tsx`, `app/detail/[id]/page.tsx`, `app/export/route.ts`
-- Create: `testbench/portal/lib/data.ts` — synthetic claim rows
-- Test: `testbench/portal/e2e/portal.spec.ts`
+- Modify: `pyproject.toml`, `uv.lock` (the `testbench` dependency group, `pytest-playwright`, `lxml-stubs`)
+- Create: `testbench/portal/__init__.py`, `testbench/portal/settings.py`, `testbench/portal/data.py`, `testbench/portal/render.py`, `testbench/portal/day.py`, `testbench/portal/middleware.py`, `testbench/portal/routes.py`, `testbench/portal/app.py`
+- Create: `testbench/portal/templates/base.html`, `login.html`, `search.html`, `results.html`, `detail.html`, `error.html`
+- Create: `testbench/portal/static/portal.css`
+- Create: `tests/__init__.py` (if absent), `tests/testbench/__init__.py`, `tests/testbench/helpers.py`, `tests/testbench/conftest.py`
+- Test: `tests/testbench/test_data.py`, `tests/testbench/test_render.py`, `tests/testbench/test_day.py`, `tests/testbench/test_portal_app.py`, `tests/testbench/test_portal_e2e.py`
 
 **Interfaces:**
-- Consumes: nothing.
-- Produces: a served portal whose results table has columns `Claim Number`, `Claimant`, `Amount`, `Status`, `Filed`. `Claim Number` matches `^[A-Z]{2}\d{8}$`. **`Amount` and a decoy `Prior Amount` are deliberately similar in shape** — Task 11 exploits this.
+- Consumes: nothing. The portal imports nothing from `selector_drift/` (Task 8 locks this with a contract).
+- Produces:
+  - `testbench.portal.data`: `EPOCH: date` (2026-01-01, the dataset's origin, not a claim about when anything ran) · `COLUMNS: tuple[tuple[str, str], ...]` (six `(key, label)` pairs) · `Status` (`StrEnum`: `Open`, `Pending`, `Paid`, `Closed`) · `Claim` (frozen dataclass: `claim_number: str`, `claimant: str`, `amount: Decimal`, `reserve: Decimal`, `status: Status`, `filed: date`) · `dataset_for(day: date) -> tuple[Claim, ...]` · `display_row(claim: Claim) -> dict[str, str]` · `find_claim(day: date, claim_number: str) -> Claim | None` · `clear_cache() -> None`
+  - `testbench.portal.render`: `PAGE_SIZE = 50` · `SearchQuery` · `result_set(day: date, query: SearchQuery | None = None) -> list[Claim]` · **`render_results(day: date, page: int = 1, query: SearchQuery | None = None, *, mark_truth: bool = False) -> str`** · `render_detail(day: date, claim_number: str) -> str | None` · `render_login(error: str | None = None) -> str` · `render_search() -> str` · `render_error(status: int) -> str` · `results_csv(day: date, query: SearchQuery | None = None) -> str`
+  - `testbench.portal.day`: `utc_now() -> datetime` · `sign(day_text: str, secret: bytes) -> str` · `request_day(headers: Mapping[str, str], *, now: datetime, override_secret: bytes | None) -> date`
+  - `testbench.portal.settings.Settings` (`session_secret: str`, `override_secret: bytes | None`, `cookie_secure: bool`, `from_env(env: Mapping[str, str] | None = None) -> Settings`)
+  - `testbench.portal.middleware`: `DayMiddleware`, `AccessLogMiddleware`, `day_of(scope: Scope) -> date`, logger `testbench.access`
+  - `testbench.portal.app.create_app(*, clock: Callable[[], datetime] = utc_now) -> FastAPI` (Task 8 adds `catalogue=`)
+  - `tests.testbench.helpers`: `FIXTURE_DAY`, `CLAIM_NUMBER`, `root`, `accessible_text`, `headers`, `rows`, `cells`, `column`, `is_plausible_amount`, `normalise`, `sign_override`, `login`, `logged_in_page` — **the helpers Tasks 9–11A import; `render_fixture()` no longer exists**
 
-- [ ] **Step 1: Write the failing E2E test**
+**Why this replaces the Next.js portal (bench spec §1, decided 2026-09-26).** The first draft built the
+portal in Next.js and the audit's C7 fix proxied its rendered HTML through a Python mutator from
+`middleware.ts`. That does not work twice over: Next middleware runs *before* rendering and never sees
+a page body, and — **found 2026-09-26: hydration** — even with the proxy reversed, React re-renders the
+mutated server HTML back to the unmutated page in the browser, which is the browser our resolver
+drives, while every HTTP-level test passes. The heal log would score heals against a page nobody saw.
+The portal is now FastAPI + Jinja2, server-rendered, **no JavaScript shipped**, and Task 8 mutates every
+HTML response in the same process. It also removes L8: there is no `node_modules` for grimp to walk,
+so `testbench/portal` becomes an ordinary Python package — Task 1 Step 6's exclusion of it is obsolete.
 
-```typescript
-// testbench/portal/e2e/portal.spec.ts
-test('results table renders five columns of synthetic claims', async ({ page }) => {
-  await page.goto('/login');
-  await page.fill('#username', 'demo'); await page.fill('#password', 'demo');
-  await page.click('button[type=submit]');
-  await page.goto('/results');
-  await expect(page.getByRole('columnheader')).toHaveCount(5);
-  await expect(page.getByRole('cell').first()).toHaveText(/^[A-Z]{2}\d{8}$/);
-});
-```
+**Why six columns (bench spec §4).** `Reserve` is a second currency column of the same shape as
+`Amount` with **no arithmetic relation to it**. `ValueSwap` (Task 11A) needs two same-format columns,
+and the missing relation is deliberate: it is what makes `CrossFieldAssertion` blind to the swap, so
+only `RowKeyContinuity` (Task 22) can catch it. The first draft's base-portal `Prior Amount` column is
+gone; `Prior Amount` exists only as the decoy `DecoyColumn` injects (Task 11).
 
-- [ ] **Step 2: Run it and watch it fail**
+**Why the day is computed once, in middleware (M20, M27).** `DayMiddleware` computes the request's UTC
+day — or a validly signed override — and stores it in the ASGI scope. The route renders *that* day's
+dataset and Task 8's hook mutates with *that* day's schedule, so the dataset day and the mutation day
+cannot disagree, at midnight or under an override. The override travels as an HMAC-signed header
+because the first draft's environment-variable override was never forwarded by `curl` (M27); without a
+valid signature the header is **ignored, not rejected**, so a stranger can neither steer the public
+bench nor probe for the secret.
 
-Run: `cd testbench/portal && npx playwright test`
-Expected: FAIL — no such route.
-
-- [ ] **Step 3: Build the five pages with synthetic data**
-
-- [ ] **Step 4: Run it and make sure it passes**
-
-Run: `cd testbench/portal && npx playwright test`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 1: Add the bench's dependencies**
 
 ```bash
-git add testbench/portal
-git commit -m "feat(testbench): realistic portal with synthetic claims"
+uv add --group testbench fastapi uvicorn jinja2 itsdangerous python-multipart lxml
+uv add --dev pytest-playwright lxml-stubs
+```
+
+Then add to `pyproject.toml`, so `uv sync` and `uv run` include the group in development:
+
+```toml
+[tool.uv]
+default-groups = ["dev", "testbench"]
+```
+
+The group exists so that Task 12's image installs exactly the bench's six packages and nothing of the
+product's (`prefect`, `playwright`, `duckdb`). `fastapi` and `lxml` also sit in the main dependency
+list for the product's own use; listing them in both is deliberate. `itsdangerous` is what
+Starlette's `SessionMiddleware` signs cookies with; `python-multipart` is what FastAPI's `Form()`
+parses the login POST with; `lxml-stubs` keeps `mypy --strict testbench` honest over `lxml`.
+
+- [ ] **Step 2: Create the package markers**
+
+```bash
+mkdir -p testbench/portal/templates testbench/portal/static tests/testbench
+touch testbench/portal/__init__.py tests/testbench/__init__.py
+test -f tests/__init__.py || touch tests/__init__.py
+```
+
+- [ ] **Step 3: Write the test helpers and fixtures**
+
+```python
+# tests/testbench/helpers.py
+"""Read a results page the way the tests need to, whatever markup a mutation left behind.
+
+Header and data cells are found by element OR by ARIA role, so the same helpers read a <table> and
+the role-annotated <div> grid TableToDiv (Task 9) produces. Text is the accessible text: aria-label,
+then img alt, then text content -- which is what ImageHeader (Task 11A) needs.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import re
+from decimal import Decimal, InvalidOperation
+
+import lxml.html
+from playwright.sync_api import Browser, Page
+from starlette.testclient import TestClient
+
+from testbench.portal.day import sign
+
+FIXTURE_DAY = dt.date(2026, 9, 9)
+CLAIM_NUMBER = re.compile(r"^[A-Z]{2}\d{8}$")
+AMOUNT = re.compile(r"^\d{1,3}(,\d{3})*\.\d{2}$")
+
+
+def root(html: str) -> lxml.html.HtmlElement:
+    return lxml.html.document_fromstring(html)
+
+
+def accessible_text(el: lxml.html.HtmlElement) -> str:
+    if el.get("aria-hidden") == "true":
+        return ""
+    label = el.get("aria-label")
+    if label:
+        return label.strip()
+    if el.tag == "img":
+        return (el.get("alt") or "").strip()
+    parts = [el.text or ""]
+    for child in el:
+        if isinstance(child.tag, str):
+            parts.append(" " + accessible_text(child) + " ")
+        parts.append(child.tail or "")
+    return " ".join("".join(parts).split())
+
+
+def _elements(html: str, xpath: str) -> list[lxml.html.HtmlElement]:
+    return [e for e in root(html).xpath(xpath) if isinstance(e, lxml.html.HtmlElement)]
+
+
+def headers(html: str) -> list[str]:
+    return [accessible_text(h) for h in _elements(html, '//th | //*[@role="columnheader"]')]
+
+
+def rows(html: str) -> list[list[str]]:
+    out: list[list[str]] = []
+    for row in _elements(html, '//tr | //*[@role="row"]'):
+        found = [c for c in row.xpath('./td | ./*[@role="cell" or @role="gridcell"]')
+                 if isinstance(c, lxml.html.HtmlElement)]
+        if found:
+            out.append([accessible_text(c) for c in found])
+    return out
+
+
+def cells(html: str) -> list[str]:
+    return [value for row in rows(html) for value in row]
+
+
+def column(html: str, label: str) -> list[str]:
+    index = headers(html).index(label)
+    return [row[index] for row in rows(html)]
+
+
+def is_plausible_amount(value: str) -> bool:
+    if not AMOUNT.fullmatch(value):
+        return False
+    try:
+        amount = Decimal(value.replace(",", ""))
+    except InvalidOperation:
+        return False
+    return Decimal("100.00") <= amount <= Decimal("250000.00")
+
+
+def normalise(html: str) -> str:
+    return re.sub(r">\s+<", "><", html).strip()
+
+
+def sign_override(day: dt.date, secret: str) -> dict[str, str]:
+    text = day.isoformat()
+    return {"X-Testbench-Date": text, "X-Testbench-Signature": sign(text, secret.encode("utf-8"))}
+
+
+def login(client: TestClient) -> None:
+    response = client.post("/login", data={"username": "demo", "password": "demo"})
+    assert response.status_code == 303, response.text
+
+
+def logged_in_page(browser: Browser, base: str, *, override_day: dt.date | None = None,
+                   secret: str | None = None) -> Page:
+    """Form fields are addressed by `name`, which no mutation may rename: a real portal's UI
+    change never breaks its own login form."""
+    context = browser.new_context(base_url=base)
+    if override_day is not None:
+        if secret is None:
+            raise ValueError("a date override needs the override secret")
+        context.set_extra_http_headers(sign_override(override_day, secret))
+    page = context.new_page()
+    page.goto("/login")
+    page.locator("input[name=username]").fill("demo")
+    page.locator("input[name=password]").fill("demo")
+    page.locator("form button[type=submit]").click()
+    page.wait_for_url("**/search")
+    return page
+```
+
+```python
+# tests/testbench/conftest.py
+from __future__ import annotations
+
+import secrets
+import socket
+import threading
+import time
+from collections.abc import Callable, Iterator
+from typing import Any
+
+import pytest
+import uvicorn
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from testbench.portal.app import create_app
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _serve(app: FastAPI) -> Iterator[str]:
+    port = _free_port()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
+                                           log_level="warning", access_log=False))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 15
+    while not server.started:
+        if time.monotonic() > deadline or not thread.is_alive():
+            raise RuntimeError("bench server did not start")
+        time.sleep(0.05)
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=15)
+
+
+def _bench_env(mp: pytest.MonkeyPatch, override_secret: str) -> None:
+    # Generated per session: no secret, test or otherwise, is ever a literal in the repo.
+    mp.setenv("TESTBENCH_SESSION_SECRET", secrets.token_hex(32))
+    mp.setenv("TESTBENCH_OVERRIDE_SECRET", override_secret)
+    mp.setenv("TESTBENCH_COOKIE_SECURE", "0")        # the test server is plain http
+
+
+@pytest.fixture(scope="session")
+def override_secret() -> str:
+    return secrets.token_hex(32)
+
+
+@pytest.fixture(scope="session")
+def bench_server(override_secret: str) -> Iterator[str]:
+    with pytest.MonkeyPatch.context() as mp:
+        _bench_env(mp, override_secret)
+        app = create_app()
+    yield from _serve(app)
+
+
+@pytest.fixture
+def client_factory(monkeypatch: pytest.MonkeyPatch,
+                   override_secret: str) -> Callable[..., TestClient]:
+    _bench_env(monkeypatch, override_secret)
+
+    def make(**kwargs: Any) -> TestClient:
+        return TestClient(create_app(**kwargs), follow_redirects=False)
+
+    return make
+```
+
+- [ ] **Step 4: Write the failing tests**
+
+```python
+# tests/testbench/test_data.py
+from __future__ import annotations
+
+import datetime as dt
+import math
+import statistics
+from collections.abc import Sequence
+
+import pytest
+
+from testbench.portal import data
+from testbench.portal.data import (COLUMNS, EPOCH, FIRST_NAMES, LAST_NAMES, Claim, Status,
+                                   dataset_for)
+from tests.testbench.helpers import CLAIM_NUMBER, FIXTURE_DAY
+
+ROW_KEY_CONTINUITY_THRESHOLD = 0.95        # RowKeyContinuity's default (Task 22)
+
+
+def agreement(before: Sequence[Claim], after: Sequence[Claim], field: str) -> float:
+    old = {c.claim_number: c for c in before}
+    new = {c.claim_number: c for c in after}
+    common = old.keys() & new.keys()
+    return sum(getattr(old[k], field) == getattr(new[k], field) for k in common) / len(common)
+
+
+@pytest.mark.unit
+def test_the_base_set_is_five_hundred_synthetic_claims() -> None:
+    base = dataset_for(EPOCH)
+    assert len(base) == 500
+    assert len({c.claim_number for c in base}) == 500
+    for c in base:
+        first, last = c.claimant.split(" ")
+        assert first in FIRST_NAMES and last in LAST_NAMES
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("day", [EPOCH, FIXTURE_DAY, dt.date(2027, 3, 1)], ids=str)
+def test_every_claim_is_well_formed(day: dt.date) -> None:
+    for c in dataset_for(day):
+        assert CLAIM_NUMBER.fullmatch(c.claim_number)
+        assert data.MIN_MONEY <= c.amount <= data.MAX_MONEY
+        assert data.MIN_MONEY <= c.reserve <= data.MAX_MONEY
+        assert c.amount == c.amount.quantize(data.CENT)
+        assert c.status in Status
+        assert day - data.RETENTION <= c.filed <= day
+
+
+@pytest.mark.unit
+def test_the_dataset_for_a_day_is_reproducible() -> None:
+    """Any day's page is reproducible from the date alone (bench spec §4): from scratch and
+    by stepping from a cached earlier day, the same claims."""
+    stepped = dataset_for(FIXTURE_DAY)
+    data.clear_cache()
+    from_scratch = dataset_for(FIXTURE_DAY)
+    assert stepped == from_scratch and stepped is not from_scratch
+    data.clear_cache()
+    dataset_for(FIXTURE_DAY - dt.timedelta(days=40))
+    assert dataset_for(FIXTURE_DAY) == from_scratch
+
+
+@pytest.mark.unit
+def test_a_day_changes_the_dataset_a_little() -> None:
+    before, after = dataset_for(FIXTURE_DAY), dataset_for(FIXTURE_DAY + dt.timedelta(days=1))
+    new_keys = {c.claim_number for c in after} - {c.claim_number for c in before}
+    assert 3 <= len(new_keys) <= 7
+    assert before != after
+
+
+@pytest.mark.unit
+def test_benign_daily_delta_keeps_key_agreement_above_threshold() -> None:
+    """On a day with no mutation, RowKeyContinuity must see ~98% of shared keys agree --
+    above its 0.95 threshold -- for every field, for 90 consecutive days. Otherwise the bench's
+    own data churn would quarantine benign heals and the false-positive rate would be ours."""
+    start = dt.date(2026, 9, 1)
+    for offset in range(90):
+        day = start + dt.timedelta(days=offset)
+        before, after = dataset_for(day), dataset_for(day + dt.timedelta(days=1))
+        for key, _ in COLUMNS[1:]:
+            assert agreement(before, after, key) >= ROW_KEY_CONTINUITY_THRESHOLD, (day, key)
+
+
+@pytest.mark.unit
+def test_amount_and_reserve_have_no_arithmetic_relation() -> None:
+    """Bench spec §4: no footing rule relates the two, so a CrossFieldAssertion has nothing to
+    check and ValueSwap (Task 11A) is invisible to it by construction."""
+    claims = dataset_for(FIXTURE_DAY)
+    amounts = [float(c.amount) for c in claims]
+    reserves = [float(c.reserve) for c in claims]
+    n = len(claims)
+    assert all(c.amount != c.reserve for c in claims)
+    assert len({round(r / a, 6) for a, r in zip(amounts, reserves)}) > 0.9 * n
+    assert len({round(r - a, 2) for a, r in zip(amounts, reserves)}) > 0.9 * n
+    assert len({round(r + a, 2) for a, r in zip(amounts, reserves)}) > 0.9 * n
+    log_a = [math.log(a) for a in amounts]
+    log_r = [math.log(r) for r in reserves]
+    assert abs(statistics.correlation(log_a, log_r)) < 0.15
+
+
+@pytest.mark.unit
+def test_days_before_the_epoch_are_refused() -> None:
+    with pytest.raises(ValueError, match="begins on"):
+        dataset_for(EPOCH - dt.timedelta(days=1))
+```
+
+```python
+# tests/testbench/test_render.py
+from __future__ import annotations
+
+import math
+import re
+from pathlib import Path
+
+import pytest
+
+from testbench.portal.data import COLUMNS
+from testbench.portal.render import (PAGE_SIZE, render_error, render_login, render_results,
+                                     render_search, result_set)
+from tests.testbench.helpers import CLAIM_NUMBER, FIXTURE_DAY, headers, root, rows
+
+PORTAL = Path(__file__).resolve().parents[2] / "testbench" / "portal"
+
+
+@pytest.mark.unit
+def test_results_page_has_six_headers_in_order() -> None:
+    assert headers(render_results(FIXTURE_DAY)) == [label for _, label in COLUMNS]
+
+
+@pytest.mark.unit
+def test_results_page_serves_fifty_rows_and_numbered_pagination() -> None:
+    html = render_results(FIXTURE_DAY)
+    first = rows(html)
+    assert len(first) == PAGE_SIZE
+    assert all(CLAIM_NUMBER.fullmatch(r[0]) for r in first)
+    pages = math.ceil(len(result_set(FIXTURE_DAY)) / PAGE_SIZE)
+    assert len(root(html).xpath('//nav[@aria-label="Pagination"]//li')) == pages
+    second = rows(render_results(FIXTURE_DAY, page=2))
+    assert len(second) == PAGE_SIZE and second != first
+
+
+@pytest.mark.unit
+def test_the_truth_marker_appears_only_when_asked_for() -> None:
+    """Task 8's answer key renders a marked copy to locate the true cells. The served page never
+    carries the marker -- the resolver must not be able to key on the answer."""
+    assert "data-sd-truth" not in render_results(FIXTURE_DAY)
+    marked = root(render_results(FIXTURE_DAY, mark_truth=True))
+    for key, _ in COLUMNS:
+        assert len(marked.xpath("//*[@data-sd-truth=$k]", k=key)) == PAGE_SIZE
+
+
+@pytest.mark.unit
+def test_the_bench_ships_no_javascript_of_its_own() -> None:
+    """Bench spec §3.2: the only script that can appear on a bench page is one a mutation
+    injects (VirtualisedRows), so a mutation's effect is always the engine's."""
+    files = [p for p in [*PORTAL.glob("templates/*"), *PORTAL.glob("static/**/*")] if p.is_file()]
+    assert files
+    assert not [p for p in files if p.suffix in {".js", ".mjs", ".ts", ".tsx", ".jsx"}]
+    rendered = [render_results(FIXTURE_DAY), render_login(), render_search(), render_error(404)]
+    texts = [p.read_text(encoding="utf-8").lower() for p in files] + [r.lower() for r in rendered]
+    for text in texts:
+        assert "<script" not in text
+        assert "javascript:" not in text
+        assert not re.search(r"\son[a-z]+\s*=", text)
+```
+
+```python
+# tests/testbench/test_day.py
+from __future__ import annotations
+
+import datetime as dt
+import secrets
+
+import pytest
+from starlette.datastructures import Headers
+
+from testbench.portal.day import request_day, sign
+
+SECRET = secrets.token_bytes(32)
+NOW = dt.datetime(2026, 9, 9, 12, 0, tzinfo=dt.UTC)
+
+
+def signed(day_text: str, secret: bytes = SECRET, *, for_text: str | None = None) -> Headers:
+    return Headers({"X-Testbench-Date": day_text,
+                    "X-Testbench-Signature": sign(for_text or day_text, secret)})
+
+
+@pytest.mark.unit
+def test_the_day_is_utc_not_local() -> None:
+    """M20. 23:30 on 9 Sep in UTC-5 is 04:30 on 10 Sep in UTC. The seed, the run window and the
+    scope expiry all use the UTC calendar; a local-time bench would shift its seed by a day."""
+    utc_minus_5 = dt.timezone(dt.timedelta(hours=-5))
+    now = dt.datetime(2026, 9, 9, 23, 30, tzinfo=utc_minus_5)
+    assert request_day(Headers(), now=now, override_secret=None) == dt.date(2026, 9, 10)
+
+
+@pytest.mark.unit
+def test_a_naive_clock_is_refused() -> None:
+    with pytest.raises(ValueError, match="aware"):
+        request_day(Headers(), now=dt.datetime(2026, 9, 9, 12, 0), override_secret=None)
+
+
+@pytest.mark.unit
+def test_an_unsigned_date_override_is_ignored() -> None:
+    headers = Headers({"X-Testbench-Date": "2026-09-01"})
+    assert request_day(headers, now=NOW, override_secret=SECRET) == NOW.date()
+
+
+@pytest.mark.unit
+def test_a_signed_date_override_is_honoured() -> None:
+    assert request_day(signed("2026-09-01"), now=NOW, override_secret=SECRET) == dt.date(2026, 9, 1)
+
+
+@pytest.mark.unit
+def test_an_upper_case_signature_is_honoured() -> None:
+    h = Headers({"X-Testbench-Date": "2026-09-01",
+                 "X-Testbench-Signature": sign("2026-09-01", SECRET).upper()})
+    assert request_day(h, now=NOW, override_secret=SECRET) == dt.date(2026, 9, 1)
+
+
+@pytest.mark.unit
+def test_a_signature_for_another_date_is_ignored() -> None:
+    h = signed("2026-09-01", for_text="2026-09-02")
+    assert request_day(h, now=NOW, override_secret=SECRET) == NOW.date()
+
+
+@pytest.mark.unit
+def test_a_signature_made_with_another_secret_is_ignored() -> None:
+    h = signed("2026-09-01", secrets.token_bytes(32))
+    assert request_day(h, now=NOW, override_secret=SECRET) == NOW.date()
+
+
+@pytest.mark.unit
+def test_the_override_is_off_when_no_secret_is_configured() -> None:
+    assert request_day(signed("2026-09-01"), now=NOW, override_secret=None) == NOW.date()
+
+
+@pytest.mark.unit
+def test_an_override_before_the_dataset_epoch_is_ignored() -> None:
+    assert request_day(signed("2025-12-31"), now=NOW, override_secret=SECRET) == NOW.date()
+
+
+@pytest.mark.unit
+def test_a_malformed_override_is_ignored_even_when_signed() -> None:
+    assert request_day(signed("2026-9-1"), now=NOW, override_secret=SECRET) == NOW.date()
+```
+
+```python
+# tests/testbench/test_portal_app.py
+from __future__ import annotations
+
+import datetime as dt
+import logging
+from collections.abc import Callable
+
+import pytest
+from starlette.testclient import TestClient
+
+from testbench.portal.render import render_results
+from testbench.portal.settings import Settings
+from tests.testbench.helpers import login, rows, sign_override
+
+NOW = dt.datetime(2026, 9, 9, 12, 0, tzinfo=dt.UTC)
+Factory = Callable[..., TestClient]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/", "/search", "/results", "/claims/AB12345678", "/export.csv"])
+def test_unauthenticated_requests_redirect_to_login(client_factory: Factory, path: str) -> None:
+    response = client_factory().get(path)
+    assert response.status_code == 302 and response.headers["location"] == "/login"
+
+
+@pytest.mark.unit
+def test_login_and_healthz_are_public(client_factory: Factory) -> None:
+    client = client_factory()
+    assert client.get("/login").status_code == 200
+    health = client.get("/healthz")
+    assert health.status_code == 200 and health.text == "ok"
+
+
+@pytest.mark.unit
+def test_wrong_password_is_refused(client_factory: Factory) -> None:
+    client = client_factory()
+    response = client.post("/login", data={"username": "demo", "password": "nope"})
+    assert response.status_code == 401 and "Unknown username or password" in response.text
+    assert client.get("/results").status_code == 302
+
+
+@pytest.mark.unit
+def test_results_render_the_request_days_dataset(client_factory: Factory) -> None:
+    client = client_factory(clock=lambda: NOW)
+    login(client)
+    response = client.get("/results")
+    assert response.status_code == 200
+    assert rows(response.text) == rows(render_results(NOW.date()))
+    assert "data-sd-truth" not in response.text
+
+
+@pytest.mark.unit
+def test_the_served_day_is_utc_not_local(client_factory: Factory) -> None:
+    utc_minus_5 = dt.timezone(dt.timedelta(hours=-5))
+    client = client_factory(clock=lambda: dt.datetime(2026, 9, 9, 23, 30, tzinfo=utc_minus_5))
+    login(client)
+    served = rows(client.get("/results").text)
+    assert served == rows(render_results(dt.date(2026, 9, 10)))
+    assert served != rows(render_results(dt.date(2026, 9, 9)))
+
+
+@pytest.mark.unit
+def test_a_signed_override_steers_the_served_dataset(client_factory: Factory,
+                                                     override_secret: str) -> None:
+    client = client_factory(clock=lambda: NOW)
+    login(client)
+    other = dt.date(2026, 9, 1)
+    signed = client.get("/results", headers=sign_override(other, override_secret))
+    unsigned = client.get("/results", headers={"X-Testbench-Date": other.isoformat()})
+    assert rows(signed.text) == rows(render_results(other))
+    assert rows(unsigned.text) == rows(render_results(NOW.date()))
+
+
+@pytest.mark.unit
+def test_an_unknown_claim_is_an_html_404(client_factory: Factory) -> None:
+    client = client_factory(clock=lambda: NOW)
+    login(client)
+    response = client.get("/claims/not-a-claim")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("text/html")
+
+
+@pytest.mark.unit
+def test_the_access_log_records_the_user_agent(client_factory: Factory,
+                                               caplog: pytest.LogCaptureFixture) -> None:
+    """Brief §3.3: the runner identifies itself with a contact URL. The bench is where that
+    claim is checked, so the bench must record it (Task 12 proves it end to end)."""
+    caplog.set_level(logging.INFO, logger="testbench.access")
+    agent = "selector-drift/1 (+https://example.invalid/contact)"
+    client_factory().get("/healthz", headers={"User-Agent": agent})
+    assert any(getattr(r, "user_agent", None) == agent and getattr(r, "http_path", None) == "/healthz"
+               for r in caplog.records if r.name == "testbench.access")
+
+
+@pytest.mark.unit
+def test_without_a_configured_secret_each_process_gets_a_random_one() -> None:
+    """`docker compose up` from `.env.example` must boot, and no constant may stand in for a
+    secret: an unset session secret becomes a per-process random one; an unset override secret
+    switches the override off."""
+    a, b = Settings.from_env({}), Settings.from_env({})
+    assert a.session_secret != b.session_secret and len(a.session_secret) >= 64
+    assert a.override_secret is None and a.cookie_secure is True
+```
+
+```python
+# tests/testbench/test_portal_e2e.py
+from __future__ import annotations
+
+import csv
+import io
+import re
+
+import pytest
+from playwright.sync_api import Browser, expect
+
+from testbench.portal.data import COLUMNS
+from tests.testbench.helpers import CLAIM_NUMBER, logged_in_page
+
+LABELS = [label for _, label in COLUMNS]
+
+
+@pytest.mark.e2e
+def test_login_is_required_for_results(browser: Browser, bench_server: str) -> None:
+    context = browser.new_context(base_url=bench_server)
+    page = context.new_page()
+    page.goto("/results")
+    expect(page).to_have_url(re.compile(r"/login$"))
+    context.close()
+
+
+@pytest.mark.e2e
+def test_results_table_has_six_columns_of_synthetic_claims(browser: Browser,
+                                                           bench_server: str) -> None:
+    page = logged_in_page(browser, bench_server)
+    page.goto("/results")
+    expect(page.get_by_role("columnheader")).to_have_count(6)
+    expect(page.get_by_role("cell").first).to_have_text(CLAIM_NUMBER)
+    page.context.close()
+
+
+@pytest.mark.e2e
+def test_pagination_serves_fifty_rows_per_page(browser: Browser, bench_server: str) -> None:
+    page = logged_in_page(browser, bench_server)
+    page.goto("/results")
+    body_rows = page.locator("table tbody tr")
+    expect(body_rows).to_have_count(50)
+    first_row = body_rows.first.inner_text()
+    page.get_by_role("navigation", name="Pagination").get_by_role("link", name="2", exact=True).click()
+    expect(page).to_have_url(re.compile(r"page=2"))
+    expect(body_rows).to_have_count(50)
+    assert body_rows.first.inner_text() != first_row
+    page.context.close()
+
+
+@pytest.mark.e2e
+def test_detail_page_labels_every_value(browser: Browser, bench_server: str) -> None:
+    page = logged_in_page(browser, bench_server)
+    page.goto("/results")
+    number = page.get_by_role("cell").first.inner_text().strip()
+    page.get_by_role("link", name=number, exact=True).click()
+    labels = [t.strip() for t in page.locator("dl.claim-detail dt").all_inner_texts()]
+    values = [t.strip() for t in page.locator("dl.claim-detail dd").all_inner_texts()]
+    assert labels == LABELS
+    assert all(values) and values[0] == number
+    page.context.close()
+
+
+@pytest.mark.e2e
+def test_export_csv_matches_the_results_page(browser: Browser, bench_server: str) -> None:
+    page = logged_in_page(browser, bench_server)
+    page.goto("/results")
+    table = [[c.strip() for c in row.locator("td").all_inner_texts()]
+             for row in page.locator("table tbody tr").all()]
+    response = page.request.get("/export.csv")
+    assert response.ok and response.headers["content-type"].startswith("text/csv")
+    exported = list(csv.reader(io.StringIO(response.text())))
+    assert exported[0] == LABELS
+    assert exported[1:51] == table
+    page.context.close()
+```
+
+- [ ] **Step 5: Run them and watch them fail**
+
+Run: `uv run pytest tests/testbench -v`
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'testbench.portal.day'` (imported by `helpers.py`).
+
+- [ ] **Step 6: Implement the settings, the dataset and the request day**
+
+```python
+# testbench/portal/settings.py
+from __future__ import annotations
+
+import os
+import secrets
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class Settings:
+    session_secret: str
+    override_secret: bytes | None
+    cookie_secure: bool
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
+        """Secrets come from the environment only (the VM's `.env`), never from the repo.
+
+        An unset session secret becomes a random per-process value: sessions then do not survive
+        a restart, which is harmless for a demo bench and never weak. An unset override secret
+        disables the date override entirely.
+        """
+        source = os.environ if env is None else env
+        session = source.get("TESTBENCH_SESSION_SECRET", "")
+        override = source.get("TESTBENCH_OVERRIDE_SECRET", "")
+        return cls(
+            session_secret=session or secrets.token_hex(32),
+            override_secret=override.encode("utf-8") if override else None,
+            cookie_secure=source.get("TESTBENCH_COOKIE_SECURE", "1") != "0",
+        )
+```
+
+```python
+# testbench/portal/data.py
+"""The synthetic claims dataset and its daily delta (bench spec §4).
+
+Everything here is a pure function of the date. No real person's data exists at any point:
+claimants are drawn from two fixed lists of obviously synthetic words.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import math
+import random
+import string
+from collections.abc import Container
+from dataclasses import dataclass, replace
+from decimal import Decimal
+from enum import StrEnum
+
+EPOCH = dt.date(2026, 1, 1)          # the dataset's origin -- not a claim about when anything ran
+BASE_SIZE = 500
+BASE_SEED = 0
+RETENTION = dt.timedelta(days=3 * 365)
+CHANGE_RATE = 0.02
+CENT = Decimal("0.01")
+MIN_MONEY = Decimal("100.00")
+MAX_MONEY = Decimal("250000.00")
+
+COLUMNS: tuple[tuple[str, str], ...] = (
+    ("claim_number", "Claim Number"),
+    ("claimant", "Claimant"),
+    ("amount", "Amount"),
+    ("reserve", "Reserve"),
+    ("status", "Status"),
+    ("filed", "Filed"),
+)
+
+FIRST_NAMES = ("Ada", "Bram", "Cleo", "Dov", "Esme", "Finn", "Gus", "Hana", "Ivo", "Juno", "Kai", "Lea")
+LAST_NAMES = ("Placeholder", "Fixture", "Synthetic", "Mockley", "Stubbs", "Testwell", "Dummett",
+              "Sampleton")
+
+
+class Status(StrEnum):
+    OPEN = "Open"
+    PENDING = "Pending"
+    PAID = "Paid"
+    CLOSED = "Closed"
+
+
+_NEXT_STATUS: dict[Status, Status] = {
+    Status.OPEN: Status.PENDING,
+    Status.PENDING: Status.PAID,
+    Status.PAID: Status.CLOSED,
+}
+_BASE_STATUS_WEIGHTS = (35, 25, 20, 20)
+
+
+@dataclass(frozen=True, slots=True)
+class Claim:
+    claim_number: str
+    claimant: str
+    amount: Decimal
+    reserve: Decimal
+    status: Status
+    filed: dt.date
+
+
+def _seed(text: str) -> int:
+    return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
+
+
+def _clamp(value: Decimal) -> Decimal:
+    return min(max(value, MIN_MONEY), MAX_MONEY)
+
+
+def _money(rng: random.Random) -> Decimal:
+    """Log-uniform over [100.00, 250,000.00]: most claims small, a few large. Amount and Reserve
+    are two independent draws -- no footing rule relates them (bench spec §4)."""
+    value = math.exp(rng.uniform(math.log(float(MIN_MONEY)), math.log(float(MAX_MONEY))))
+    return _clamp(Decimal(repr(value)).quantize(CENT))
+
+
+def _nudge(amount: Decimal, rng: random.Random) -> Decimal:
+    moved = _clamp((amount * Decimal(repr(rng.uniform(0.85, 1.15)))).quantize(CENT))
+    if moved == amount:
+        moved = amount - Decimal("1.00") if amount > MIN_MONEY else amount + Decimal("1.00")
+    return moved
+
+
+def _claim_number(rng: random.Random, taken: Container[str]) -> str:
+    while True:
+        number = "".join(rng.choices(string.ascii_uppercase, k=2)) + f"{rng.randrange(10**8):08d}"
+        if number not in taken:
+            return number
+
+
+def _new_claim(rng: random.Random, *, filed: dt.date, status: Status,
+               taken: Container[str]) -> Claim:
+    return Claim(
+        claim_number=_claim_number(rng, taken),
+        claimant=f"{rng.choice(FIRST_NAMES)} {rng.choice(LAST_NAMES)}",
+        amount=_money(rng),
+        reserve=_money(rng),
+        status=status,
+        filed=filed,
+    )
+
+
+def _display_order(claim: Claim) -> tuple[int, str]:
+    return (-claim.filed.toordinal(), claim.claim_number)      # newest first, like a real portal
+
+
+def _base_set() -> tuple[Claim, ...]:
+    rng = random.Random(BASE_SEED)
+    claims: dict[str, Claim] = {}
+    statuses = list(Status)
+    while len(claims) < BASE_SIZE:
+        filed = EPOCH - dt.timedelta(days=rng.randrange(RETENTION.days))
+        status = rng.choices(statuses, weights=_BASE_STATUS_WEIGHTS)[0]
+        claim = _new_claim(rng, filed=filed, status=status, taken=claims)
+        claims[claim.claim_number] = claim
+    return tuple(sorted(claims.values(), key=_display_order))
+
+
+def _apply_delta(claims: tuple[Claim, ...], day: dt.date) -> tuple[Claim, ...]:
+    """About 2% of claims change Amount or Status, about 3 close, about 5 are filed, and claims
+    older than three years are archived. Seeded from the date alone."""
+    rng = random.Random(_seed(f"delta:{day.isoformat()}"))
+    by_key = {c.claim_number: c for c in claims}
+
+    live = sorted(k for k, c in by_key.items() if c.status is not Status.CLOSED)
+    for key in rng.sample(live, min(len(live), max(1, round(len(by_key) * CHANGE_RATE)))):
+        claim = by_key[key]
+        if rng.random() < 0.5:
+            by_key[key] = replace(claim, amount=_nudge(claim.amount, rng))
+        else:
+            by_key[key] = replace(claim, status=_NEXT_STATUS[claim.status])
+
+    still_live = sorted(k for k, c in by_key.items() if c.status is not Status.CLOSED)
+    for key in rng.sample(still_live, min(len(still_live), rng.randint(2, 4))):
+        by_key[key] = replace(by_key[key], status=Status.CLOSED)
+
+    for _ in range(rng.randint(3, 7)):
+        claim = _new_claim(rng, filed=day, status=Status.OPEN, taken=by_key)
+        by_key[claim.claim_number] = claim
+
+    horizon = day - RETENTION
+    return tuple(sorted((c for c in by_key.values() if c.filed >= horizon), key=_display_order))
+
+
+_MEMO: dict[dt.date, tuple[Claim, ...]] = {}
+
+
+def dataset_for(day: dt.date) -> tuple[Claim, ...]:
+    """The claims as they stand on `day`, in display order. Stepped forward from the nearest
+    day already materialised; deterministic whichever day it steps from."""
+    if day < EPOCH:
+        raise ValueError(f"the dataset begins on {EPOCH.isoformat()}; {day.isoformat()} is before it")
+    cached = _MEMO.get(day)
+    if cached is not None:
+        return cached
+    earlier = [d for d in _MEMO if d < day]
+    if earlier:
+        current = max(earlier)
+        claims = _MEMO[current]
+    else:
+        current, claims = EPOCH, _base_set()
+        _MEMO[EPOCH] = claims
+    while current < day:
+        current += dt.timedelta(days=1)
+        claims = _apply_delta(claims, current)
+        _MEMO[current] = claims
+    return claims
+
+
+def clear_cache() -> None:
+    _MEMO.clear()
+
+
+def find_claim(day: dt.date, claim_number: str) -> Claim | None:
+    return next((c for c in dataset_for(day) if c.claim_number == claim_number), None)
+
+
+def display_row(claim: Claim) -> dict[str, str]:
+    return {
+        "claim_number": claim.claim_number,
+        "claimant": claim.claimant,
+        "amount": f"{claim.amount:,.2f}",
+        "reserve": f"{claim.reserve:,.2f}",
+        "status": claim.status.value,
+        "filed": claim.filed.isoformat(),
+    }
+```
+
+```python
+# testbench/portal/day.py
+"""Which day a request is served as: the UTC date (M20), or a validly signed override (M27)."""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import hmac
+import re
+from collections.abc import Mapping
+
+from testbench.portal.data import EPOCH
+
+OVERRIDE_DATE_HEADER = "x-testbench-date"
+OVERRIDE_SIGNATURE_HEADER = "x-testbench-signature"
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.UTC)
+
+
+def sign(day_text: str, secret: bytes) -> str:
+    """hex(hmac_sha256(secret, day_text)) -- what `openssl dgst -sha256 -hmac` prints."""
+    return hmac.new(secret, day_text.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def request_day(headers: Mapping[str, str], *, now: dt.datetime,
+                override_secret: bytes | None) -> dt.date:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("request_day needs an aware datetime; a naive one is local time (M20)")
+    override = _signed_override(headers, override_secret)
+    return override if override is not None else now.astimezone(dt.UTC).date()
+
+
+def _signed_override(headers: Mapping[str, str], secret: bytes | None) -> dt.date | None:
+    """Ignored -- never rejected -- unless every check passes, so the public bench gives a
+    stranger nothing to steer and nothing to probe."""
+    if not secret:
+        return None
+    raw = headers.get(OVERRIDE_DATE_HEADER)
+    signature = headers.get(OVERRIDE_SIGNATURE_HEADER)
+    if raw is None or signature is None or not (raw.isascii() and signature.isascii()):
+        return None
+    if not _ISO_DAY.fullmatch(raw):
+        return None
+    if not hmac.compare_digest(sign(raw, secret), signature.strip().lower()):
+        return None
+    try:
+        day = dt.date.fromisoformat(raw)
+    except ValueError:
+        return None
+    return day if day >= EPOCH else None
+```
+
+- [ ] **Step 7: Implement rendering and the templates**
+
+```python
+# testbench/portal/render.py
+"""Pure page renderers: (day, inputs) -> HTML. The routes call exactly these, and so do the tests
+of Tasks 8-11A -- one rendering path, so the "before" page a test mutates is the page the bench
+serves."""
+from __future__ import annotations
+
+import csv
+import datetime as dt
+import io
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlencode
+
+from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+
+from testbench.portal.data import COLUMNS, Claim, Status, dataset_for, display_row, find_claim
+
+PAGE_SIZE = 50
+TEMPLATES = Path(__file__).parent / "templates"
+_ENV = Environment(
+    loader=FileSystemLoader(TEMPLATES),
+    autoescape=select_autoescape(["html"]),
+    undefined=StrictUndefined,
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+_ERROR_TEXT = {404: "Not found", 405: "Method not allowed"}
+
+
+def _status(text: str) -> Status | None:
+    try:
+        return Status(text)
+    except ValueError:
+        return None
+
+
+def _day(text: str) -> dt.date | None:
+    try:
+        return dt.date.fromisoformat(text) if text else None
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class SearchQuery:
+    claim_number: str = ""
+    claimant: str = ""
+    status: Status | None = None
+    filed_from: dt.date | None = None
+    filed_to: dt.date | None = None
+
+    @classmethod
+    def parse(cls, *, claim_number: str = "", claimant: str = "", status: str = "",
+              filed_from: str = "", filed_to: str = "") -> SearchQuery:
+        return cls(claim_number.strip().upper(), claimant.strip(), _status(status),
+                   _day(filed_from), _day(filed_to))
+
+    def matches(self, claim: Claim) -> bool:
+        return ((not self.claim_number or claim.claim_number.startswith(self.claim_number))
+                and (not self.claimant or self.claimant.casefold() in claim.claimant.casefold())
+                and (self.status is None or claim.status is self.status)
+                and (self.filed_from is None or claim.filed >= self.filed_from)
+                and (self.filed_to is None or claim.filed <= self.filed_to))
+
+    def params(self) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        if self.claim_number:
+            out.append(("claim_number", self.claim_number))
+        if self.claimant:
+            out.append(("claimant", self.claimant))
+        if self.status is not None:
+            out.append(("status", self.status.value))
+        if self.filed_from is not None:
+            out.append(("filed_from", self.filed_from.isoformat()))
+        if self.filed_to is not None:
+            out.append(("filed_to", self.filed_to.isoformat()))
+        return out
+
+
+def result_set(day: dt.date, query: SearchQuery | None = None) -> list[Claim]:
+    q = query or SearchQuery()
+    return [c for c in dataset_for(day) if q.matches(c)]
+
+
+def render_results(day: dt.date, page: int = 1, query: SearchQuery | None = None, *,
+                   mark_truth: bool = False) -> str:
+    """`mark_truth` adds data-sd-truth="<field>" to every data cell. Only Task 8's answer key
+    passes it; no route does."""
+    q = query or SearchQuery()
+    found = result_set(day, q)
+    pages = max(1, math.ceil(len(found) / PAGE_SIZE))
+    page = min(max(page, 1), pages)
+    window = found[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
+    links = [(n, "/results?" + urlencode([*q.params(), ("page", str(n))])) for n in range(1, pages + 1)]
+    return _ENV.get_template("results.html").render(
+        signed_in=True, columns=COLUMNS, rows=[display_row(c) for c in window],
+        total=len(found), page=page, pages=pages, links=links, mark_truth=mark_truth,
+        export_href="/export.csv?" + urlencode(q.params()),
+    )
+
+
+def render_detail(day: dt.date, claim_number: str) -> str | None:
+    claim = find_claim(day, claim_number)
+    if claim is None:
+        return None
+    return _ENV.get_template("detail.html").render(signed_in=True, columns=COLUMNS,
+                                                   row=display_row(claim))
+
+
+def render_login(error: str | None = None) -> str:
+    return _ENV.get_template("login.html").render(signed_in=False, error=error)
+
+
+def render_search() -> str:
+    return _ENV.get_template("search.html").render(signed_in=True, statuses=[s.value for s in Status])
+
+
+def render_error(status: int) -> str:
+    return _ENV.get_template("error.html").render(
+        signed_in=False, status=status, message=_ERROR_TEXT.get(status, "Something went wrong"))
+
+
+def results_csv(day: dt.date, query: SearchQuery | None = None) -> str:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow([label for _, label in COLUMNS])
+    for claim in result_set(day, query):
+        row = display_row(claim)
+        writer.writerow([row[key] for key, _ in COLUMNS])
+    return buffer.getvalue()
+```
+
+```html
+<!-- testbench/portal/templates/base.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Claims{% endblock %} · Claims Portal (synthetic test bench)</title>
+  <link rel="stylesheet" href="/static/portal.css">
+</head>
+<body>
+  <header class="site-header">
+    <span class="brand">Claims Portal</span>
+    {% if signed_in %}
+    <nav aria-label="Main"><a href="/search">Search</a><a href="/results">Results</a><a href="/logout">Sign out</a></nav>
+    {% endif %}
+  </header>
+  <main id="main">
+{% block content %}{% endblock %}
+  </main>
+  <footer class="site-footer">Synthetic data. Every name and number on this site is generated.</footer>
+</body>
+</html>
+```
+
+```html
+<!-- testbench/portal/templates/login.html -->
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block content %}
+<h1>Sign in</h1>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<form class="login" method="post" action="/login">
+  <label>Username <input name="username" type="text" autocomplete="username" required></label>
+  <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+  <button type="submit">Sign in</button>
+</form>
+<p class="hint">Demo account: <code>demo</code> / <code>demo</code>.</p>
+{% endblock %}
+```
+
+```html
+<!-- testbench/portal/templates/search.html -->
+{% extends "base.html" %}
+{% block title %}Search{% endblock %}
+{% block content %}
+<h1>Search claims</h1>
+<form class="search" method="get" action="/results">
+  <label>Claim number <input name="claim_number" type="text" autocomplete="off"></label>
+  <label>Claimant <input name="claimant" type="text" autocomplete="off"></label>
+  <label>Status
+    <select name="status">
+      <option value="">Any</option>
+      {% for s in statuses %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Filed from <input name="filed_from" type="date"></label>
+  <label>Filed to <input name="filed_to" type="date"></label>
+  <button type="submit">Search</button>
+</form>
+{% endblock %}
+```
+
+```html
+<!-- testbench/portal/templates/results.html -->
+{% extends "base.html" %}
+{% block title %}Results{% endblock %}
+{% block content %}
+<h1>Claims</h1>
+<p class="summary">{{ total }} claims · page {{ page }} of {{ pages }} · <a href="{{ export_href }}">Export CSV</a></p>
+<table class="results" id="results">
+  <caption>Claims matching your search</caption>
+  <thead>
+    <tr>{% for key, label in columns %}<th scope="col" class="col-{{ key }}">{{ label }}</th>{% endfor %}</tr>
+  </thead>
+  <tbody>
+{% for row in rows %}
+    <tr>{% for key, label in columns %}<td class="col-{{ key }}"{% if mark_truth %} data-sd-truth="{{ key }}"{% endif %}>{% if key == "claim_number" %}<a href="/claims/{{ row[key] }}">{{ row[key] }}</a>{% else %}{{ row[key] }}{% endif %}</td>{% endfor %}</tr>
+{% endfor %}
+  </tbody>
+</table>
+<nav class="pagination" aria-label="Pagination">
+  <ul>
+{% for number, href in links %}
+    <li>{% if number == page %}<span aria-current="page">{{ number }}</span>{% else %}<a href="{{ href }}">{{ number }}</a>{% endif %}</li>
+{% endfor %}
+  </ul>
+</nav>
+{% endblock %}
+```
+
+```html
+<!-- testbench/portal/templates/detail.html -->
+{% extends "base.html" %}
+{% block title %}Claim {{ row.claim_number }}{% endblock %}
+{% block content %}
+<h1>Claim {{ row.claim_number }}</h1>
+<dl class="claim-detail">
+{% for key, label in columns %}
+  <dt>{{ label }}</dt><dd>{{ row[key] }}</dd>
+{% endfor %}
+</dl>
+<p><a href="/results">Back to results</a></p>
+{% endblock %}
+```
+
+```html
+<!-- testbench/portal/templates/error.html -->
+{% extends "base.html" %}
+{% block title %}{{ status }} {{ message }}{% endblock %}
+{% block content %}
+<h1>{{ message }}</h1>
+<p>Error {{ status }}. <a href="/search">Return to search</a>.</p>
+{% endblock %}
+```
+
+(The `<!-- path -->` first line of each block above is a label for this plan, not file content.)
+
+```css
+/* testbench/portal/static/portal.css */
+:root { font-family: system-ui, sans-serif; color: #1d1d1f; background: #fafafa; }
+body { margin: 0; background: #fafafa; }
+.site-header { display: flex; justify-content: space-between; align-items: center;
+               padding: .75rem 1.5rem; background: #2f3a8f; color: #fff; }
+.site-header nav a { color: #fff; margin-left: 1rem; }
+main { max-width: 72rem; margin: 0 auto; padding: 1.5rem; }
+table.results { border-collapse: collapse; width: 100%; background: #fff; }
+table.results th, table.results td { border: 1px solid #d0d0d7; padding: .4rem .6rem; text-align: left; }
+.col-amount, .col-reserve { text-align: right; font-variant-numeric: tabular-nums; }
+.pagination ul { display: flex; flex-wrap: wrap; gap: .5rem; list-style: none; padding: 0; }
+dl.claim-detail { display: grid; grid-template-columns: max-content 1fr; gap: .4rem 1.5rem; }
+dl.claim-detail dt { font-weight: 600; }
+form label { display: block; margin-bottom: .75rem; }
+.error { color: #a4161a; }
+.site-footer { padding: 1rem 1.5rem; color: #555; font-size: .875rem; }
+```
+
+- [ ] **Step 8: Implement the middleware, the routes and the app factory**
+
+```python
+# testbench/portal/middleware.py
+from __future__ import annotations
+
+import datetime as dt
+import logging
+from collections.abc import Callable
+
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from testbench.portal.day import request_day
+
+ACCESS_LOG = logging.getLogger("testbench.access")
+BENCH_DAY = "bench_day"
+
+
+class DayMiddleware:
+    """Computes the request's day once and stores it in the scope state. The route renders that
+    day's dataset and the mutation hook (Task 8) mutates with that day's schedule."""
+
+    def __init__(self, app: ASGIApp, *, clock: Callable[[], dt.datetime],
+                 override_secret: bytes | None) -> None:
+        self.app = app
+        self._clock = clock
+        self._secret = override_secret
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            day = request_day(Headers(scope=scope), now=self._clock(), override_secret=self._secret)
+            scope.setdefault("state", {})[BENCH_DAY] = day
+        await self.app(scope, receive, send)
+
+
+def day_of(scope: Scope) -> dt.date:
+    day = scope.get("state", {}).get(BENCH_DAY)
+    if not isinstance(day, dt.date):
+        raise RuntimeError("DayMiddleware did not run for this request")
+    return day
+
+
+class AccessLogMiddleware:
+    """One line per request: method, path, status, User-Agent. Never the query string, never a
+    cookie. It is how the bench checks that the runner identifies itself (brief §3.3)."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        status = 500
+
+        async def send_and_note(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = int(message["status"])
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_and_note)
+        finally:
+            agent = Headers(scope=scope).get("user-agent", "-")
+            ACCESS_LOG.info("%s %s %d ua=%r", scope["method"], scope["path"], status, agent,
+                            extra={"http_path": scope["path"], "http_status": status,
+                                   "user_agent": agent})
+```
+
+```python
+# testbench/portal/routes.py
+from __future__ import annotations
+
+import hmac
+from typing import Annotated
+
+from fastapi import APIRouter, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
+
+from testbench.portal import render
+from testbench.portal.middleware import day_of
+
+router = APIRouter()
+
+# The public demo account (bench spec §3.2). Printed in the README; not a secret. It exists to
+# exercise the product's credential path against a login form.
+DEMO_USERNAME = "demo"
+DEMO_PASSWORD = "demo"
+
+
+class LoginRequired(Exception):
+    """Raised by require_login; app.py maps it to 302 /login."""
+
+
+def require_login(request: Request) -> None:
+    if request.session.get("user") != DEMO_USERNAME:
+        raise LoginRequired
+
+
+def _same(given: str, expected: str) -> bool:
+    return hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _query(claim_number: str, claimant: str, status: str, filed_from: str,
+           filed_to: str) -> render.SearchQuery:
+    return render.SearchQuery.parse(claim_number=claim_number, claimant=claimant, status=status,
+                                    filed_from=filed_from, filed_to=filed_to)
+
+
+@router.get("/")
+def home(request: Request) -> RedirectResponse:
+    require_login(request)
+    return RedirectResponse("/search", status_code=302)
+
+
+@router.get("/login")
+def login_form() -> HTMLResponse:
+    return HTMLResponse(render.render_login())
+
+
+@router.post("/login")
+def login(request: Request, username: Annotated[str, Form()] = "",
+          password: Annotated[str, Form()] = "") -> Response:
+    if _same(username, DEMO_USERNAME) and _same(password, DEMO_PASSWORD):
+        request.session.clear()
+        request.session["user"] = DEMO_USERNAME
+        return RedirectResponse("/search", status_code=303)
+    return HTMLResponse(render.render_login(error="Unknown username or password."), status_code=401)
+
+
+@router.get("/logout")
+def logout(request: Request) -> RedirectResponse:
+    request.session.clear()
+    return RedirectResponse("/login", status_code=303)
+
+
+@router.get("/search")
+def search(request: Request) -> HTMLResponse:
+    require_login(request)
+    return HTMLResponse(render.render_search())
+
+
+@router.get("/results")
+def results(request: Request, page: Annotated[int, Query(ge=1)] = 1, claim_number: str = "",
+            claimant: str = "", status: str = "", filed_from: str = "",
+            filed_to: str = "") -> HTMLResponse:
+    require_login(request)
+    query = _query(claim_number, claimant, status, filed_from, filed_to)
+    return HTMLResponse(render.render_results(day_of(request.scope), page, query))
+
+
+@router.get("/claims/{claim_number}")
+def claim_detail(request: Request, claim_number: str) -> HTMLResponse:
+    require_login(request)
+    html = render.render_detail(day_of(request.scope), claim_number)
+    if html is None:
+        raise HTTPException(status_code=404)
+    return HTMLResponse(html)
+
+
+@router.get("/export.csv")
+def export_csv(request: Request, claim_number: str = "", claimant: str = "", status: str = "",
+               filed_from: str = "", filed_to: str = "") -> Response:
+    require_login(request)
+    query = _query(claim_number, claimant, status, filed_from, filed_to)
+    return Response(render.results_csv(day_of(request.scope), query),
+                    media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="claims.csv"'})
+
+
+@router.get("/healthz")
+def healthz() -> PlainTextResponse:
+    return PlainTextResponse("ok")
+```
+
+```python
+# testbench/portal/app.py
+from __future__ import annotations
+
+import datetime as dt
+import logging
+import sys
+from collections.abc import Callable
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.sessions import SessionMiddleware
+
+from testbench.portal.day import utc_now
+from testbench.portal.middleware import ACCESS_LOG, AccessLogMiddleware, DayMiddleware
+from testbench.portal.render import render_error
+from testbench.portal.routes import LoginRequired, router
+from testbench.portal.settings import Settings
+
+STATIC = Path(__file__).parent / "static"
+
+
+async def _redirect_to_login(request: Request, exc: Exception) -> Response:
+    return RedirectResponse("/login", status_code=302)
+
+
+async def _html_error(request: Request, exc: Exception) -> Response:
+    status = exc.status_code if isinstance(exc, StarletteHTTPException) else 500
+    return HTMLResponse(render_error(status), status_code=status)
+
+
+def _configure_access_log() -> None:
+    ACCESS_LOG.setLevel(logging.INFO)
+    if not ACCESS_LOG.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(asctime)s access %(message)s"))
+        ACCESS_LOG.addHandler(handler)
+
+
+def create_app(*, clock: Callable[[], dt.datetime] = utc_now) -> FastAPI:
+    settings = Settings.from_env()
+    app = FastAPI(title="Selector Drift test bench", docs_url=None, redoc_url=None, openapi_url=None)
+    app.include_router(router)
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    app.add_exception_handler(LoginRequired, _redirect_to_login)
+    app.add_exception_handler(StarletteHTTPException, _html_error)
+    # add_middleware prepends, so the LAST added is the OUTERMOST. Outer -> inner:
+    #   AccessLog -> Day -> Session -> routes
+    app.add_middleware(SessionMiddleware, secret_key=settings.session_secret,
+                       session_cookie="sd_bench_session", max_age=8 * 3600, same_site="lax",
+                       https_only=settings.cookie_secure)
+    app.add_middleware(DayMiddleware, clock=clock, override_secret=settings.override_secret)
+    app.add_middleware(AccessLogMiddleware)
+    _configure_access_log()
+    return app
+```
+
+- [ ] **Step 9: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/testbench -m unit -v`
+Expected: PASS — 36 tests (`test_data.py` 9, `test_render.py` 4, `test_day.py` 10, `test_portal_app.py` 13).
+
+Run: `uv run pytest tests/testbench/test_portal_e2e.py -m e2e -v`
+Expected: PASS, 5 tests.
+
+Run: `uv run ruff check testbench tests/testbench && uv run mypy --strict testbench`
+Expected: clean. **From this task on, the fast check also runs `uv run mypy --strict testbench`.**
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add pyproject.toml uv.lock testbench/portal tests/__init__.py tests/testbench
+git commit -m "feat(testbench): server-rendered claims portal with a deterministic daily dataset"
 ```
 
 ---
@@ -1019,95 +2851,922 @@ git commit -m "feat(testbench): realistic portal with synthetic claims"
 ### Task 8: The mutation engine and the answer key the resolver cannot see
 
 **Files:**
-- Create: `testbench/mutations/base.py`, `testbench/schedule.py`, `testbench/answers/key.py`
-- Create: `testbench/mutator/app.py` — the mutation service (see below)
-- Create: `testbench/portal/middleware.ts` — **proxies rendered HTML through the mutator; contains no mutation logic**
-- Test: `tests/testbench/test_schedule.py`, `tests/testbench/test_served_markup_matches_the_engine.py`
+- Create: `testbench/mutations/base.py`, `testbench/mutations/catalogue.py`, `testbench/schedule.py`, `testbench/portal/hook.py`, `testbench/answers/key.py`
+- Modify: `testbench/portal/app.py` (the hook and the `catalogue` parameter), `.importlinter`
+- Modify: `tests/testbench/conftest.py` (a plain and a mutating server), `tests/testbench/helpers.py` (test mutations, `first_day_scheduling`, `render_in_browser`)
+- Test: `tests/testbench/test_schedule.py`, `tests/testbench/test_hook.py`, `tests/testbench/test_answer_key.py`, `tests/testbench/test_isolation.py`, `tests/testbench/test_served_equals_tested.py`
 
 **Interfaces:**
-- Consumes: nothing.
+- Consumes: `render_results`, `result_set`, `display_row`, `COLUMNS`, `PAGE_SIZE`, `day_of`, `create_app` (Task 7).
 - Produces:
-  - `Mutation` protocol — `name: str`, `apply(html: str) -> str`, pure
-  - `mutations_for(day: date, target: str) -> list[Mutation]` — seeded, `seed = sha256(f"{day}:{target}")`
-  - `testbench.answers.key.expected_selector(day: date, field: str) -> str` — **importable only by tests and the scorer**, never by `selector_drift/` (Task 1 contract)
+  - `testbench.mutations.base`: `Mutation` protocol (`name: str` read-only property, `apply(html: str) -> str`, pure) · `MutationBase` (ABC; `name` = class name; `from_rng(rng: random.Random) -> Self`) · `CatalogueEntry(name: str, build: Callable[[random.Random], Mutation], adversarial: bool)` · `entry(cls: type[MutationBase], *, adversarial: bool) -> CatalogueEntry` · `parse(html: str) -> HtmlElement` · `serialise(root: HtmlElement) -> str` · `apply_all(mutations: Sequence[Mutation], html: str) -> str`
+  - `testbench.mutations.catalogue.CATALOGUE: tuple[CatalogueEntry, ...]` — empty here; Tasks 9–11A fill it
+  - `testbench.schedule`: `seed_for(day: date, target: str) -> str` (`sha256(f"{day}:{target}")` hex) · `mutations_for(day: date, target: str, catalogue: Sequence[CatalogueEntry] | None = None) -> list[Mutation]` · `scheduled_names(day: date, target: str, catalogue: Sequence[CatalogueEntry] | None = None) -> list[str]`
+  - `testbench.portal.hook`: `TARGET = "testbench"` · `SEED_META = "sd-mutation-seed"` · `mutate_html(day: date, html: str, *, target: str = TARGET, catalogue: Sequence[CatalogueEntry] | None = None) -> str` · `inject_seed_meta(html: str, seed: str, names: Sequence[str]) -> str` · `MutationMiddleware`
+  - `testbench.portal.app.create_app(*, clock: Callable[[], datetime] = utc_now, catalogue: Sequence[CatalogueEntry] | None = None) -> FastAPI`
+  - `testbench.answers.key`: `FIELDS` · `expected_values(day: date, field: str, page: int = 1) -> list[str]` · `expected_xpaths(day: date, field: str, page: int = 1, *, catalogue: Sequence[CatalogueEntry] | None = None) -> list[str]` · `expected_selector(day: date, field: str) -> str` — **importable only by tests and the scorer**, never by `selector_drift/`
 
-- [ ] **Step 1: Write the failing tests**
+**Why the engine runs inside the portal (bench spec §1, §3).** Two drafts put the mutation engine
+somewhere the browser's page did not come from: first a TypeScript middleware that could not call
+Python (C7), then a Python mutator behind a Next.js proxy whose output hydration silently undid
+(**found 2026-09-26: hydration**). Here the engine is an ASGI response hook in the portal's own
+process: every `text/html` response — login, results, detail, error pages — is replaced by
+`mutate_html(day, body)`, which is `apply_all(mutations_for(day, "testbench"), body)` plus the
+`sd-mutation-seed` meta tag. There is one `apply()` chain, and the test that guards it compares the
+**DOM in a browser**, not an HTTP body, because an HTTP body is exactly the comparison hydration
+defeats and `VirtualisedRows`' script makes the two differ legitimately.
+
+**Why the product never sends an override.** The runner requests the page like any client. The
+scorer reads the seed from the stored snapshot's `<meta>` tag, not from the run's window date, so a
+run that crosses midnight UTC is scored against the page it actually saw — and `selector_drift/`
+carries no bench-specific code path. A test greps for one.
+
+**Why the answer key is a marked render, not a stored selector.** The key needs the true node for each
+field *after* the day's mutations, without putting anything in the served markup the resolver could
+key on. `render_results(day, mark_truth=True)` marks every true cell with `data-sd-truth`, the same
+schedule is applied, and the marked nodes' absolute XPaths are the answer. Mutations change structure
+and text, never meaning, so the marked tree and the served tree have identical shape — a test proves
+that for every class in the catalogue, and fails any mutation that drops the marker or clones it.
+
+- [ ] **Step 1: Extend the fixtures and helpers**
+
+Replace `tests/testbench/conftest.py`'s three server/client fixtures (keep `_free_port`, `_serve`, `_bench_env`, `override_secret`) with:
+
+```python
+@pytest.fixture(scope="session")
+def bench_server(override_secret: str) -> Iterator[str]:
+    """The portal with NO mutations, for tests of the portal's own behaviour (Task 7). Those
+    tests must not start failing the day the schedule draws TableToDiv or VirtualisedRows."""
+    with pytest.MonkeyPatch.context() as mp:
+        _bench_env(mp, override_secret)
+        app = create_app(catalogue=())
+    yield from _serve(app)
+
+
+@pytest.fixture(scope="session")
+def mutating_bench_server(override_secret: str) -> Iterator[str]:
+    """The portal exactly as deployed: the production CATALOGUE, the real clock."""
+    with pytest.MonkeyPatch.context() as mp:
+        _bench_env(mp, override_secret)
+        app = create_app()
+    yield from _serve(app)
+
+
+@pytest.fixture
+def client_factory(monkeypatch: pytest.MonkeyPatch,
+                   override_secret: str) -> Callable[..., TestClient]:
+    _bench_env(monkeypatch, override_secret)
+
+    def make(**kwargs: Any) -> TestClient:
+        kwargs.setdefault("catalogue", ())
+        return TestClient(create_app(**kwargs), follow_redirects=False)
+
+    return make
+```
+
+Append to `tests/testbench/helpers.py` (move the four new import lines up into the file's import block, or ruff reports E402):
+
+```python
+import random
+from collections.abc import Callable
+
+from testbench.mutations.base import CatalogueEntry, Mutation, MutationBase, parse, serialise
+from testbench.schedule import scheduled_names
+
+
+class TagBody(MutationBase):
+    """A test-only mutation: marks <body> with one attribute. Visible, harmless, and distinct
+    per instance, so schedules can be told apart."""
+
+    def __init__(self, tag: str) -> None:
+        self._tag = tag
+
+    @property
+    def name(self) -> str:
+        return f"TagBody{self._tag}"
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        body = doc.find("body")
+        assert body is not None
+        body.set(f"data-test-{self._tag.lower()}", "1")
+        return serialise(doc)
+
+
+class WrapTable(MutationBase):
+    """A test-only structural mutation: wraps every <table> in a <div>, moving every cell's path."""
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for table in doc.xpath("//table"):
+            parent = table.getparent()
+            assert parent is not None
+            wrapper = doc.makeelement("div", {"class": "sd-test-wrap"})
+            parent.replace(table, wrapper)
+            wrapper.append(table)
+        return serialise(doc)
+
+
+def _builder(tag: str) -> Callable[[random.Random], Mutation]:
+    def build(rng: random.Random) -> Mutation:
+        return TagBody(tag)
+    return build
+
+
+def bench_catalogue() -> tuple[CatalogueEntry, ...]:
+    benign = [CatalogueEntry(f"TagBody{t}", _builder(t), adversarial=False) for t in "ABCDEF"]
+    hostile = [CatalogueEntry(f"TagBody{t}", _builder(t), adversarial=True) for t in "XY"]
+    return (*benign, *hostile)
+
+
+WRAP_TABLE = (CatalogueEntry("WrapTable", WrapTable.from_rng, adversarial=False),)
+
+
+def first_day_scheduling(name: str, start: dt.date, *, target: str = "testbench",
+                         horizon: int = 3650) -> dt.date:
+    for offset in range(horizon):
+        day = start + dt.timedelta(days=offset)
+        if name in scheduled_names(day, target):
+            return day
+    raise LookupError(f"{name} is never scheduled within {horizon} days of {start}")
+
+
+def render_in_browser(browser: Browser, html: str) -> str:
+    """The DOM a browser builds from `html` after load -- scripts run, exactly as on the bench."""
+    context = browser.new_context()
+    page = context.new_page()
+    page.set_content(html, wait_until="load")
+    dom = str(page.evaluate("document.documentElement.outerHTML"))
+    context.close()
+    return dom
+```
+
+(`bench_catalogue` is a helper, not a test: pytest collects `test_*` only from `test_*.py` files, and `helpers.py` is not one.)
+
+- [ ] **Step 2: Write the failing tests**
 
 ```python
 # tests/testbench/test_schedule.py
-import datetime as dt
-from testbench.schedule import mutations_for
+from __future__ import annotations
 
-def test_schedule_is_deterministic_for_a_day():
-    a = [m.name for m in mutations_for(dt.date(2026, 9, 9), "testbench")]
-    b = [m.name for m in mutations_for(dt.date(2026, 9, 9), "testbench")]
+import datetime as dt
+import hashlib
+
+import pytest
+
+from testbench.mutations.base import apply_all
+from testbench.schedule import mutations_for, scheduled_names, seed_for
+from tests.testbench.helpers import TagBody, bench_catalogue
+
+CATALOGUE = bench_catalogue()
+BENIGN = {e.name for e in CATALOGUE if not e.adversarial}
+HOSTILE = {e.name for e in CATALOGUE if e.adversarial}
+
+
+@pytest.mark.unit
+def test_schedule_is_deterministic_for_a_day() -> None:
+    a = scheduled_names(dt.date(2026, 9, 9), "testbench", CATALOGUE)
+    b = scheduled_names(dt.date(2026, 9, 9), "testbench", CATALOGUE)
     assert a == b
 
-def test_different_days_differ():
-    a = [m.name for m in mutations_for(dt.date(2026, 9, 9), "testbench")]
-    b = [m.name for m in mutations_for(dt.date(2026, 9, 10), "testbench")]
-    assert a != b
+
+@pytest.mark.unit
+def test_different_days_differ() -> None:
+    assert seed_for(dt.date(2026, 9, 9), "testbench") != seed_for(dt.date(2026, 9, 10), "testbench")
+    start = dt.date(2026, 9, 1)
+    schedules = {tuple(scheduled_names(start + dt.timedelta(days=i), "testbench", CATALOGUE))
+                 for i in range(30)}
+    assert len(schedules) >= 10
+
+
+@pytest.mark.unit
+def test_the_seed_is_sha256_of_day_and_target() -> None:
+    expected = hashlib.sha256(b"2026-09-09:testbench").hexdigest()
+    assert seed_for(dt.date(2026, 9, 9), "testbench") == expected
+
+
+@pytest.mark.unit
+def test_every_day_applies_one_or_two_benign_mutations_first() -> None:
+    for i in range(120):
+        names = scheduled_names(dt.date(2026, 9, 1) + dt.timedelta(days=i), "testbench", CATALOGUE)
+        benign = [n for n in names if n in BENIGN]
+        assert 1 <= len(benign) <= 2
+        assert names[: len(benign)] == benign            # adversarial, if any, is applied last
+
+
+@pytest.mark.unit
+def test_adversarial_mutations_are_scheduled_about_weekly() -> None:
+    days = [dt.date(2026, 9, 1) + dt.timedelta(days=i) for i in range(365)]
+    hostile_days = sum(any(n in HOSTILE for n in scheduled_names(d, "testbench", CATALOGUE))
+                       for d in days)
+    assert 25 <= hostile_days <= 85                        # p = 1/7 -> ~52
+
+
+@pytest.mark.unit
+def test_an_empty_catalogue_schedules_nothing() -> None:
+    assert mutations_for(dt.date(2026, 9, 9), "testbench", ()) == []
+
+
+@pytest.mark.unit
+def test_apply_all_applies_in_order() -> None:
+    html = "<!DOCTYPE html><html><head></head><body></body></html>"
+    out = apply_all([TagBody("A"), TagBody("B")], html)
+    assert 'data-test-a="1"' in out and 'data-test-b="1"' in out
+    assert apply_all([], html) == html
 ```
-
-- [ ] **Step 2: Run them and watch them fail**
-
-Run: `uv run pytest tests/testbench -v`
-Expected: FAIL — `ModuleNotFoundError: testbench.schedule`.
-
-- [ ] **Step 3: Implement the seeded schedule and put the ONE engine in the request path**
-
-**The first draft of this step could not work (C7).** It said *"the middleware calls
-`mutations_for(today, 'testbench')` and pipes the rendered HTML through each mutation's `apply()`"* —
-but `mutations_for` and `apply()` are Python (Tasks 8–11 specify `lxml`), and a Next.js middleware is
-TypeScript on the Edge runtime. It cannot call Python. As written the bench would either serve
-unmutated pages, or serve a **second, untested TypeScript implementation** of the mutations — in which
-case the transforms the tests exercise and the transforms the log observes are different code, the
-answer key is not ground truth, and the treatment arm of the ninety-day log proves nothing.
-
-There is exactly one rule here: **the served markup and the tested markup come from the same
-`apply()`.**
-
-```
-GET /results
-  -> Next.js renders the page (real portal, real framework)
-  -> middleware.ts POSTs the rendered HTML to the mutator with the UTC date
-  -> testbench/mutator/app.py: mutations_for(date, target) -> apply() chain -> mutated HTML
-  -> middleware returns it
-```
-
-The mutator is ~40 lines of FastAPI over the existing `Mutation` protocol. It ships in the same
-container as the portal (or as a second free service), and it is the only code that mutates markup.
-
-The served page also carries `<meta name="sd-mutation-seed" content="...">` listing the applied
-mutation names. The log records what it saw **without importing the answer key**, which keeps Task 1's
-isolation contract intact and makes a day's DOM reproducible from the page itself.
-
-- [ ] **Step 3b: Prove the served markup is the engine's output**
 
 ```python
-# tests/testbench/test_served_markup_matches_the_engine.py
-def test_the_deployed_bench_serves_exactly_what_the_engine_produces(bench_html_for_day):
-    day = dt.date(2026, 9, 9)
-    served = bench_html_for_day(day)                       # over HTTP, from the deployment
-    local = apply_all(mutations_for(day, "testbench"), render_fixture())
-    assert normalise(served) == normalise(local)
+# tests/testbench/test_hook.py
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+from starlette.testclient import TestClient
+
+from testbench.portal.data import dataset_for
+from testbench.portal.hook import mutate_html
+from testbench.portal.render import render_error, render_login, render_results, results_csv
+from testbench.schedule import scheduled_names, seed_for
+from tests.testbench.helpers import bench_catalogue, login, root, sign_override
+
+PORTAL = Path(__file__).resolve().parents[2] / "testbench" / "portal"
+CATALOGUE = bench_catalogue()
+NOW = dt.datetime(2026, 9, 9, 12, 0, tzinfo=dt.UTC)
+DAY = NOW.date()
+Factory = Callable[..., TestClient]
+
+
+def seed_meta(html: str) -> str:
+    metas = root(html).xpath('//head/meta[@name="sd-mutation-seed"]')
+    assert len(metas) == 1, "exactly one seed tag, in <head>"
+    return str(metas[0].get("content"))
+
+
+@pytest.mark.unit
+def test_every_html_response_carries_the_seed_meta_tag(client_factory: Factory) -> None:
+    client = client_factory(clock=lambda: NOW, catalogue=CATALOGUE)
+    expected = f"{seed_for(DAY, 'testbench')};{','.join(scheduled_names(DAY, 'testbench', CATALOGUE))}"
+    responses = [client.get("/login"),
+                 client.post("/login", data={"username": "demo", "password": "wrong"})]
+    login(client)
+    first = dataset_for(DAY)[0].claim_number
+    responses += [client.get("/search"), client.get("/results"), client.get(f"/claims/{first}"),
+                  client.get("/claims/not-a-claim"), client.get("/static/missing.css")]
+    for response in responses:
+        assert response.headers["content-type"].startswith("text/html"), response.url
+        assert seed_meta(response.text) == expected, response.url
+
+
+@pytest.mark.unit
+def test_csv_and_static_responses_are_never_mutated(client_factory: Factory) -> None:
+    client = client_factory(clock=lambda: NOW, catalogue=CATALOGUE)
+    login(client)
+    exported = client.get("/export.csv")
+    css = client.get("/static/portal.css")
+    assert exported.text == results_csv(DAY)
+    assert css.content == (PORTAL / "static" / "portal.css").read_bytes()
+    assert client.get("/healthz").text == "ok"
+    for response in (exported, css):
+        assert "sd-mutation-seed" not in response.text and "data-test-" not in response.text
+
+
+@pytest.mark.unit
+def test_the_served_html_is_the_engines_output_for_the_request_day(client_factory: Factory) -> None:
+    client = client_factory(clock=lambda: NOW, catalogue=CATALOGUE)
+    assert client.get("/login").text == mutate_html(DAY, render_login(), catalogue=CATALOGUE)
+    login(client)
+    assert client.get("/results").text == mutate_html(DAY, render_results(DAY), catalogue=CATALOGUE)
+    missing = client.get("/claims/not-a-claim")
+    assert missing.status_code == 404
+    assert missing.text == mutate_html(DAY, render_error(404), catalogue=CATALOGUE)
+
+
+@pytest.mark.unit
+def test_a_signed_override_steers_the_schedule_and_the_dataset_together(
+        client_factory: Factory, override_secret: str) -> None:
+    client = client_factory(clock=lambda: NOW, catalogue=CATALOGUE)
+    login(client)
+    other = dt.date(2026, 9, 1)
+    response = client.get("/results", headers=sign_override(other, override_secret))
+    assert response.text == mutate_html(other, render_results(other), catalogue=CATALOGUE)
+
+
+@pytest.mark.unit
+def test_the_seed_tag_follows_the_utc_day(client_factory: Factory) -> None:
+    """M20, at the hook: 23:30 in UTC-5 is served with the NEXT day's seed."""
+    utc_minus_5 = dt.timezone(dt.timedelta(hours=-5))
+    client = client_factory(clock=lambda: dt.datetime(2026, 9, 9, 23, 30, tzinfo=utc_minus_5),
+                            catalogue=CATALOGUE)
+    assert seed_meta(client.get("/login").text).startswith(seed_for(dt.date(2026, 9, 10), "testbench"))
 ```
 
-Without this test C7 can regress silently at any point in ninety days, and nothing downstream would
-notice — the heal log would keep filling with heals scored against an answer key describing a
-different page.
+```python
+# tests/testbench/test_answer_key.py
+from __future__ import annotations
 
-- [ ] **Step 4: Run the tests and confirm the contract holds**
+import random
 
-Run: `uv run pytest tests/testbench -v && uv run lint-imports`
-Expected: PASS. `answer-key-isolation` kept.
+import lxml.html
+import pytest
 
-- [ ] **Step 5: Commit**
+from testbench.answers.key import FIELDS, expected_selector, expected_values, expected_xpaths
+from testbench.mutations.base import CatalogueEntry, parse, serialise
+from testbench.mutations.catalogue import CATALOGUE
+from testbench.portal.hook import mutate_html
+from testbench.portal.render import PAGE_SIZE, render_results
+from tests.testbench.helpers import FIXTURE_DAY, WRAP_TABLE, accessible_text, bench_catalogue, rows
+
+EVERY_ENTRY = (*CATALOGUE, *bench_catalogue(), *WRAP_TABLE)
+
+
+@pytest.mark.unit
+def test_expected_values_are_what_the_unmutated_page_shows() -> None:
+    page = rows(render_results(FIXTURE_DAY))
+    for index, field in enumerate(FIELDS):
+        assert expected_values(FIXTURE_DAY, field) == [r[index] for r in page]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("field", ["claim_number", "amount"])
+def test_expected_xpaths_point_at_the_true_cells_on_the_served_page(field: str) -> None:
+    served = parse(mutate_html(FIXTURE_DAY, render_results(FIXTURE_DAY), catalogue=WRAP_TABLE))
+    tree = served.getroottree()
+    paths = expected_xpaths(FIXTURE_DAY, field, catalogue=WRAP_TABLE)
+    assert len(paths) == PAGE_SIZE and all("div" in p for p in paths)   # the wrap moved them
+    found = [tree.xpath(p) for p in paths]
+    assert all(len(nodes) == 1 for nodes in found)
+    texts = [accessible_text(nodes[0]) for nodes in found]
+    assert texts == expected_values(FIXTURE_DAY, field)
+
+
+@pytest.mark.unit
+def test_expected_selector_is_the_first_rows_node() -> None:
+    assert expected_selector(FIXTURE_DAY, "claim_number") == \
+        expected_xpaths(FIXTURE_DAY, "claim_number")[0]
+
+
+@pytest.mark.unit
+def test_an_unknown_field_is_refused() -> None:
+    with pytest.raises(KeyError):
+        expected_xpaths(FIXTURE_DAY, "prior_amount")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entry", EVERY_ENTRY, ids=lambda e: e.name)
+def test_the_truth_marker_changes_attributes_only(entry: CatalogueEntry) -> None:
+    """Every class in the catalogue -- Tasks 9-11A add theirs and are covered automatically --
+    must (a) keep data-sd-truth on every true cell, (b) never copy it onto a clone, and
+    (c) not behave differently because it is present. Otherwise the key describes another page."""
+    mutation = entry.build(random.Random(0))
+    marked = parse(mutation.apply(render_results(FIXTURE_DAY, mark_truth=True)))
+    plain = mutation.apply(render_results(FIXTURE_DAY))
+    for field in FIELDS:
+        assert len(marked.xpath("//*[@data-sd-truth=$f]", f=field)) == PAGE_SIZE, field
+    for el in marked.xpath("//*[@data-sd-truth]"):
+        if isinstance(el, lxml.html.HtmlElement):
+            del el.attrib["data-sd-truth"]
+    assert serialise(marked) == serialise(parse(plain))
+```
+
+```python
+# tests/testbench/test_isolation.py
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+BENCH_ONLY = re.compile(r"x-testbench-|testbench_override_secret|sd-mutation-seed|data-sd-truth",
+                        re.IGNORECASE)
+
+
+@pytest.mark.unit
+def test_the_product_contains_no_bench_specific_code() -> None:
+    """Bench spec §3: the product never sends the override header and never reads the seed tag.
+    The import contract stops it importing the bench; this stops it re-typing the bench."""
+    offenders = [str(p.relative_to(REPO)) for p in (REPO / "selector_drift").rglob("*.py")
+                 if BENCH_ONLY.search(p.read_text(encoding="utf-8"))]
+    assert offenders == []
+
+
+@pytest.mark.unit
+def test_the_bench_import_contracts_are_declared() -> None:
+    text = (REPO / ".importlinter").read_text(encoding="utf-8")
+    for contract in ("answer-key-isolation", "bench-stands-alone", "only-the-scorer-reads-the-product"):
+        assert f"[importlinter:contract:{contract}]" in text
+    isolation = text.split("[importlinter:contract:answer-key-isolation]")[1].split("[importlinter")[0]
+    assert re.search(r"^forbidden_modules = testbench$", isolation, re.MULTILINE)
+```
+
+```python
+# tests/testbench/test_served_equals_tested.py
+from __future__ import annotations
+
+import datetime as dt
+
+import pytest
+from playwright.sync_api import Browser
+
+from testbench.mutations.catalogue import CATALOGUE
+from testbench.portal.hook import mutate_html
+from testbench.portal.render import render_results
+from tests.testbench.helpers import first_day_scheduling, logged_in_page, normalise, render_in_browser
+
+
+def _fixed_days() -> list[dt.date]:
+    days = [dt.date(2026, 9, 9), dt.date(2026, 9, 10)]
+    if any(e.name == "VirtualisedRows" for e in CATALOGUE):          # from Task 11A on
+        days.append(first_day_scheduling("VirtualisedRows", start=dt.date(2026, 9, 1)))
+    return days
+
+
+FIXED_DAYS = _fixed_days()
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("day", FIXED_DAYS, ids=str)
+def test_the_page_a_browser_sees_is_what_the_engine_produced(
+        browser: Browser, mutating_bench_server: str, override_secret: str, day: dt.date) -> None:
+    """The one test that guards the whole bench (bench spec §6.1). Both sides go through a real
+    browser so VirtualisedRows' script runs on both; the expected side calls the same
+    mutate_html the hook calls -- apply_all plus the seed tag the browser also sees."""
+    page = logged_in_page(browser, mutating_bench_server, override_day=day, secret=override_secret)
+    page.goto(f"{mutating_bench_server}/results")
+    seen = normalise(str(page.evaluate("document.documentElement.outerHTML")))
+    page.context.close()
+    expected = normalise(render_in_browser(browser, mutate_html(day, render_results(day))))
+    assert seen == expected
+```
+
+- [ ] **Step 3: Run them and watch them fail**
+
+Run: `uv run pytest tests/testbench -v`
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'testbench.mutations.base'` (imported by `helpers.py`).
+
+- [ ] **Step 4: Implement the protocol, the catalogue and the schedule**
+
+```python
+# testbench/mutations/base.py
+"""The Mutation protocol, the catalogue entry, and the one lxml round trip every mutation shares.
+
+Rules for every mutation (Tasks 9-11A): `apply` is pure and deterministic; it never reads or
+writes `data-sd-*` attributes, never drops an attribute it does not own, removes `data-sd-truth`
+from any element it clones, and never renames a form field's `name` or a submit button.
+"""
+from __future__ import annotations
+
+import random
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Protocol, Self, runtime_checkable
+
+import lxml.html
+
+DOCTYPE = "<!DOCTYPE html>"
+
+
+@runtime_checkable
+class Mutation(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    def apply(self, html: str) -> str: ...
+
+
+class MutationBase(ABC):
+    @property
+    def name(self) -> str:
+        return type(self).__name__
+
+    @abstractmethod
+    def apply(self, html: str) -> str: ...
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        """Build the day's instance. Parameterised classes (e.g. LabelReword's wording) override
+        this and draw from `rng`; parameterless classes inherit it."""
+        return cls()
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogueEntry:
+    name: str
+    build: Callable[[random.Random], Mutation]
+    adversarial: bool
+
+
+def entry(cls: type[MutationBase], *, adversarial: bool) -> CatalogueEntry:
+    return CatalogueEntry(cls.__name__, cls.from_rng, adversarial)
+
+
+def parse(html: str) -> lxml.html.HtmlElement:
+    return lxml.html.document_fromstring(html)
+
+
+def serialise(root: lxml.html.HtmlElement) -> str:
+    out = lxml.html.tostring(root, doctype=DOCTYPE, encoding="unicode", method="html")
+    assert isinstance(out, str)
+    return out
+
+
+def apply_all(mutations: Sequence[Mutation], html: str) -> str:
+    for mutation in mutations:
+        html = mutation.apply(html)
+    return html
+```
+
+```python
+# testbench/mutations/catalogue.py
+"""Every mutation class the schedule may draw from. Tasks 9-11A append their classes here.
+
+Adding a class changes which mutations every future AND past day draws, so a day's DOM is
+reproducible from (date, commit), not from the date alone. The seed tag on each stored snapshot
+records what was actually applied.
+"""
+from __future__ import annotations
+
+from testbench.mutations.base import CatalogueEntry
+
+CATALOGUE: tuple[CatalogueEntry, ...] = ()
+```
+
+```python
+# testbench/schedule.py
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import random
+from collections.abc import Sequence
+
+from testbench.mutations import catalogue as _catalogue
+from testbench.mutations.base import CatalogueEntry, Mutation
+
+SECOND_BENIGN_PROBABILITY = 0.35
+ADVERSARIAL_PROBABILITY = 1 / 7          # about one adversarial day a week
+
+
+def seed_for(day: dt.date, target: str) -> str:
+    return hashlib.sha256(f"{day.isoformat()}:{target}".encode("utf-8")).hexdigest()
+
+
+def mutations_for(day: dt.date, target: str,
+                  catalogue: Sequence[CatalogueEntry] | None = None) -> list[Mutation]:
+    """One or two benign classes every day, then -- about one day in seven -- one adversarial
+    class applied last, on top. Seeded from (day, target) alone. `catalogue=None` reads
+    CATALOGUE at call time."""
+    entries = tuple(_catalogue.CATALOGUE if catalogue is None else catalogue)
+    rng = random.Random(int(seed_for(day, target), 16))
+    benign = sorted((e for e in entries if not e.adversarial), key=lambda e: e.name)
+    hostile = sorted((e for e in entries if e.adversarial), key=lambda e: e.name)
+    chosen: list[CatalogueEntry] = []
+    if benign:
+        count = min(len(benign), 1 + int(rng.random() < SECOND_BENIGN_PROBABILITY))
+        chosen.extend(rng.sample(benign, count))
+    if hostile and rng.random() < ADVERSARIAL_PROBABILITY:
+        chosen.append(rng.choice(hostile))
+    return [e.build(rng) for e in chosen]
+
+
+def scheduled_names(day: dt.date, target: str,
+                    catalogue: Sequence[CatalogueEntry] | None = None) -> list[str]:
+    return [m.name for m in mutations_for(day, target, catalogue)]
+```
+
+- [ ] **Step 5: Implement the response hook and put it in the request path**
+
+```python
+# testbench/portal/hook.py
+"""The one place markup is mutated. Every text/html response the portal sends passes through
+MutationMiddleware, which calls mutate_html -- the same function the tests and the answer key call."""
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Sequence
+
+import lxml.etree
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from testbench.mutations.base import CatalogueEntry, apply_all, parse, serialise
+from testbench.portal.middleware import day_of
+from testbench.schedule import mutations_for, seed_for
+
+TARGET = "testbench"
+SEED_META = "sd-mutation-seed"
+
+
+def inject_seed_meta(html: str, seed: str, names: Sequence[str]) -> str:
+    doc = parse(html)
+    head = doc.find("head")
+    if head is None:
+        head = doc.makeelement("head", {})
+        doc.insert(0, head)
+    for old in head.findall(f'meta[@name="{SEED_META}"]'):
+        head.remove(old)
+    lxml.etree.SubElement(head, "meta", {"name": SEED_META, "content": f"{seed};{','.join(names)}"})
+    return serialise(doc)
+
+
+def mutate_html(day: dt.date, html: str, *, target: str = TARGET,
+                catalogue: Sequence[CatalogueEntry] | None = None) -> str:
+    applied = mutations_for(day, target, catalogue)
+    return inject_seed_meta(apply_all(applied, html), seed_for(day, target),
+                            [m.name for m in applied])
+
+
+def _is_html(start: Message) -> bool:
+    return Headers(raw=start["headers"]).get("content-type", "").startswith("text/html")
+
+
+class MutationMiddleware:
+    """Buffers each text/html response, replaces its body with mutate_html(day, body), fixes
+    Content-Length, and passes every other response through untouched and unbuffered."""
+
+    def __init__(self, app: ASGIApp, *, catalogue: Sequence[CatalogueEntry] | None,
+                 target: str = TARGET) -> None:
+        self.app = app
+        self._catalogue = catalogue
+        self._target = target
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        day = day_of(scope)
+        held: Message | None = None
+        body = bytearray()
+
+        async def rewrite(message: Message) -> None:
+            nonlocal held
+            if message["type"] == "http.response.start":
+                if _is_html(message):
+                    held = message
+                    return
+                await send(message)
+                return
+            if message["type"] == "http.response.body" and held is not None:
+                body.extend(message.get("body", b""))
+                if message.get("more_body", False):
+                    return
+                html = mutate_html(day, body.decode("utf-8"), target=self._target,
+                                   catalogue=self._catalogue)
+                payload = html.encode("utf-8")
+                headers = MutableHeaders(raw=list(held["headers"]))
+                headers["content-length"] = str(len(payload))
+                await send({**held, "headers": headers.raw})
+                await send({"type": "http.response.body", "body": payload, "more_body": False})
+                return
+            await send(message)
+
+        await self.app(scope, receive, rewrite)
+```
+
+In `testbench/portal/app.py`, add the imports
+
+```python
+from collections.abc import Sequence
+
+from testbench.mutations.base import CatalogueEntry
+from testbench.portal.hook import MutationMiddleware
+```
+
+and replace `create_app` with:
+
+```python
+def create_app(*, clock: Callable[[], dt.datetime] = utc_now,
+               catalogue: Sequence[CatalogueEntry] | None = None) -> FastAPI:
+    """`catalogue=None` is production: the full CATALOGUE. Tests of the portal's own behaviour
+    pass `catalogue=()`; `uvicorn --factory` passes nothing."""
+    settings = Settings.from_env()
+    app = FastAPI(title="Selector Drift test bench", docs_url=None, redoc_url=None, openapi_url=None)
+    app.include_router(router)
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    app.add_exception_handler(LoginRequired, _redirect_to_login)
+    app.add_exception_handler(StarletteHTTPException, _html_error)
+    # add_middleware prepends, so the LAST added is the OUTERMOST. Outer -> inner:
+    #   AccessLog -> Day -> Mutation -> Session -> routes
+    # Day runs before Mutation so both the route and the hook read the same day from the scope.
+    app.add_middleware(SessionMiddleware, secret_key=settings.session_secret,
+                       session_cookie="sd_bench_session", max_age=8 * 3600, same_site="lax",
+                       https_only=settings.cookie_secure)
+    app.add_middleware(MutationMiddleware, catalogue=catalogue)
+    app.add_middleware(DayMiddleware, clock=clock, override_secret=settings.override_secret)
+    app.add_middleware(AccessLogMiddleware)
+    _configure_access_log()
+    return app
+```
+
+- [ ] **Step 6: Implement the answer key**
+
+```python
+# testbench/answers/key.py
+"""Ground truth for a bench day. Importable by tests and testbench.score ONLY -- the
+answer-key-isolation contract forbids every selector_drift module from importing any of testbench.
+
+Values come from the dataset. Nodes come from a marked render: the true cells carry
+data-sd-truth, the day's schedule is applied, and the marked nodes' absolute XPaths are the answer.
+For VirtualisedRows the key lists every row the server sent; the browser keeps ten, and the row-count
+contract (Task 29), not the resolver, is what must notice.
+"""
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Sequence
+
+import lxml.html
+
+from testbench.mutations.base import CatalogueEntry, parse
+from testbench.portal.data import COLUMNS, display_row
+from testbench.portal.hook import mutate_html
+from testbench.portal.render import PAGE_SIZE, render_results, result_set
+
+FIELDS: tuple[str, ...] = tuple(key for key, _ in COLUMNS)
+
+
+def _check(field: str) -> None:
+    if field not in FIELDS:
+        raise KeyError(f"no such field on the bench: {field!r}")
+
+
+def expected_values(day: dt.date, field: str, page: int = 1) -> list[str]:
+    _check(field)
+    window = result_set(day)[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
+    return [display_row(c)[field] for c in window]
+
+
+def expected_xpaths(day: dt.date, field: str, page: int = 1, *,
+                    catalogue: Sequence[CatalogueEntry] | None = None) -> list[str]:
+    _check(field)
+    marked = parse(mutate_html(day, render_results(day, page, mark_truth=True), catalogue=catalogue))
+    tree = marked.getroottree()
+    return [tree.getpath(el) for el in marked.xpath("//*[@data-sd-truth=$f]", f=field)
+            if isinstance(el, lxml.html.HtmlElement)]
+
+
+def expected_selector(day: dt.date, field: str) -> str:
+    """The first row's true node, as an absolute XPath. Kept for Task 26's single-element check."""
+    paths = expected_xpaths(day, field)
+    if not paths:
+        raise LookupError(f"no {field} cell on the bench page for {day.isoformat()}")
+    return paths[0]
+```
+
+- [ ] **Step 7: Widen and add the import contracts (bench spec §2)**
+
+In `.importlinter`, replace the `answer-key-isolation` stanza and append two more:
+
+```ini
+[importlinter:contract:answer-key-isolation]
+name = The product cannot see the bench -- the answer key or anything else in testbench
+type = forbidden
+source_modules = selector_drift
+forbidden_modules = testbench
+# Widened 2026-09-26 from testbench.answers (bench spec §2): the product must not know it is
+# being tested. Contract id unchanged so Task 1's test still finds it.
+
+[importlinter:contract:bench-stands-alone]
+name = The portal, the engine and the schedule do not import the product
+type = forbidden
+source_modules =
+    testbench.portal
+    testbench.mutations
+    testbench.schedule
+forbidden_modules = selector_drift
+
+[importlinter:contract:only-the-scorer-reads-the-product]
+name = Only testbench.score may import selector_drift.db
+type = forbidden
+source_modules = testbench
+forbidden_modules = selector_drift.db
+ignore_imports =
+    testbench.score -> selector_drift.db
+    testbench.score -> selector_drift.db.**
+# testbench.score does not exist yet; without this the ignore lines fail as unmatched.
+unmatched_ignore_imports_alerting = none
+```
+
+- [ ] **Step 8: Run the tests and confirm the contracts hold — and bite**
+
+Run: `uv run pytest tests/testbench -m unit -v`
+Expected: PASS — Task 7's 36 plus 28 new (`test_schedule.py` 7, `test_hook.py` 5, `test_answer_key.py` 14 while the production `CATALOGUE` is empty — it grows by one per class in Tasks 9–11A, `test_isolation.py` 2).
+
+Run: `uv run pytest tests/testbench -m e2e -v`
+Expected: PASS — Task 7's 5 plus `test_the_page_a_browser_sees_is_what_the_engine_produced[2026-09-09]` and `[2026-09-10]`.
+
+Run: `uv run lint-imports`
+Expected: every contract kept, 0 broken — `answer-key-isolation`, `bench-stands-alone` and `only-the-scorer-reads-the-product` listed by name.
+
+A green tick with nothing behind it is the failure M21 found once already, so prove both new
+directions fail when violated, then remove the probes:
 
 ```bash
-git add testbench/mutations testbench/schedule.py testbench/answers testbench/portal/middleware.ts tests/testbench
-git commit -m "feat(testbench): seeded mutation engine with isolated answer key"
+printf 'import selector_drift.db  # noqa: F401\n' > testbench/portal/_contract_probe.py
+uv run lint-imports; echo "exit=$?"        # expect: bench-stands-alone BROKEN, exit=1
+rm testbench/portal/_contract_probe.py
+printf 'import testbench.portal.data  # noqa: F401\n' > selector_drift/_contract_probe.py
+uv run lint-imports; echo "exit=$?"        # expect: answer-key-isolation BROKEN, exit=1
+rm selector_drift/_contract_probe.py
+uv run lint-imports                        # expect: all kept again
 ```
+
+Run: `uv run ruff check testbench tests/testbench && uv run mypy --strict testbench`
+Expected: clean.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add .importlinter testbench/mutations testbench/schedule.py testbench/answers testbench/portal/hook.py testbench/portal/app.py tests/testbench
+git commit -m "feat(testbench): in-process mutation engine, seeded schedule, isolated answer key"
+```
+
+---
+
+### Tasks 9–11A: amendment note (bench spec §4–§5)
+
+Tasks 9, 10, 11 and 11A are unchanged in class names and purpose. Apply these amendments when
+executing them; each is required for the task to run against Tasks 7–8 as written above.
+
+1. **The "before" page is the served page.** `render_fixture()` and `tests.testbench.helpers.render_fixture` do not exist. Every test that needs unmutated HTML calls
+   **`testbench.portal.render.render_results(day: date, page: int = 1, query: SearchQuery | None = None, *, mark_truth: bool = False) -> str`**
+   as `render_results(FIXTURE_DAY)`. Replace each import line with:
+
+   ```python
+   from testbench.portal.render import render_results
+   from tests.testbench.helpers import FIXTURE_DAY, cells, column, headers, is_plausible_amount
+   ```
+
+   (import only the names the file uses) and each `render_fixture()` with `render_results(FIXTURE_DAY)`. Task 11's test file uses `headers` without importing it; the line above fixes that.
+
+2. **Each class subclasses `MutationBase`** (Task 8): `name` is the class name, parsing and output go through `parse`/`serialise` so every mutation round-trips identically, and a class whose output varies by day (e.g. `LabelReword`'s replacement wording, `ColumnReorder`'s permutation) overrides `from_rng(rng)`. The no-argument constructor the tests call (`ClassRename()`, `DecoyColumn()`) must still work and produce a fixed, non-trivial instance.
+
+3. **Each task registers its classes** in `testbench/mutations/catalogue.py`, which becomes, after Task 11A:
+
+   ```python
+   from testbench.mutations.adversarial.decoy_column import DecoyColumn
+   from testbench.mutations.adversarial.duplicate_label import DuplicateLabel
+   from testbench.mutations.adversarial.hidden_decoy import HiddenDecoy
+   from testbench.mutations.adversarial.image_header import ImageHeader
+   from testbench.mutations.adversarial.locale_flip import LocaleFlip
+   from testbench.mutations.adversarial.value_swap import ValueSwap
+   from testbench.mutations.adversarial.virtualised_rows import VirtualisedRows
+   from testbench.mutations.base import CatalogueEntry, entry
+   from testbench.mutations.class_rename import ClassRename
+   from testbench.mutations.column_reorder import ColumnReorder
+   from testbench.mutations.dom_restructure import DomRestructure
+   from testbench.mutations.framework_markup import FrameworkMarkup
+   from testbench.mutations.id_churn import IdChurn
+   from testbench.mutations.label_reword import LabelReword
+   from testbench.mutations.pagination import Pagination
+   from testbench.mutations.table_to_div import TableToDiv
+
+   CATALOGUE: tuple[CatalogueEntry, ...] = (
+       *(entry(c, adversarial=False) for c in (
+           ClassRename, DomRestructure, ColumnReorder, TableToDiv,
+           LabelReword, IdChurn, FrameworkMarkup, Pagination)),
+       *(entry(c, adversarial=True) for c in (
+           DecoyColumn, HiddenDecoy, DuplicateLabel, ValueSwap,
+           LocaleFlip, VirtualisedRows, ImageHeader)),
+   )
+   ```
+
+   Task 9 adds the first four, Task 10 the next four, Task 11 `DecoyColumn`, Task 11A the rest. Registration automatically enrols each class in Task 8's `test_the_truth_marker_changes_attributes_only`, which must pass: a mutation that clones a cell (`DecoyColumn`, `HiddenDecoy`, `DuplicateLabel`) **removes `data-sd-truth` from the clone**, and none reads or drops a `data-sd-*` attribute.
+
+4. **Markup rules the tests rely on.** `TableToDiv` emits `div`s carrying ARIA roles `table` / `rowgroup` / `row` / `columnheader` / `cell` (a framework data grid), which is what `headers()`, `rows()` and `cells()` read. `ImageHeader` renders the header as `<img alt="Amount">`, which `accessible_text()` reads. No mutation renames a form field's `name` or the login form's submit button — `logged_in_page` addresses them, and a real portal's UI change never breaks its own login.
+
+5. **`ValueSwap` swaps `Amount` and `Reserve`** — the two same-format columns Task 7 provides — row-wise, cell text only, markup untouched. Task 11A adds, marked `unit`:
+
+   ```python
+   def test_value_swap_is_invisible_to_cross_field_checks():
+       """Bench spec §6.3. Every swapped value is still a plausible amount in a plausible column,
+       the markup skeleton is identical, and Task 7 proved no footing rule relates the two
+       columns -- so nothing but RowKeyContinuity (Task 22) can see it. Task 26 proves the gate
+       half."""
+       before = render_results(FIXTURE_DAY)
+       after = ValueSwap().apply(before)
+       assert column(after, "Amount") == column(before, "Reserve")
+       assert column(after, "Reserve") == column(before, "Amount")
+       assert all(is_plausible_amount(v) for v in column(after, "Amount") + column(after, "Reserve"))
+       assert skeleton(after) == skeleton(before)
+   ```
+
+   where `skeleton(html)` is added to `tests/testbench/helpers.py` as: parse, set every element's `.text` and `.tail` to `None`, `serialise`.
+
+6. **`VirtualisedRows` injects the only script** any bench page ever carries — exactly this, as the last child of `<body>`:
+
+   ```html
+   <script>document.addEventListener("DOMContentLoaded",function(){var r=Array.prototype.filter.call(document.querySelectorAll("tr,[role=row]"),function(x){return x.querySelector("td,[role=cell],[role=gridcell]")!==null});r.slice(10).forEach(function(x){x.remove()})});</script>
+   ```
+
+   Task 11A adds, marked `unit` and parametrised over `CATALOGUE`, `test_only_virtualised_rows_emits_a_script`: `"<script" in entry.build(Random(0)).apply(render_results(FIXTURE_DAY))` is true for `VirtualisedRows` alone. Once it is registered, Task 8's `FIXED_DAYS` picks up a day that schedules it, and the served-equals-tested test proves the browser's post-script DOM matches the engine's.
+
+7. **Step 4 run commands** in Tasks 9–11 name the task's own test file (`uv run pytest tests/testbench/test_structural_mutations.py -v` → PASS, 5 tests; `test_semantic_mutations.py` → PASS, 5 tests; `test_adversarial.py` → PASS, 2 tests after Task 11), because `tests/testbench` now also holds Tasks 7–8's tests. Every test carries exactly one marker, `unit`.
 
 ---
 
@@ -1296,7 +3955,13 @@ Each class below attacks a *different* rung or check, and each has a test assert
 | `VirtualisedRows` | 10 of 100 rows in the DOM | The row-count contract (Task 29), not the resolver |
 | `ImageHeader` | Rung 4's header verification when the header is an `<img alt="Amount">` | Header verification must read accessible text, not `textContent` |
 
-- [ ] **Step 1: Write the failing tests** — one per class, each asserting `isinstance(result, QuarantinedRun)` **and** naming the verdict that refused it. Asserting only that the run quarantined would pass for the wrong reason: with `history=None` the distributional check returns `INSUFFICIENT`, which on a heal is already a `FAIL`. Task 26's decoy test gets this right; copy its shape.
+**Sequencing corrected 2026-09-26.** The first text had this task assert `isinstance(result,
+QuarantinedRun)` — but `QuarantinedRun` and `gate()` do not exist until Tasks 20–25, so those tests
+could not run where this task sits. This task now proves each mutation's **markup property** (the
+attack is really present in the served DOM); the **refusal** of each class, naming the verdict that
+refused it, moves to Task 26's adversarial suite, which runs after the gate exists.
+
+- [ ] **Step 1: Write the failing tests** — one per class, asserting the markup property the table above names: `HiddenDecoy` adds an element with `aria-label="Claim Number"` that has `aria-hidden="true"` or a `display:none` ancestor; `DuplicateLabel` yields exactly two header cells whose text is `Claim Number`; `ValueSwap` leaves markup identical while each row's `Amount` and `Reserve` values are exchanged (bench spec §4); `LocaleFlip` rewrites every currency value to `1.234,56` form; `VirtualisedRows` adds exactly one inline script and leaves all rows in the served HTML; `ImageHeader` replaces the `Amount` header text with `<img alt="Amount">`. Every test renders its "before" with `testbench.portal.data.render_results(day)` (Task 7).
 
 - [ ] **Step 2: Run them and watch them fail.** Run: `uv run pytest tests/testbench/test_adversarial.py -v`
 
@@ -1316,54 +3981,516 @@ git commit -m "feat(testbench): six further adversarial mutation classes"
 ### Task 12: Deploy the bench and point the log at it
 
 **Files:**
-- Create: `.github/workflows/deploy-testbench.yml`
-- Create: `testbench/README.md` (mutation engine documented — DoD item 5)
+- Create: `testbench/Dockerfile`, `testbench/Dockerfile.dockerignore`
+- Create: `deploy/Caddyfile`
+- Create: `.github/workflows/testbench-image.yml`
+- Create: `testbench/README.md` (DoD item 5)
+- Modify: `docker-compose.yml` (`testbench` and `caddy` services, `caddy-data` / `caddy-config` volumes)
+- Modify: `.env.example`
 - Modify: `selector_drift/browser/registry.py`
 - Modify: `docs/methodology.md`
+- Test: `tests/testbench/test_deployment.py`, `tests/browser/test_registry_bench.py`, `tests/testbench/test_runner_identity.py`
 
 **Interfaces:**
-- Consumes: `registry.url_for` (Task 4).
-- Produces: a stable deployed bench URL that mutates by date without a redeploy.
+- Consumes: `create_app` (Task 8), `registry.url_for` and `browser.driver.open` (Task 4), `load_scope` (Task 5), `ScopeRecord` / `authorise` (Task 2), `CATALOGUE` (Tasks 9–11A).
+- Produces: a stable HTTPS bench URL on the P-4 VM that mutates by UTC date without a redeploy; `registry.url_for("testbench")` pointing inside the bench's one scope origin; a README that documents every mutation class and how to reproduce a day's DOM.
 
-- [ ] **Step 1: Deploy the bench to the P-4 VM** as a container built from `testbench/portal`, behind
-  the same reverse proxy as the API, at a stable URL.
+**Decided 2026-08-29 (OQ4/M28): the P-4 VM, not Vercel.** Hobby is non-commercial and the bench is
+the artifact a paying buyer is handed; the VM has to exist anyway. **Built for `arm64`** (bench spec
+§7): the free Oracle shape is Ampere, and a locally built `amd64` image will not run there. The image
+is built *on* the VM, where the architecture is native, and CI proves the `linux/arm64` build under
+QEMU on every change to the bench so the first night is not the first time anyone finds out.
 
-**Decided 2026-08-29 (OQ4/M28): not Vercel.** Hobby is non-commercial and the bench is the artifact a
-paying buyer is handed. Self-hosting on the VM that has to exist anyway for P-4 costs nothing extra,
-keeps the licence argument off the table, and removes a second free-tier quota (`00` B6) from the
-nightly path. Mutation is a runtime transform driven by a date-derived seed, so the bench needs no
-platform feature beyond serving HTTP.
+**Why the bench sits behind the same Caddy as the API, at one origin.** The bench's scope record lists
+exactly one origin, so the browser's allowlist (Task 4, H2) names a single host, and one reverse proxy
+terminates TLS for both. Task 34 adds the API's site block to the same `deploy/Caddyfile`.
 
-- [ ] **Step 2: Verify the deployed markup mutates by date**
+**Why Step 7's verification now works (M27).** The first draft's `TESTBENCH_DATE_OVERRIDE=... curl`
+set a variable on the local `curl` process, which never reaches a server, and would have printed two
+identical hashes. The override now travels in the request as a date plus its HMAC signature, and an
+unsigned header is ignored, so the same commands also prove a stranger cannot steer the bench.
 
-```bash
-curl -s "$BENCH_URL/results" | sha256sum
-curl -s -H "X-Testbench-Date: 2026-09-10" "$BENCH_URL/results" | sha256sum
+- [ ] **Step 0: Bump the bench's task spec to version 2 — all six columns (found 2026-09-26)**
+
+Task 5's `specs/testbench.yaml` extracts one field, `claim_number` — correct on day one, when no bench
+existed. The suites (Tasks 26, 26B), the scorer (26C) and every adversarial class target `amount` and
+`reserve`, so the log must extract them, and this is the moment: the real bench is up. A version bump
+is the documented way to change what a spec means — the cache is keyed by `spec_version` (M14), so no
+rung-1 hit survives from version 1 — and the log's start date is unaffected, because the run records
+were always there.
+
+```yaml
+# specs/testbench.yaml
+version: 2
+scope_ref: scopes/testbench.yaml
+schedule: "12 4 * * *"
+row_scope: each row of the results table
+natural_key: [ claim_number ]
+expected_schema:
+  claim_number: string
+  claimant: string
+  amount: decimal
+  reserve: decimal
+  status: string
+  filed: date
+navigate:
+  - { step: goto, path: /login }
+  - { step: fill, field: username, value_from: credentials.username }
+  - { step: fill, field: password, value_from: credentials.password }
+  - { step: click, role: button, name: Sign in }
+  - { step: goto, path: /results }
+targets:
+  - name: claim_number
+    description: the claim number cell in the results table
+    relation: right_of
+    assertions:
+      - { type: format, pattern: '^[A-Z]{2}\d{8}$' }
+  - name: claimant
+    description: the claimant's name in the same row
+    assertions:
+      - { type: format, pattern: '^\S.{0,79}$' }
+  - name: amount
+    description: the claimed amount in the same row
+    distributional: true
+    assertions:
+      - { type: format, pattern: '^\d{1,3}(,\d{3})*\.\d{2}$' }
+      - { type: domain, rule: { min: 100.00, max: 250000.00 } }
+  - name: reserve
+    description: the reserve amount in the same row
+    distributional: true
+    assertions:
+      - { type: format, pattern: '^\d{1,3}(,\d{3})*\.\d{2}$' }
+      - { type: domain, rule: { min: 100.00, max: 250000.00 } }
+  - name: status
+    description: the claim status in the same row
+    assertions:
+      - { type: domain, rule: { enum: [ Open, Pending, Paid, Closed ] } }
+  - name: filed
+    description: the date the claim was filed, in the same row
+    assertions:
+      - { type: format, pattern: '^\d{4}-\d{2}-\d{2}$' }
+      - { type: domain, rule: { date_after: '2023-01-01' } }
 ```
 
-Expected: two different hashes.
+**No `cross_field` assertion between `amount` and `reserve`, deliberately** (bench spec §4): they have
+no arithmetic relation, so `ValueSwap` can be caught only by `RowKeyContinuity` — the claim Task 11A
+makes and Task 26 tests. The amount pattern is strict (`1,234.56`), so `LocaleFlip` (`1.234,56`) fails
+`FormatAssertion` as well as `DomainAssertion`; Task 26 asserts the named verdict is *among* the
+failures, so both failing is correct.
 
-**The first draft of this step could not verify anything (M27).** It read
-`TESTBENCH_DATE_OVERRIDE=2026-09-10 curl ...`, which sets an environment variable for the local
-`curl` process; `curl` does not forward it to a remote server. It would print two identical hashes,
-and the likely response to that is to assume mutation works. The override has to travel in the
-request — a header the deployed app reads, gated to non-production or to a shared secret so a public
-bench cannot have its schedule steered by a stranger.
+Add to `tests/spec/test_loader.py`:
 
-- [ ] **Step 3: Point the registry at the deployed URL and confirm the cron still writes run records**
+```python
+@pytest.mark.unit
+def test_the_bench_spec_extracts_all_six_columns_with_no_amount_reserve_relation() -> None:
+    spec = load_spec(Path("specs/testbench.yaml"))
+    assert spec.version == 2
+    assert [t.name for t in spec.targets] == ["claim_number", "claimant", "amount",
+                                               "reserve", "status", "filed"]
+    assert not any(a.type == "cross_field" for t in spec.targets for a in t.assertions)
+```
 
-Run: `psql -c "select state, count(*) from runs group by state"`
-Expected: `completed` rows continuing to accumulate for `testbench`.
+- [ ] **Step 1: Write the failing tests**
 
-- [ ] **Step 4: Write `testbench/README.md`** documenting every mutation class, the seeding scheme, and how to reproduce a given day's DOM.
+```python
+# tests/testbench/test_deployment.py
+from __future__ import annotations
 
-- [ ] **Step 5: Record the bench's start date and mutation schedule in `docs/methodology.md`.**
+from pathlib import Path
 
-- [ ] **Step 6: Commit**
+import pytest
+import yaml
+
+from testbench.mutations.catalogue import CATALOGUE
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.unit
+def test_the_bench_container_is_hardened() -> None:
+    compose = yaml.safe_load((REPO / "docker-compose.yml").read_text(encoding="utf-8"))
+    bench = compose["services"]["testbench"]
+    assert bench["read_only"] is True
+    assert bench["user"] == "10001:10001"
+    assert bench["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in bench["security_opt"]
+    assert not any("unconfined" in opt for opt in bench["security_opt"])
+    assert "/tmp" in bench["tmpfs"]
+    assert "ports" not in bench, "only Caddy is published; the bench is reachable through it"
+
+
+@pytest.mark.unit
+def test_the_image_runs_the_factory_as_a_non_root_user() -> None:
+    dockerfile = (REPO / "testbench" / "Dockerfile").read_text(encoding="utf-8")
+    assert "FROM python:3.12-slim" in dockerfile
+    assert "USER 10001:10001" in dockerfile
+    assert '"testbench.portal.app:create_app", "--factory"' in dockerfile
+    assert "--only-group testbench" in dockerfile
+
+
+@pytest.mark.unit
+def test_ci_proves_the_arm64_build() -> None:
+    workflow = yaml.safe_load((REPO / ".github/workflows/testbench-image.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["build-arm64"]["steps"]
+    assert any(step.get("with", {}).get("platforms") == "linux/arm64" for step in steps)
+
+
+@pytest.mark.unit
+def test_env_example_declares_the_bench_secrets_without_values() -> None:
+    pairs = dict(line.split("=", 1) for line in
+                 (REPO / ".env.example").read_text(encoding="utf-8").splitlines()
+                 if line and not line.startswith("#") and "=" in line)
+    assert pairs["TESTBENCH_SESSION_SECRET"] == ""
+    assert pairs["TESTBENCH_OVERRIDE_SECRET"] == ""
+    assert "BENCH_HOST" in pairs
+
+
+@pytest.mark.unit
+def test_the_readme_documents_every_mutation_class() -> None:
+    """DoD 5: every mutation class, the seeding, and how to reproduce a day's DOM."""
+    readme = (REPO / "testbench" / "README.md").read_text(encoding="utf-8")
+    assert len(CATALOGUE) == 15
+    for entry in CATALOGUE:
+        assert f"`{entry.name}`" in readme, entry.name
+    for phrase in ("sd-mutation-seed", "X-Testbench-Signature", "mutate_html", "sha256"):
+        assert phrase in readme
+```
+
+```python
+# tests/browser/test_registry_bench.py
+from __future__ import annotations
+
+from pathlib import Path
+from urllib.parse import urlsplit
+
+import pytest
+
+from selector_drift.browser.registry import url_for
+from selector_drift.spec.loader import load_scope
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.unit
+def test_the_bench_scope_record_names_exactly_one_origin() -> None:
+    assert len(load_scope(REPO / "scopes" / "testbench.yaml").origins) == 1
+
+
+@pytest.mark.unit
+def test_the_registry_points_inside_the_bench_scope_record() -> None:
+    """Compared as scheme + host, never by string prefix: https://bench.example.org.evil
+    starts with https://bench.example.org."""
+    origin = urlsplit(load_scope(REPO / "scopes" / "testbench.yaml").origins[0])
+    url = urlsplit(url_for("testbench"))
+    assert url.scheme == "https"
+    assert (url.scheme, url.netloc) == (origin.scheme, origin.netloc)
+```
+
+```python
+# tests/testbench/test_runner_identity.py
+from __future__ import annotations
+
+import datetime as dt
+import logging
+
+import pytest
+
+from selector_drift.browser import driver
+from selector_drift.scope.gate import authorise
+from selector_drift.scope.record import Basis, ScopeRecord
+
+CONTACT = "https://example.invalid/selector-drift-contact"
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_the_runner_identifies_itself_to_the_bench(
+        bench_server: str, monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture) -> None:
+    """Brief §3.3, checked from the other end: every request the product's driver makes reaches
+    the bench carrying the scope record's contact URL. Task 4's driver reads the URL through
+    `registry.url_for` at call time, so patching the module attribute points it at this server."""
+    today = dt.datetime.now(dt.UTC).date()
+    record = ScopeRecord(
+        target="testbench", basis=Basis.SELF_OWNED, authorising_party="test",
+        authorised_on=today - dt.timedelta(days=1), expires_on=today + dt.timedelta(days=30),
+        evidence_uri=None, evidence_sha256=None, origins=[bench_server],
+        rate_limit={"requests": 1, "per_seconds": 1}, user_agent_contact=CONTACT,
+        first_heal_policy="auto_promote", legal_review="self_drafted",
+    )
+    target = authorise(record, today=today)
+    monkeypatch.setattr("selector_drift.browser.registry.url_for", lambda _name: bench_server)
+    caplog.set_level(logging.INFO, logger="testbench.access")
+    async with driver.open(target) as session:
+        await session.page.content()
+    agents = [getattr(r, "user_agent", "") for r in caplog.records if r.name == "testbench.access"]
+    assert agents and all(CONTACT in agent for agent in agents)
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `uv run pytest tests/testbench/test_deployment.py tests/browser/test_registry_bench.py -v`
+Expected: FAIL — `FileNotFoundError` for `testbench/Dockerfile`, `.github/workflows/testbench-image.yml` and `testbench/README.md`; `KeyError: 'testbench'` for the compose service and `KeyError: 'TESTBENCH_SESSION_SECRET'` for `.env.example`; the registry test fails because `url_for("testbench")` does not yet match the scope record's origin.
+
+- [ ] **Step 3: Write the image**
+
+`testbench/Dockerfile` (the `# syntax=` parser directive must stay the file's first line):
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+# Multi-arch base images: built on the P-4 VM this is linux/arm64 natively (bench spec §7).
+# CI proves the arm64 build explicitly (.github/workflows/testbench-image.yml).
+FROM python:3.12-slim AS build
+COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /usr/local/bin/uv
+WORKDIR /src
+COPY pyproject.toml uv.lock ./
+# Exactly the bench's dependency group -- none of the product's (no prefect, playwright, duckdb).
+RUN uv export --frozen --only-group testbench --no-emit-project -o /tmp/requirements.txt \
+ && uv venv /opt/venv \
+ && uv pip install --python /opt/venv/bin/python -r /tmp/requirements.txt
+
+FROM python:3.12-slim
+RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin bench
+COPY --from=build /opt/venv /opt/venv
+WORKDIR /app
+COPY testbench/ /app/testbench/
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONPATH=/app \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+USER 10001:10001
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200 else 1)"]
+CMD ["uvicorn", "testbench.portal.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"]
+```
+
+`--no-access-log` turns off uvicorn's own line; the bench's `testbench.access` logger (Task 7) is the
+one that records the User-Agent. `PYTHONDONTWRITEBYTECODE` is what lets the root filesystem be
+read-only.
+
+```text
+# testbench/Dockerfile.dockerignore
+*
+!pyproject.toml
+!uv.lock
+!testbench
+!testbench/**
+testbench/**/__pycache__
+```
+
+- [ ] **Step 4: Add the services, the proxy and the environment**
+
+Add to `docker-compose.yml` under `services:`
+
+```yaml
+  testbench:
+    build:
+      context: .
+      dockerfile: testbench/Dockerfile
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ ALL ]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs: [ "/tmp" ]
+    mem_limit: 256m
+    pids_limit: 128
+    environment:
+      TESTBENCH_SESSION_SECRET: ${TESTBENCH_SESSION_SECRET:-}
+      TESTBENCH_OVERRIDE_SECRET: ${TESTBENCH_OVERRIDE_SECRET:-}
+    expose: [ "8080" ]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8
+    ports: [ "80:80", "443:443" ]
+    environment:
+      BENCH_HOST: ${BENCH_HOST:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [ testbench ]
+    restart: unless-stopped
+```
+
+and under the top-level `volumes:` key (create it if absent):
+
+```yaml
+  caddy-data:
+  caddy-config:
+```
+
+The secrets default to empty, so `docker compose up` from `.env.example` alone still boots: Task 7's
+`Settings` then uses a random per-process session secret and switches the date override off.
+
+```text
+# deploy/Caddyfile
+{$BENCH_HOST} {
+	reverse_proxy testbench:8080
+}
+```
+
+Append to `.env.example`:
 
 ```bash
-git add .github/workflows/deploy-testbench.yml testbench/README.md selector_drift/browser/registry.py docs/methodology.md
-git commit -m "chore(testbench): deploy and wire into the 90-day log"
+# Test bench (Task 12). Set real values in the VM's .env only -- never in the repo.
+# Generate each with: python -c "import secrets; print(secrets.token_hex(32))"
+TESTBENCH_SESSION_SECRET=
+TESTBENCH_OVERRIDE_SECRET=
+# The bench's public host name; must match the single origin in scopes/testbench.yaml.
+BENCH_HOST=
+```
+
+- [ ] **Step 5: Prove the arm64 build in CI**
+
+```yaml
+# .github/workflows/testbench-image.yml
+name: testbench-image
+on:
+  push:
+    paths: [ "testbench/**", "pyproject.toml", "uv.lock", ".github/workflows/testbench-image.yml" ]
+  pull_request:
+    paths: [ "testbench/**", "pyproject.toml", "uv.lock", ".github/workflows/testbench-image.yml" ]
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build for linux/arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: testbench/Dockerfile
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: selector-drift-testbench:ci
+      - name: Smoke-test the arm64 image under emulation
+        run: |
+          docker run -d --platform linux/arm64 --name bench --read-only --tmpfs /tmp \
+            --cap-drop ALL --security-opt no-new-privileges:true -p 8080:8080 selector-drift-testbench:ci
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/healthz && exit 0; sleep 2; done
+          docker logs bench; exit 1
+```
+
+The job runs on a standard hosted runner under QEMU: arm64 hosted runners are not free for a private
+repository, and the repo is private until build week 8.
+
+- [ ] **Step 6: Point the registry at the bench and write the README**
+
+In `selector_drift/browser/registry.py`, set the `testbench` entry to the exact origin in
+`scopes/testbench.yaml` — the same `https://<bench-host>` value P-4 fixes, with no path. The registry
+test (Step 1) now pins the two together.
+
+Write `testbench/README.md` with these sections, each complete:
+
+- **What this is** — the treatment arm of the ninety-day log and the artifact a buyer checks the claims against; server-rendered FastAPI + Jinja2; ships no JavaScript of its own.
+- **The demo account** — `demo` / `demo`, public on purpose; it exercises the credential path, it protects nothing.
+- **Pages** — `/login`, `/search`, `/results` (50 rows per page), `/claims/{claim_number}`, `/export.csv`, `/healthz`.
+- **The dataset** — six columns (`Claim Number`, `Claimant`, `Amount`, `Reserve`, `Status`, `Filed`), 500 claims from seed `0` on 2026-01-01, the daily delta (≈2% change, ≈3 close, ≈5 filed, >3 years archived), and why `Reserve` has no relation to `Amount`.
+- **Mutation classes** — a table naming every class in backticks with one line each: benign `ClassRename`, `DomRestructure`, `ColumnReorder`, `TableToDiv`, `LabelReword`, `IdChurn`, `FrameworkMarkup`, `Pagination`; adversarial `DecoyColumn`, `HiddenDecoy`, `DuplicateLabel`, `ValueSwap`, `LocaleFlip`, `VirtualisedRows`, `ImageHeader`, each with the control that must refuse it (Task 11A's table).
+- **Seeding** — `seed = sha256(f"{day}:testbench")`, day = the request's **UTC** date; one or two benign classes daily, one adversarial class about one day in seven, applied last; every HTML response carries `<meta name="sd-mutation-seed" content="<seed>;<names>">`.
+- **The date override** — `X-Testbench-Date` plus `X-Testbench-Signature` = hex HMAC-SHA256 of the date under `TESTBENCH_OVERRIDE_SECRET`; unsigned or mis-signed headers are ignored; for verification only; the product never sends it.
+- **Reproducing a day's DOM** — check out the commit that served the day (adding a class changes the schedule), then:
+
+  ```bash
+  uv run python -c "import datetime as dt; from testbench.portal.hook import mutate_html; \
+  from testbench.portal.render import render_results; d = dt.date(2026, 9, 10); \
+  print(mutate_html(d, render_results(d)))"
+  ```
+
+  and compare the `sd-mutation-seed` tag with the stored snapshot's.
+- **The answer key** — `testbench/answers/key.py`, importable by tests and the scorer only; the import contracts that enforce it.
+- **Running it** — `uv run uvicorn testbench.portal.app:create_app --factory --port 8080`, or `docker compose up testbench caddy`.
+
+- [ ] **Step 7: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/testbench/test_deployment.py tests/browser/test_registry_bench.py -m unit -v`
+Expected: PASS, 7 tests.
+
+Run: `uv run pytest tests/testbench/test_runner_identity.py -m e2e -v` (needs the compose Postgres for Task 4's persistent rate limiter)
+Expected: PASS, 1 test.
+
+Run: the full check.
+Expected: PASS, coverage ≥ 75%.
+
+- [ ] **Step 8: Commit and push**
+
+```bash
+git add testbench/Dockerfile testbench/Dockerfile.dockerignore deploy/Caddyfile .github/workflows/testbench-image.yml testbench/README.md docker-compose.yml .env.example selector_drift/browser/registry.py tests/testbench/test_deployment.py tests/browser/test_registry_bench.py tests/testbench/test_runner_identity.py
+git commit -m "chore(testbench): arm64 container behind Caddy, registry pointed at the bench"
+git push
+```
+
+- [ ] **Step 9: Deploy on the P-4 VM and confirm the architecture**
+
+```bash
+ssh <p4-vm>
+cd ~/selector-drift && git pull --ff-only
+# .env on the VM holds TESTBENCH_SESSION_SECRET, TESTBENCH_OVERRIDE_SECRET and BENCH_HOST.
+docker compose build testbench
+docker compose up -d testbench caddy
+docker compose exec testbench uname -m          # expect: aarch64
+curl -fsS "https://$(grep '^BENCH_HOST=' .env | cut -d= -f2)/healthz"   # expect: ok
+```
+
+- [ ] **Step 10: Verify the deployed markup mutates by date — and only for a signed request**
+
+On the VM (the secret is read from `.env` into the shell and never echoed):
+
+```bash
+set -a; . ./.env; set +a
+BENCH_URL="https://$BENCH_HOST"
+DAY=$(date -u -d '30 days ago' +%F)        # any day that is not today, on or after 2026-01-01
+SIG=$(printf %s "$DAY" | openssl dgst -sha256 -hmac "$TESTBENCH_OVERRIDE_SECRET" -r | cut -d' ' -f1)
+
+curl -s -c demo.cookies -o /dev/null -d username=demo -d password=demo "$BENCH_URL/login"
+curl -s -b demo.cookies "$BENCH_URL/results" | sha256sum
+curl -s -b demo.cookies -H "X-Testbench-Date: $DAY" -H "X-Testbench-Signature: $SIG" \
+     "$BENCH_URL/results" | sha256sum
+curl -s -b demo.cookies -H "X-Testbench-Date: $DAY" "$BENCH_URL/results" | sha256sum
+curl -s -b demo.cookies -H "X-Testbench-Date: $DAY" -H "X-Testbench-Signature: $SIG" \
+     "$BENCH_URL/results" | grep -o '<meta name="sd-mutation-seed"[^>]*>'
+printf %s "$DAY:testbench" | sha256sum
+rm demo.cookies
+```
+
+Expected: the first two hashes **differ** (signed override honoured); the third **equals** the first
+(unsigned header ignored); the seed in the printed `<meta>` tag equals the last line's hash. Run the
+block within one UTC day — across 00:00 UTC the unsigned request legitimately changes.
+
+- [ ] **Step 11: Confirm the runner identifies itself and the cron still writes run records**
+
+After the next scheduled fire (or `uv run python -m selector_drift` on the VM):
+
+```bash
+docker compose logs testbench --since 24h | grep 'access' | grep -c "$(grep '^user_agent_contact:' scopes/testbench.yaml | awk '{print $2}')"
+psql -c "select state, count(*) from runs where run_key like 'testbench:%' group by state"
+```
+
+Expected: a non-zero count of access lines carrying the scope record's contact URL, and `completed`
+rows continuing to accumulate for `testbench`.
+
+- [ ] **Step 12: Record the bench in `docs/methodology.md`**
+
+Add a **Test bench** section stating: the bench's HTTPS origin and the UTC date it first served the
+nightly run (from Step 11's first `completed` row, not from memory); that it is the treatment arm; the
+seeding scheme and the request-day rule (UTC, M20); that the product never sends the override and the
+scorer reads the seed from each stored snapshot's `sd-mutation-seed` tag; that a day's DOM is
+reproducible from (date, commit); the benign/adversarial draw rates; and that
+`test_the_page_a_browser_sees_is_what_the_engine_produced` guards served-equals-tested in CI.
+
+- [ ] **Step 13: Commit**
+
+```bash
+git add docs/methodology.md
+git commit -m "docs(methodology): record the test bench's start date and mutation schedule"
+git push
 ```
 
 ---
@@ -1413,7 +4540,7 @@ returning.**
   - `RungAttempt(rung_id: int, ok: bool, reason: str, ms: int)`
   - `CascadeTrace(attempts: list[RungAttempt], winner: int | None)` with property `.healed: bool` — **`True` when `winner != 1`**. Task 20's asymmetry reads exactly this property.
   - `resolve_cascade(page: PageSource, target, cache) -> tuple[ResolvedElement, CascadeTrace]` — writes one `resolutions` row per call, win or lose (R5/C4), which is what gives `rung_stats()` a denominator
-  - `node_id` is minted by the `PageSource`, **never derived from the selector (R10/C5)**. Live: inject a `data-sd-node` attribute and read it back. Static: the element's structural path in the parsed tree. Task 22 compares `node_id`; comparing `selector` strings would be wrong in both directions — `#claim` and `td:nth-child(1)` routinely name the same node, and the same selector string can be produced against different snapshots
+  - `node_id` is minted by the `PageSource`, **never derived from the selector (R10/C5)**. Live: inject a `data-sd-node` attribute and read it back. Static: the element's absolute XPath in the parsed tree, **exactly `el.getroottree().getpath(el)` from `lxml`** — pinned 2026-09-26 so the bench's answer key (`expected_xpaths`, Task 8), which uses the same call, is directly comparable with no selector-string step. Task 22 compares `node_id`; comparing `selector` strings would be wrong in both directions — `#claim` and `td:nth-child(1)` routinely name the same node, and the same selector string can be produced against different snapshots
   - `REGISTERED_RUNGS: list[Rung]` — populated as Tasks 14–18 land; Task 41 asserts its ids are `[1,2,3,4,5]`
 
 - [ ] **Step 1: Write the failing tests**
@@ -1483,6 +4610,46 @@ Expected: PASS, 3 tests. mypy clean.
 git add selector_drift/resolve tests/resolve
 git commit -m "feat(resolve): Rung protocol, cascade trace, instrumented runner"
 ```
+
+**Amendments of 2026-09-26 — names later tasks depend on, pinned so each has exactly one home.**
+
+- **`Family`, `AnchorEvidence`, `ResolvedElement`, `CascadeTrace`, `RungAttempt` and the `Rung`
+  protocol live in `selector_drift/resolve/trace.py`**, not in `resolve/rungs/` (`rungs/base.py`
+  re-exports `Rung` for the concrete rungs' convenience). `validate/` must reach them and the
+  `judge-reaches-rungs-only-by-protocol` contract forbids `validate → resolve.rungs`; the API's
+  `api-is-read-side` contract (Task 34) permits `api → resolve.trace` and nothing else under `resolve/`.
+- **`RungAttempt` has a fixed shape**, because `resolutions.attempts` is published through
+  `RungAttemptView` (API spec §4.3) and is frozen from day one:
+
+  ```python
+  # selector_drift/resolve/trace.py  (addition)
+  AttemptOutcome = Literal["resolved", "no_match", "ambiguous", "not_visible",
+                           "anchor_mismatch", "escalated"]
+
+  @dataclass(frozen=True)
+  class RungAttempt:
+      rung: int
+      family: Family
+      outcome: AttemptOutcome
+      ms: int
+
+      def as_json(self) -> dict[str, object]:     # exactly what resolutions.attempts stores
+          return {"rung": self.rung, "family": self.family.value,
+                  "outcome": self.outcome, "ms": self.ms}
+  ```
+
+  The runner builds each `RungAttempt` from the rung's result; a rung never writes `resolutions`.
+- **`Family` values are their names, upper-case:** `Family(StrEnum)` with `TEXT_SEMANTIC =
+  "TEXT_SEMANTIC"`, `STRUCTURAL = "STRUCTURAL"`, `VALUE = "VALUE"`, `NONE = "NONE"`. The value is what
+  `resolutions.attempts` and `heal_events.confirmer_family` store, and the web's fixtures seed it.
+- **`resolve_cascade(page, target, cache, *, record: bool = True)`.** `record=False` is replay
+  (Task 19) and the mutation suites: no `resolutions` row, and rung 5 never runs. Without it every
+  replay and every suite run would add rows to the denominator of a published figure (C4).
+- **The static `node_id` is exactly lxml's `el.getroottree().getpath(el)`** (see the Produces bullet).
+- **`LivePageSource` lives in `selector_drift/browser/page_source.py` and is built by `await LivePageSource.snapshot(page: PageHandle)`**: it injects
+  `data-sd-node` on every element in one `evaluate()` call, then reads `outerHTML` and the
+  accessibility tree once. Its `node_id(node)` is that attribute's value. This is P1's snapshot-once,
+  named.
 
 ---
 
@@ -1652,7 +4819,11 @@ git commit -m "feat(resolve): rung 4, heuristics with header verification"
 - Produces:
   - `CachedSelector(selector: str, anchor: AnchorEvidence, set_by_rung: int)`
   - `SelectorCache.get(target: str, field: str) -> CachedSelector | None`
-  - `SelectorCache.put(validated: ValidatedExtraction, element: ResolvedElement) -> None` — **the entire write-back. Self-healing is this line and nothing else** — and its *first argument is the gate's output type* (R11/C2).
+  - ~~`SelectorCache.put(validated, element)`~~ — **moved 2026-09-26 to `orchestrate/cache_writer.py` as `CacheWriter.put(validated, element, *, field)`**; see *"Amended 2026-09-26"* at the end of this task. It is still **the entire write-back — self-healing is this line and nothing else** — and its first argument is still the gate's output type (R11/C2). It left `resolve/` because keeping it there made `resolve/` import `validate/`, which Task 1's `judged-cannot-call-judge` contract forbids.
+
+> **Executor note.** In Step 1 below, the three tests that call `warm_cache.put(...)` are written in
+> `tests/orchestrate/test_cache_writer.py` against `CacheWriter`, and run with Task 26A. Do **not**
+> implement `put` in `resolve/cache.py`; this task delivers the read side only.
 
 **When `put()` is called is the whole safety argument, and the first draft did not say (C2).**
 It described `put()` as the write-back and left the timing to the implementer. The obvious reading —
@@ -1743,6 +4914,80 @@ git add selector_drift/resolve/rungs/r1_cache.py selector_drift/resolve/cache.py
 git commit -m "feat(resolve): rung 1 verifies anchor provenance, not just the selector"
 ```
 
+**Amended 2026-09-26: the write-back moves out of `resolve/` — the old signature broke an import
+contract.** `SelectorCache.put(validated: ValidatedExtraction, element)` makes `resolve/cache.py`
+import `validate/`, which the `judged-cannot-call-judge` contract (Task 1) forbids. R11/C2 and the
+independence contract could not both hold as written.
+
+The fix keeps C2's guarantee exactly — *there is no way to spell the cache write without first
+spelling "the gate passed"* — and moves the spelling into the one package allowed to import both:
+
+- `resolve/cache.py` keeps **read only**: `CachedSelector`, the `CacheReader` protocol (Task 19),
+  `SelectorCache.get(target, field, spec_version=None)`.
+- **New: `selector_drift/orchestrate/cache_writer.py`**:
+
+  ```python
+  # selector_drift/orchestrate/cache_writer.py
+  """The self-healing write-back. The whole of it. Callable only with the gate's output."""
+  from __future__ import annotations
+
+  import datetime as dt
+  from collections.abc import Callable
+
+  from sqlalchemy.orm import Session as OrmSession
+
+  from selector_drift.db.models import SelectorCacheEntry
+  from selector_drift.db.session import Session
+  from selector_drift.resolve.trace import ResolvedElement
+  from selector_drift.validate.gate import ValidatedExtraction
+
+
+  class CacheWriter:
+      """Bound to one (target, spec_version): the cache's key minus the field (M14)."""
+
+      def __init__(self, *, target: str, spec_version: int,
+                   session_factory: Callable[[], OrmSession] = Session) -> None:
+          self.target, self.spec_version, self._sessions = target, spec_version, session_factory
+
+      @classmethod
+      def for_run_key(cls, run_key: str) -> CacheWriter:
+          target, spec_version, _window = run_key.split(":")      # Task 6's run_key() format
+          return cls(target=target, spec_version=int(spec_version))
+
+      def put(self, validated: ValidatedExtraction, element: ResolvedElement, *,
+              field: str) -> None:
+          if not isinstance(validated, ValidatedExtraction):      # mypy is the first line
+              raise TypeError("the cache is written only from a ValidatedExtraction (C2)")
+          with self._sessions() as s:
+              s.merge(SelectorCacheEntry(
+                  target=self.target, field=field, spec_version=self.spec_version,
+                  selector=element.selector, anchor=element.anchor.model_dump(mode="json"),
+                  node_id=element.node_id, set_by_rung=element.rung_id,
+                  set_at=dt.datetime.now(dt.UTC), set_by_run_key=validated.run_key))
+              s.commit()
+  ```
+
+- Task 17's tests `test_put_stores_the_anchor_from_the_healing_rung`,
+  `test_a_quarantined_heal_does_not_update_the_cache` and
+  `test_put_cannot_be_called_with_anything_but_a_validated_extraction` move to
+  `tests/orchestrate/test_cache_writer.py` and call `CacheWriter(target=..., spec_version=...).put(
+  validated, element, field=...)`; they run with Task 26A. Task 26A's `accept()` takes a `CacheWriter`
+  and calls `cache.put(validated, element, field=name)` for each field.
+- Add to `.importlinter`, so the move cannot silently regress:
+
+  ```ini
+  [importlinter:contract:only-orchestrate-writes-the-cache]
+  name = The selector cache is written only by orchestrate.cache_writer
+  type = forbidden
+  source_modules =
+      selector_drift.resolve
+      selector_drift.validate
+      selector_drift.api
+      selector_drift.heallog
+  forbidden_modules =
+      selector_drift.orchestrate.cache_writer
+  ```
+
 ---
 
 ### Task 18: Rung 5 — escalation, and the corpus it builds
@@ -1786,7 +5031,7 @@ Expected: FAIL.
 - [ ] **Step 4: Run them and make sure they pass**
 
 Run: `uv run pytest tests/resolve -v && uv run lint-imports`
-Expected: PASS, 3 new tests. `no-model-calls` kept.
+Expected: PASS, 3 new tests. `test_selector_drift_imports_only_allow_listed_bok_core_modules` still passes (Task 1).
 
 - [ ] **Step 5: Commit**
 
@@ -1800,62 +5045,850 @@ git commit -m "feat(resolve): rung 5 escalates to human review, builds eval corp
 ### Task 19: Capture and replay — the regression harness the mutation suite reuses
 
 **Files:**
-- Create: `selector_drift/heallog/capture.py`, `selector_drift/heallog/replay.py`
-- Test: `tests/heallog/test_replay.py`
+- Create: `selector_drift/heallog/capture.py`, `selector_drift/heallog/bundle.py`, `selector_drift/heallog/replay.py`
+- Create: `selector_drift/browser/live_capture.py`
+- Modify: `selector_drift/browser/driver.py` — fixed 1280×900 viewport on every context; `PageHandle.raw`
+- Modify: `selector_drift/resolve/cascade.py` — keyword `record: bool = True`
+- Modify: `selector_drift/resolve/cache.py` — add the read-only `CacheReader` protocol (both `SelectorCache` and replay's `HealTimeCache` satisfy it)
+- Test: `tests/heallog/__init__.py` (empty — the test modules import helpers from `tests.heallog.conftest`, so `tests/` and `tests/heallog/` must be packages; create `tests/__init__.py` too if Task 1's template did not), `tests/heallog/conftest.py`, `tests/heallog/test_capture.py`, `tests/heallog/test_replay.py`, `tests/browser/test_live_capture.py`
 
 **Interfaces:**
-- Consumes: `PageHandle` (Task 4), `resolve_cascade` (Task 13).
+- Consumes: `resolve_cascade`, `StaticPageSource`, `ResolvedElement`, `CascadeTrace` (Task 13); `CachedSelector` (Task 17); `EscalateToHuman` (Task 18); `FieldTarget`, `load_spec` (Task 5); `Labelled`, `Sensitivity` (`bok_core.boundary.sensitivity`, P-1); `PageHandle`, `open` (Task 4).
 - Produces:
-  - `Evidence(dom: str, screenshot: bytes, captured_at: datetime, sha256: str)`
-  - `capture(page: PageHandle) -> Evidence`
-  - `replay(evidence: Evidence, target: FieldTarget, cache) -> tuple[ResolvedElement, CascadeTrace]` — builds a **`StaticPageSource` from the stored DOM** (Task 13) and runs the cascade against it, never a live page
-  - `NotReproducible(Exception)`
+  - `VIEWPORT: tuple[int, int] = (1280, 900)`, `NODE_ATTR = "data-sd-node"`, `NODE_ID_RE`
+  - `BBox(x: float, y: float, width: float, height: float)` — frozen Pydantic; CSS px in the full-page screenshot's coordinate space. `api/views.py` re-exports it (Task 34)
+  - `Capturable` protocol — `viewport: tuple[int, int]` (property), `dom() -> str`, `async screenshot(*, mask_node_ids: frozenset[str]) -> bytes`, `async bbox(node_id: str) -> BBox | None`
+  - `Masker` protocol — `__call__(dom: str) -> frozenset[str]`; Task 33's `PiiMasker` is the production one
+  - `credential_input_nodes(dom: str) -> frozenset[str]`
+  - `Evidence(run_key, dom: Labelled[str], screenshot: Labelled[bytes], captured_at, sha256, viewport, masked_node_ids, node_ids: Mapping[str, str], boxes: Mapping[str, BBox])` and `Evidence.from_static(html, *, run_key, sensitivity, masker=None, screenshot=BLANK_PNG, captured_at=None) -> Evidence`
+  - `async capture(page: Capturable, *, run_key: str, sensitivity: Sensitivity, masker: Masker) -> Evidence`
+  - `async record_boxes(evidence: Evidence, page: Capturable, resolved: Mapping[str, str]) -> Evidence` — `resolved` is field name → `node_id`
+  - `CaptureError(Exception)`
+  - `bundle.py`: file-name constants, `NodeBox`, `SideBlock`, `RedactionBlock`, `HealManifest`, `PageManifest`, `file_digest(data: bytes) -> str`, `read_heal_manifest(bundle: Path) -> HealManifest`, `read_page_manifest(directory: Path) -> PageManifest`, `verified_bytes(directory: Path, files: Mapping[str, str], name: str) -> bytes`, `EvidenceCorrupted(Exception)`
+  - `replay(evidence: Evidence, target: FieldTarget, cache: CacheReader) -> tuple[ResolvedElement, CascadeTrace]`
+  - `replay_bundle(bundle: Path, target: FieldTarget, cache: CacheReader, expected: ExpectedHeal) -> tuple[ResolvedElement, CascadeTrace]` — reads **`after.html`** and verifies it against the manifest first
+  - `ExpectedHeal(winning_rung: int, node_id: str)`, `HealTimeCache(entry: CachedSelector | None)`, `NotReproducible(Exception)`
+  - `CacheReader` protocol in `resolve/cache.py` — `get(target, field, spec_version=None) -> CachedSelector | None`
+  - `LiveCapture(page: playwright.async_api.Page, dom: str)` — the `Capturable` a live page offers
+  - `resolve_cascade(page, target, cache, *, record: bool = True)`
 
-`heallog/` cannot import `browser/` (Task 1 contract), so replay-from-stored-evidence is structural,
-not a convention — **but only because Task 13 moved `PageSource` out of `browser/` (R9/C6).** With the
-rungs still taking a `browser.PageHandle`, `heallog → resolve → browser` is an indirect import that
-import-linter reports by default and the contract fails here. If it does fail, the fix is Task 13, not
-`allow_indirect_imports`.
+**Four changes over the first draft, each closing a gap the API contract found (API spec §7).**
+
+1. **`capture()` took a `browser.PageHandle`, which `heallog/` may not import** — the same
+   `heallog-cannot-refetch` contract this task's own test asserts. It now takes a `Capturable`
+   protocol declared *here*; `browser/live_capture.py` satisfies it structurally, so the import arrow
+   points `browser → heallog`, which no contract forbids.
+2. **Boxes come from the live page, at capture time** (API spec §7.2). The heal screen outlines the
+   healed field on both screenshots. `StaticPageSource` has no layout engine, so a box can only ever
+   be *recorded* — `getBoundingClientRect()` on the live page, at a **fixed 1280×900 viewport** set on
+   every browser context, before the page closes. Replay never recomputes one; the screen says
+   "outline recorded at capture, not recomputed".
+3. **Corrupted and non-reproducible are different findings** (API spec §7.3). A heal whose stored DOM
+   fails its manifest hash tells you nothing about the resolver — the evidence is damaged. A heal whose
+   intact DOM replays to a different rung or node is B5's anecdote. `EvidenceCorrupted` is therefore
+   **not** a subclass of `NotReproducible`; the published log counts them separately.
+4. **Replay must not write a `resolutions` row — found 2026-09-26.** Task 13's `resolve_cascade` writes
+   one row per call (C4). Replay calls it, so every replay — including every mutation-suite test and
+   every heal-time reproduction check in Task 26A — would inflate the denominator of the published
+   rung shares with resolutions that never happened on a schedule. `record=False` suppresses the row
+   **and skips rung 5**, whose escalation otherwise adds a corpus case on every failed replay.
+
+The screenshot is **masked at capture**, not redacted afterwards. A PNG has no text for a detector to
+re-scan, so the only verifiable redaction of a screenshot is structural: every node the redactor
+would flag in the DOM must be in the set the screenshot masked. `capture()` asks the `Masker` which
+nodes to black out, always adds every credential input, and records the set on the `Evidence`;
+Task 33's `redact_evidence()` independently recomputes the set and refuses if any node is missing.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/heallog/test_replay.py
-from dataclasses import replace
-import pytest, subprocess
-from selector_drift.heallog.replay import replay, NotReproducible
+# tests/heallog/conftest.py
+from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from bok_core.boundary.sensitivity import Sensitivity
+from selector_drift.heallog.bundle import (AFTER_HTML, AFTER_PNG, MANIFEST, HealManifest,
+                                           NodeBox, RedactionBlock, SideBlock, file_digest)
+from selector_drift.heallog.capture import BLANK_PNG, VIEWPORT, Evidence
+from selector_drift.heallog.replay import HealTimeCache
+from selector_drift.resolve.cascade import resolve_cascade
+from selector_drift.resolve.page import StaticPageSource
+from selector_drift.spec.loader import load_spec
+
+# Synthetic by construction: obviously invented names, no real person (bench spec 4).
+BENCH_HTML = """<!doctype html><html><body>
+<table id="results"><thead><tr>
+<th>Claim Number</th><th>Claimant</th><th>Amount</th></tr></thead><tbody>
+<tr><td data-testid="claim-number">AB12345678</td><td>Test Person One</td><td>100.00</td></tr>
+<tr><td data-testid="claim-number">CD23456789</td><td>Test Person Two</td><td>250.50</td></tr>
+<tr><td data-testid="claim-number">EF34567890</td><td>Test Person Three</td><td>999.99</td></tr>
+</tbody></table></body></html>"""
+
+CLAIM_NUMBER = load_spec(Path("specs/testbench.yaml")).targets[0]
+RUN_KEY = "testbench:1:2026-09-07"
+
+
+@dataclass(frozen=True)
+class CapturedHeal:
+    evidence: Evidence
+    cache: HealTimeCache
+    winning_rung: int
+    node_id: str
+    selector_after: str
+
+
+@pytest.fixture
+def captured_heal() -> CapturedHeal:
+    html = BENCH_HTML.replace("Claim Number", "Claim Reference")        # a label reword
+    ev = Evidence.from_static(html, run_key=RUN_KEY, sensitivity=Sensitivity.SYNTHETIC)
+    cache = HealTimeCache(entry=None)       # cold: rung 1 declines, so any win is a heal
+    el, trace = resolve_cascade(StaticPageSource(html), CLAIM_NUMBER, cache, record=False)
+    assert trace.winner is not None and trace.winner in (2, 3, 4)
+    return CapturedHeal(ev, cache, trace.winner, el.node_id, el.selector)
+
+
+def write_test_bundle(directory: Path, after_html: str,
+                      nodes: dict[str, NodeBox] | None = None) -> Path:
+    """A heal bundle written the way Task 33 writes one, without Task 33's redaction."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / AFTER_HTML).write_bytes(after_html.encode())
+    (directory / AFTER_PNG).write_bytes(BLANK_PNG)
+    manifest = HealManifest(
+        files={AFTER_HTML: file_digest(after_html.encode()), AFTER_PNG: file_digest(BLANK_PNG)},
+        after=SideBlock(run_key=RUN_KEY, captured_at=datetime(2026, 9, 7, 4, 12, tzinfo=UTC),
+                        viewport=VIEWPORT, nodes=nodes or {}),
+        redaction=RedactionBlock(scrubbed_credentials=0, redacted_identifiers=0, verified=True),
+    )
+    (directory / MANIFEST).write_bytes(manifest.dumps())
+    return directory
+
+
+def rewrite_manifest(directory: Path, **changes: object) -> None:
+    data = json.loads((directory / MANIFEST).read_text())
+    data.update(changes)
+    (directory / MANIFEST).write_text(json.dumps(data))
+```
+
+```python
+# tests/heallog/test_capture.py
+import asyncio
+import inspect
+from dataclasses import dataclass, field
+
+import pytest
+
+from bok_core.boundary.sensitivity import Sensitivity
+from selector_drift.heallog import replay as replay_mod
+from selector_drift.heallog.bundle import NodeBox, read_heal_manifest
+from selector_drift.heallog.capture import (VIEWPORT, BBox, CaptureError, Evidence, capture,
+                                            record_boxes)
+from selector_drift.heallog.replay import ExpectedHeal, replay_bundle
+from selector_drift.resolve.page import StaticPageSource
+from tests.heallog.conftest import CLAIM_NUMBER, RUN_KEY, write_test_bundle
+
+LOGIN_HTML = """<html><body><form>
+<input data-sd-node="n1" name="username" value="demo">
+<input data-sd-node="n2" type="password" name="password" value="hunter2">
+<input data-sd-node="n3" type="hidden" name="csrf" value="tok-123">
+<span data-sd-node="n4">Test Person One</span></form></body></html>"""
+
+
+@dataclass
+class FakePage:
+    html: str
+    size: tuple[int, int] = VIEWPORT
+    boxes: dict[str, BBox] = field(default_factory=dict)
+    masks_seen: list[frozenset[str]] = field(default_factory=list)
+    bbox_calls: list[str] = field(default_factory=list)
+
+    @property
+    def viewport(self) -> tuple[int, int]:
+        return self.size
+
+    def dom(self) -> str:
+        return self.html
+
+    async def screenshot(self, *, mask_node_ids: frozenset[str]) -> bytes:
+        self.masks_seen.append(mask_node_ids)
+        return b"\x89PNG-fake"
+
+    async def bbox(self, node_id: str) -> BBox | None:
+        self.bbox_calls.append(node_id)
+        return self.boxes.get(node_id)
+
+
+def _names_n4(dom: str) -> frozenset[str]:
+    return frozenset({"n4"})
+
+
+@pytest.mark.unit
+def test_capture_refuses_a_page_not_at_the_fixed_viewport():
+    page = FakePage(LOGIN_HTML, size=(1920, 1080))
+    with pytest.raises(CaptureError, match="viewport"):
+        asyncio.run(capture(page, run_key=RUN_KEY, sensitivity=Sensitivity.SYNTHETIC,
+                            masker=_names_n4))
+
+
+@pytest.mark.unit
+def test_capture_masks_every_credential_input_and_what_the_masker_names():
+    page = FakePage(LOGIN_HTML)
+    ev = asyncio.run(capture(page, run_key=RUN_KEY, sensitivity=Sensitivity.SYNTHETIC,
+                             masker=_names_n4))
+    assert page.masks_seen == [frozenset({"n2", "n3", "n4"})]
+    assert ev.masked_node_ids == frozenset({"n2", "n3", "n4"})
+
+
+@pytest.mark.unit
+def test_capture_labels_both_halves_where_they_are_opened():
+    """Contract 1.1: the label attaches where the file is opened."""
+    ev = asyncio.run(capture(FakePage(LOGIN_HTML), run_key=RUN_KEY,
+                             sensitivity=Sensitivity.CLIENT_CONFIDENTIAL, masker=_names_n4))
+    assert ev.dom.sensitivity is Sensitivity.CLIENT_CONFIDENTIAL
+    assert ev.screenshot.sensitivity is Sensitivity.CLIENT_CONFIDENTIAL
+    assert ev.viewport == (1280, 900)
+
+
+@pytest.mark.unit
+def test_boxes_are_recorded_from_the_live_page_not_recomputed_on_replay(captured_heal, tmp_path):
+    """API spec 7.2 / 7.5."""
+    box = BBox(x=10, y=40, width=120, height=24)
+    page = FakePage(captured_heal.evidence.dom.value, boxes={captured_heal.node_id: box})
+    ev = asyncio.run(record_boxes(captured_heal.evidence, page,
+                                  {"claim_number": captured_heal.node_id}))
+    assert ev.boxes == {"claim_number": box}
+    assert page.bbox_calls == [captured_heal.node_id]
+
+    # Replay has no layout engine and never computes one.
+    assert not hasattr(StaticPageSource, "bbox")
+    assert "getBoundingClientRect" not in inspect.getsource(replay_mod)
+    absurd = BBox(x=-1, y=-1, width=0, height=0)
+    bundle = write_test_bundle(tmp_path / "heals" / "1", captured_heal.evidence.dom.value,
+                               nodes={"claim_number": NodeBox(node_id=captured_heal.node_id,
+                                                              bbox=absurd)})
+    replay_bundle(bundle, CLAIM_NUMBER, captured_heal.cache,
+                  ExpectedHeal(captured_heal.winning_rung, captured_heal.node_id))
+    assert read_heal_manifest(bundle).after.nodes["claim_number"].bbox == absurd
+
+
+@pytest.mark.unit
+def test_a_node_id_that_could_break_out_of_a_selector_is_refused(captured_heal):
+    page = FakePage(captured_heal.evidence.dom.value)
+    with pytest.raises(CaptureError):
+        asyncio.run(record_boxes(captured_heal.evidence, page, {"x": '"] , script'}))
+
+
+@pytest.mark.unit
+def test_from_static_hashes_the_dom_it_carries():
+    ev = Evidence.from_static("<html></html>", run_key=RUN_KEY, sensitivity=Sensitivity.SYNTHETIC)
+    import hashlib
+    assert ev.sha256 == hashlib.sha256(b"<html></html>").hexdigest()
+```
+
+```python
+# tests/heallog/test_replay.py
+import subprocess
+from dataclasses import replace
+
+import pytest
+
+from bok_core.boundary.sensitivity import Labelled, Sensitivity
+from selector_drift.db.models import Resolution
+from selector_drift.db.session import Session
+from selector_drift.heallog.bundle import AFTER_HTML, EvidenceCorrupted
+from selector_drift.heallog.capture import Evidence
+from selector_drift.heallog.replay import (ExpectedHeal, NotReproducible, replay,
+                                           replay_bundle)
+from tests.heallog.conftest import CLAIM_NUMBER, RUN_KEY, write_test_bundle
+
+
+@pytest.mark.unit
 def test_replay_reproduces_the_same_rung_and_element(captured_heal):
     el, trace = replay(captured_heal.evidence, CLAIM_NUMBER, captured_heal.cache)
     assert trace.winner == captured_heal.winning_rung
     assert el.selector == captured_heal.selector_after
+    assert el.node_id == captured_heal.node_id
 
-def test_corrupted_evidence_is_reported_not_silently_counted(captured_heal):
-    corrupted = replace(captured_heal.evidence, dom="<html></html>")
+
+@pytest.mark.unit
+def test_a_page_no_rung_can_resolve_is_not_reproducible(captured_heal):
+    blank = Evidence.from_static("<html><body><p>nothing here</p></body></html>",
+                                 run_key=RUN_KEY, sensitivity=Sensitivity.SYNTHETIC)
     with pytest.raises(NotReproducible):
-        replay(corrupted, CLAIM_NUMBER, captured_heal.cache)
+        replay(blank, CLAIM_NUMBER, captured_heal.cache)
 
+
+@pytest.mark.unit
+def test_a_dom_that_fails_its_hash_is_corrupted_not_non_reproducible(captured_heal):
+    """API spec 7.3. Damaged evidence says nothing about the resolver."""
+    tampered = replace(captured_heal.evidence,
+                       dom=Labelled(value="<html></html>", sensitivity=Sensitivity.SYNTHETIC))
+    with pytest.raises(EvidenceCorrupted):
+        replay(tampered, CLAIM_NUMBER, captured_heal.cache)
+    assert not issubclass(EvidenceCorrupted, NotReproducible)
+
+
+@pytest.mark.unit
+def test_replay_bundle_reads_after_html_and_reproduces(captured_heal, tmp_path):
+    bundle = write_test_bundle(tmp_path / "heals" / "7", captured_heal.evidence.dom.value)
+    el, trace = replay_bundle(bundle, CLAIM_NUMBER, captured_heal.cache,
+                              ExpectedHeal(captured_heal.winning_rung, captured_heal.node_id))
+    assert el.node_id == captured_heal.node_id and trace.winner == captured_heal.winning_rung
+
+
+@pytest.mark.unit
+def test_a_tampered_after_html_is_corrupted(captured_heal, tmp_path):
+    bundle = write_test_bundle(tmp_path / "heals" / "7", captured_heal.evidence.dom.value)
+    (bundle / AFTER_HTML).write_text(captured_heal.evidence.dom.value + "<!-- edited -->")
+    with pytest.raises(EvidenceCorrupted, match="manifest"):
+        replay_bundle(bundle, CLAIM_NUMBER, captured_heal.cache,
+                      ExpectedHeal(captured_heal.winning_rung, captured_heal.node_id))
+
+
+@pytest.mark.unit
+def test_a_bundle_with_no_manifest_is_corrupted(tmp_path, captured_heal):
+    (tmp_path / "heals" / "9").mkdir(parents=True)
+    with pytest.raises(EvidenceCorrupted):
+        replay_bundle(tmp_path / "heals" / "9", CLAIM_NUMBER, captured_heal.cache,
+                      ExpectedHeal(2, "anything"))
+
+
+@pytest.mark.unit
+def test_replay_resolving_a_different_node_is_not_reproducible(captured_heal, tmp_path):
+    bundle = write_test_bundle(tmp_path / "heals" / "7", captured_heal.evidence.dom.value)
+    with pytest.raises(NotReproducible, match="different element"):
+        replay_bundle(bundle, CLAIM_NUMBER, captured_heal.cache,
+                      ExpectedHeal(captured_heal.winning_rung, "/html/body/p[99]"))
+
+
+@pytest.mark.integration
+def test_replay_writes_no_resolutions_row(captured_heal):
+    """Found 2026-09-26. Replays are not scheduled resolutions; counting them
+    would inflate the published rung shares (C4's denominator)."""
+    with Session() as s:
+        before = s.query(Resolution).count()
+    replay(captured_heal.evidence, CLAIM_NUMBER, captured_heal.cache)
+    with Session() as s:
+        assert s.query(Resolution).count() == before
+
+
+@pytest.mark.unit
 def test_heallog_cannot_import_browser():
-    assert subprocess.run(["uv", "run", "lint-imports"]).returncode == 0
+    r = subprocess.run(["uv", "run", "lint-imports", "--contract", "heallog-cannot-refetch"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+```
+
+```python
+# tests/browser/test_live_capture.py
+import asyncio
+
+import pytest
+from playwright.async_api import async_playwright
+
+from selector_drift import browser
+from selector_drift.browser.live_capture import LiveCapture
+
+
+@pytest.mark.e2e
+def test_live_capture_records_a_real_box_at_the_fixed_viewport():
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page(viewport={"width": 1280, "height": 900})
+            await page.set_content('<table><tr><td data-sd-node="n1" style="width:120px">'
+                                   'AB12345678</td></tr></table>')
+            cap = LiveCapture(page, await page.content())
+            box = await cap.bbox("n1")
+            missing = await cap.bbox("n2")
+            shot = await cap.screenshot(mask_node_ids=frozenset({"n1"}))
+            await b.close()
+            return cap.viewport, box, missing, shot
+    viewport, box, missing, shot = asyncio.run(go())
+    assert viewport == (1280, 900)
+    assert box is not None and box.width >= 120 and box.height > 0
+    assert missing is None
+    assert shot.startswith(b"\x89PNG")
+
+
+@pytest.mark.e2e
+def test_the_driver_opens_every_context_at_the_fixed_viewport(authorised_testbench):
+    async def go():
+        async with browser.driver.open(authorised_testbench) as session:
+            return session.page.raw.viewport_size
+    assert asyncio.run(go()) == {"width": 1280, "height": 900}
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/heallog -v`
-Expected: FAIL — `ModuleNotFoundError: selector_drift.heallog.replay`.
+Run: `uv run pytest tests/heallog tests/browser/test_live_capture.py -v`
+Expected: FAIL — `ModuleNotFoundError: selector_drift.heallog.capture`.
 
-- [ ] **Step 3: Implement capture and replay.**
+- [ ] **Step 3: Implement `capture.py`**
 
-- [ ] **Step 4: Run them and make sure they pass**
+```python
+# selector_drift/heallog/capture.py
+"""The page the resolver saw, labelled where it is opened (INTERFACE-CONTRACT 1.1).
 
-Run: `uv run pytest tests/heallog -v && uv run lint-imports`
-Expected: PASS, 3 tests. `heallog-cannot-refetch` kept.
+heallog/ may not import browser/ (heallog-cannot-refetch). A live page reaches this
+module only through the Capturable protocol, which browser/live_capture.py satisfies.
+"""
+from __future__ import annotations
 
-- [ ] **Step 5: Commit**
+import hashlib
+import re
+import struct
+import zlib
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from typing import Protocol
+
+from lxml import html as lxml_html
+from pydantic import BaseModel, ConfigDict
+
+from bok_core.boundary.sensitivity import Labelled, Sensitivity
+
+VIEWPORT: tuple[int, int] = (1280, 900)
+NODE_ATTR = "data-sd-node"
+# Node ids are minted by the PageSource (Task 13): structural paths or short tokens.
+# No quote, backslash, backtick, dollar or brace can appear, so an id can never
+# break out of the attribute selector LiveCapture builds from it.
+NODE_ID_RE = re.compile(r"^[A-Za-z0-9_.:/\[\]-]{1,256}$")
+
+
+class CaptureError(Exception):
+    pass
+
+
+class BBox(BaseModel):
+    """CSS px in the full-page screenshot's coordinate space."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class Capturable(Protocol):
+    @property
+    def viewport(self) -> tuple[int, int]: ...
+
+    def dom(self) -> str: ...
+
+    async def screenshot(self, *, mask_node_ids: frozenset[str]) -> bytes: ...
+
+    async def bbox(self, node_id: str) -> BBox | None: ...
+
+
+class Masker(Protocol):
+    def __call__(self, dom: str) -> frozenset[str]: ...
+
+
+def _png_1x1() -> bytes:
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0)       # 1x1, 8-bit greyscale
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(b"\x00\x00")) + chunk(b"IEND", b""))
+
+
+BLANK_PNG = _png_1x1()
+
+_CREDENTIAL_TYPES = frozenset({"password", "hidden"})
+_CREDENTIAL_AUTOCOMPLETE = frozenset({"current-password", "new-password", "one-time-code"})
+
+
+def credential_input_nodes(dom: str) -> frozenset[str]:
+    """Every input whose value is, or may be, a credential (R15/H6)."""
+    found: set[str] = set()
+    for el in lxml_html.document_fromstring(dom).iter("input", "textarea"):
+        kind = (el.get("type") or "text").lower()
+        auto = (el.get("autocomplete") or "").lower()
+        node_id = el.get(NODE_ATTR)
+        if node_id and (kind in _CREDENTIAL_TYPES or auto in _CREDENTIAL_AUTOCOMPLETE):
+            found.add(node_id)
+    return frozenset(found)
+
+
+def dom_sha256(dom: str) -> str:
+    return hashlib.sha256(dom.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class Evidence:
+    run_key: str
+    dom: Labelled[str]
+    screenshot: Labelled[bytes]
+    captured_at: datetime
+    sha256: str                                   # of dom.value; DomSource.snapshot_id (Task 27)
+    viewport: tuple[int, int]
+    masked_node_ids: frozenset[str]
+    node_ids: Mapping[str, str] = field(default_factory=dict)   # field -> node_id
+    boxes: Mapping[str, BBox] = field(default_factory=dict)     # field -> recorded box
+
+    @classmethod
+    def from_static(cls, html: str, *, run_key: str, sensitivity: Sensitivity,
+                    masker: Masker | None = None, screenshot: bytes = BLANK_PNG,
+                    captured_at: datetime | None = None) -> Evidence:
+        """For fixtures and the mutation suite (Task 26). Never used on a live run."""
+        mask = credential_input_nodes(html) | (masker(html) if masker else frozenset())
+        return cls(run_key=run_key,
+                   dom=Labelled(value=html, sensitivity=sensitivity),
+                   screenshot=Labelled(value=screenshot, sensitivity=sensitivity),
+                   captured_at=captured_at or datetime.now(UTC), sha256=dom_sha256(html),
+                   viewport=VIEWPORT, masked_node_ids=mask)
+
+
+async def capture(page: Capturable, *, run_key: str, sensitivity: Sensitivity,
+                  masker: Masker) -> Evidence:
+    if tuple(page.viewport) != VIEWPORT:
+        raise CaptureError(f"viewport {page.viewport} is not the fixed {VIEWPORT}; "
+                           "recorded boxes would not be comparable across runs")
+    dom = page.dom()
+    mask = masker(dom) | credential_input_nodes(dom)
+    shot = await page.screenshot(mask_node_ids=mask)
+    return Evidence(run_key=run_key,
+                    dom=Labelled(value=dom, sensitivity=sensitivity),
+                    screenshot=Labelled(value=shot, sensitivity=sensitivity),
+                    captured_at=datetime.now(UTC), sha256=dom_sha256(dom),
+                    viewport=VIEWPORT, masked_node_ids=mask)
+
+
+async def record_boxes(evidence: Evidence, page: Capturable,
+                       resolved: Mapping[str, str]) -> Evidence:
+    """Record each resolved node's box from the live page, before it closes (API spec 7.2)."""
+    boxes: dict[str, BBox] = {}
+    for field_name, node_id in resolved.items():
+        if not NODE_ID_RE.fullmatch(node_id):
+            raise CaptureError(f"node id for {field_name!r} is not a minted node id")
+        box = await page.bbox(node_id)
+        if box is not None:
+            boxes[field_name] = box
+    return replace(evidence, node_ids=dict(resolved), boxes=boxes)
+```
+
+- [ ] **Step 4: Implement `bundle.py` — the layout and the exact manifest (API spec §7.2)**
+
+```python
+# selector_drift/heallog/bundle.py
+"""Evidence bundle layout and manifest. Readers live here; writers are Task 33's."""
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Mapping
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from selector_drift.heallog.capture import BBox
+
+LAST_ACCEPTED_DIR = "last-accepted"
+HEALS_DIR = "heals"
+MANIFEST = "manifest.json"
+PAGE_HTML, PAGE_PNG = "page.html", "page.png"
+BEFORE_HTML, BEFORE_PNG = "before.html", "before.png"
+AFTER_HTML, AFTER_PNG = "after.html", "after.png"
+
+
+class EvidenceCorrupted(Exception):
+    """A stored file does not match its manifest. Deliberately NOT a NotReproducible:
+    damaged evidence says nothing about the resolver (API spec 7.3)."""
+
+
+class _Frozen(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class NodeBox(_Frozen):
+    node_id: str
+    bbox: BBox
+
+
+class SideBlock(_Frozen):
+    run_key: str
+    captured_at: datetime
+    viewport: tuple[int, int]
+    nodes: dict[str, NodeBox]
+
+
+class RedactionBlock(_Frozen):
+    scrubbed_credentials: int
+    redacted_identifiers: int
+    verified: bool
+
+
+class HealManifest(_Frozen):
+    version: Literal[1] = 1
+    files: dict[str, str]                        # name -> "sha256:<hex>"
+    before: SideBlock | None = None              # absent on a target's first heal
+    # Found 2026-09-26, not in the spec's JSON: present only when last-accepted/ failed its
+    # own hash at heal time, so the view can say "corrupted" rather than "not captured".
+    before_unavailable_reason: Literal["corrupted"] | None = None
+    after: SideBlock
+    redaction: RedactionBlock
+
+    def dumps(self) -> bytes:
+        return self.model_dump_json(exclude_none=True, indent=2).encode("utf-8")
+
+
+class PageManifest(_Frozen):
+    version: Literal[1] = 1
+    files: dict[str, str]
+    page: SideBlock
+    redaction: RedactionBlock
+
+    def dumps(self) -> bytes:
+        return self.model_dump_json(exclude_none=True, indent=2).encode("utf-8")
+
+
+def file_digest(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def read_heal_manifest(bundle: Path) -> HealManifest:
+    try:
+        return HealManifest.model_validate_json((bundle / MANIFEST).read_bytes())
+    except (OSError, ValidationError) as exc:
+        raise EvidenceCorrupted(f"heal bundle {bundle.name}: manifest unreadable") from exc
+
+
+def read_page_manifest(directory: Path) -> PageManifest:
+    try:
+        return PageManifest.model_validate_json((directory / MANIFEST).read_bytes())
+    except (OSError, ValidationError) as exc:
+        raise EvidenceCorrupted(f"{directory.name}: manifest unreadable") from exc
+
+
+def verified_bytes(directory: Path, files: Mapping[str, str], name: str) -> bytes:
+    """The file's bytes, only if they hash to what the manifest recorded."""
+    expected = files.get(name)
+    if expected is None:
+        raise EvidenceCorrupted(f"{name} is not listed in the manifest")
+    try:
+        data = (directory / name).read_bytes()
+    except OSError as exc:
+        raise EvidenceCorrupted(f"{name} is missing") from exc
+    if file_digest(data) != expected:
+        raise EvidenceCorrupted(f"{name} does not match its manifest hash")
+    return data
+```
+
+- [ ] **Step 5: Implement `replay.py` and the cascade's `record` keyword**
+
+```python
+# selector_drift/heallog/replay.py
+"""Replay from stored evidence only. Never a live page (heallog-cannot-refetch)."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from selector_drift.heallog.bundle import (AFTER_HTML, EvidenceCorrupted, read_heal_manifest,
+                                           verified_bytes)
+from selector_drift.heallog.capture import Evidence, dom_sha256
+from selector_drift.resolve.cache import CachedSelector, CacheReader
+from selector_drift.resolve.cascade import resolve_cascade
+from selector_drift.resolve.escalation import EscalateToHuman
+from selector_drift.resolve.page import StaticPageSource
+from selector_drift.resolve.trace import CascadeTrace, ResolvedElement
+from selector_drift.spec.schema import FieldTarget
+
+__all__ = ["CacheReader", "EvidenceCorrupted", "ExpectedHeal", "HealTimeCache",
+           "NotReproducible", "replay", "replay_bundle"]
+
+
+class NotReproducible(Exception):
+    """Intact evidence replayed to a different outcome (B5: an anecdote, and published as one)."""
+
+
+@dataclass(frozen=True)
+class HealTimeCache:
+    """Read-only: the single entry rung 1 held when the heal happened."""
+
+    entry: CachedSelector | None
+
+    def get(self, target: str, field: str,
+            spec_version: int | None = None) -> CachedSelector | None:
+        return self.entry
+
+
+@dataclass(frozen=True)
+class ExpectedHeal:
+    winning_rung: int
+    node_id: str
+
+
+def _run(dom: str, target: FieldTarget,
+         cache: CacheReader) -> tuple[ResolvedElement, CascadeTrace]:
+    try:
+        return resolve_cascade(StaticPageSource(dom), target, cache, record=False)
+    except EscalateToHuman as exc:
+        raise NotReproducible("no rung 1-4 resolved against the stored DOM") from exc
+
+
+def replay(evidence: Evidence, target: FieldTarget,
+           cache: CacheReader) -> tuple[ResolvedElement, CascadeTrace]:
+    if dom_sha256(evidence.dom.value) != evidence.sha256:
+        raise EvidenceCorrupted("the stored DOM does not match its recorded hash")
+    return _run(evidence.dom.value, target, cache)
+
+
+def replay_bundle(bundle: Path, target: FieldTarget, cache: CacheReader,
+                  expected: ExpectedHeal) -> tuple[ResolvedElement, CascadeTrace]:
+    manifest = read_heal_manifest(bundle)
+    dom = verified_bytes(bundle, manifest.files, AFTER_HTML).decode("utf-8")
+    element, trace = _run(dom, target, cache)
+    if trace.winner != expected.winning_rung:
+        raise NotReproducible(f"rung {trace.winner} won on replay; "
+                              f"rung {expected.winning_rung} won live")
+    if element.node_id != expected.node_id:
+        raise NotReproducible("replay resolved a different element")
+    return element, trace
+```
+
+**Placement assumptions this file makes about Task 13 (stated so a reviewer can check them):**
+`StaticPageSource` is in `resolve/page.py` beside the protocol; `CascadeTrace`, `ResolvedElement`,
+`AnchorEvidence` and `Family` are in `resolve/trace.py`. The last two cannot live in
+`resolve/rungs/`, because `validate/` must reach them and Task 1's
+`judge-reaches-rungs-only-by-protocol` contract forbids `validate → resolve.rungs`; Task 34's
+`api-is-read-side` contract depends on the same placement.
+
+In `selector_drift/resolve/cache.py`, add:
+
+```python
+class CacheReader(Protocol):
+    """What rung 1 reads. SelectorCache satisfies it; so does replay's HealTimeCache."""
+
+    def get(self, target: str, field: str,
+            spec_version: int | None = None) -> CachedSelector | None: ...
+```
+
+In `selector_drift/resolve/cascade.py`, the runner gains the keyword and its two effects
+(`_record_resolution` is Task 13's existing `resolutions` writer, unchanged):
+
+```python
+def resolve_cascade(page: PageSource, target: FieldTarget, cache: CacheReader,
+                    *, record: bool = True) -> tuple[ResolvedElement, CascadeTrace]:
+    # record=False is replay (Task 19): no resolutions row (C4's denominator counts
+    # scheduled resolutions only) and no rung 5 (an escalation would add a corpus case).
+    rungs = REGISTERED_RUNGS if record else [r for r in REGISTERED_RUNGS if r.rung_id < 5]
+    attempts: list[RungAttempt] = []
+    winner: ResolvedElement | None = None
+    for rung in rungs:
+        t0 = time.monotonic()
+        found = rung.resolve(page, target)
+        attempts.append(RungAttempt(rung_id=rung.rung_id, ok=found is not None,
+                                    # closed vocabulary -- Task 34C's RungAttemptView.outcome
+                                    reason="resolved" if found else "no_match",
+                                    ms=int((time.monotonic() - t0) * 1000)))
+        if found is not None:
+            winner = found
+            break
+    trace = CascadeTrace(attempts=attempts, winner=winner.rung_id if winner else None)
+    if record:
+        _record_resolution(target, trace, winner)          # Task 13's existing writer
+    if winner is None:
+        raise EscalateToHuman("replay: no rung 1-4 resolved" if not record else
+                              "no rung resolved")
+    return winner, trace
+```
+
+(Rung 5 raises `EscalateToHuman` itself on a recorded run, so the final `raise` is reached only on
+replay; it is written unconditionally so the function has no path that returns `None`.)
+
+- [ ] **Step 6: Implement `LiveCapture` and fix the viewport in the driver**
+
+```python
+# selector_drift/browser/live_capture.py
+"""The Capturable a live page offers. browser/ -> heallog/ is the permitted direction."""
+from __future__ import annotations
+
+from playwright.async_api import Page
+
+from selector_drift.heallog.capture import NODE_ATTR, NODE_ID_RE, BBox, CaptureError
+
+_BOX_JS = """(args) => {
+  const el = document.querySelector(`[${args.attr}="${CSS.escape(args.id)}"]`);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return {x: r.x + window.scrollX, y: r.y + window.scrollY, width: r.width, height: r.height};
+}"""
+
+
+class LiveCapture:
+    def __init__(self, page: Page, dom: str) -> None:
+        self._page = page
+        self._dom = dom
+
+    @property
+    def viewport(self) -> tuple[int, int]:
+        size = self._page.viewport_size
+        return (size["width"], size["height"]) if size else (0, 0)
+
+    def dom(self) -> str:
+        return self._dom
+
+    async def screenshot(self, *, mask_node_ids: frozenset[str]) -> bytes:
+        for node_id in mask_node_ids:
+            if not NODE_ID_RE.fullmatch(node_id):
+                raise CaptureError("refusing to mask by an id that is not a minted node id")
+        masks = [self._page.locator(f'[{NODE_ATTR}="{n}"]') for n in sorted(mask_node_ids)]
+        return await self._page.screenshot(full_page=True, type="png", mask=masks,
+                                           mask_color="#000000", animations="disabled",
+                                           caret="hide")
+
+    async def bbox(self, node_id: str) -> BBox | None:
+        if not NODE_ID_RE.fullmatch(node_id):
+            raise CaptureError("refusing to measure an id that is not a minted node id")
+        rect = await self._page.evaluate(_BOX_JS, {"attr": NODE_ATTR, "id": node_id})
+        return None if rect is None else BBox.model_validate(rect)
+```
+
+In `selector_drift/browser/driver.py`, every context is created at the fixed viewport, and
+`PageHandle` exposes the Playwright page to `browser/`-internal code only:
+
+```python
+from selector_drift.heallog.capture import VIEWPORT
+
+        context = await self._browser.new_context(
+            viewport={"width": VIEWPORT[0], "height": VIEWPORT[1]},
+            device_scale_factor=1,           # boxes are CSS px; a DPR of 2 would double the PNG
+            user_agent=user_agent_for(target),
+        )
+
+class PageHandle:
+    ...
+    @property
+    def raw(self) -> Page:
+        """browser/-internal. Nothing outside browser/ receives a Playwright page."""
+        return self._page
+```
+
+- [ ] **Step 7: Run them and make sure they pass**
+
+Run: `uv run pytest tests/heallog -v -m "unit or integration" && uv run lint-imports`
+Expected: PASS, 15 tests. `heallog-cannot-refetch` kept.
+Run (CI, browser): `uv run pytest tests/browser/test_live_capture.py -v -m e2e`
+Expected: PASS, 2 tests.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add selector_drift/heallog/capture.py selector_drift/heallog/replay.py tests/heallog
-git commit -m "feat(heallog): capture and replay, the shared regression harness"
+git add selector_drift/heallog/capture.py selector_drift/heallog/bundle.py \
+        selector_drift/heallog/replay.py selector_drift/browser/live_capture.py \
+        selector_drift/browser/driver.py selector_drift/resolve/cascade.py \
+        tests/heallog tests/browser/test_live_capture.py
+git commit -m "feat(heallog): capture with live boxes, bundle manifest, replay that separates corrupted from non-reproducible"
 ```
 
 ---
@@ -1937,6 +5970,140 @@ Expected: PASS, 6 tests. mypy clean.
 ```bash
 git add selector_drift/validate tests/validate
 git commit -m "feat(validate): Verdict, gate, and the heal asymmetry"
+```
+
+**Amended 2026-09-26 — three shapes the first draft left undefined.**
+
+**1. `History`.** Every check takes `history` and no task said what it is; Tasks 22, 23 and 26 each
+assumed a different shape. `gate()`, `gate_run()` and every `Assertion.check()` take
+`history: History | None` — `None` means no accepted run yet, and every history-dependent check
+returns `INSUFFICIENT` for it.
+
+```python
+# selector_drift/validate/history.py
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class AcceptedRun:
+    """A run whose rows were WRITTEN (gate passed, or a human promoted it). Quarantined and
+    discarded runs never appear: history is what we trusted, not what we saw."""
+    run_key: str
+    window: dt.date
+    rows: tuple[Mapping[str, str], ...]              # field -> raw extracted string
+    natural_key: tuple[str, ...]
+    shift_alerts: frozenset[str] = frozenset()       # fields whose distribution alert fired
+    marked_expected: frozenset[str] = frozenset()    # fields a client marked "expected" (B7)
+
+    def by_key(self) -> dict[tuple[str, ...], Mapping[str, str]]:
+        return {tuple(r[k] for k in self.natural_key): r for r in self.rows}
+
+
+@dataclass(frozen=True)
+class History:
+    runs: tuple[AcceptedRun, ...] = field(default_factory=tuple)    # oldest first
+
+    def previous(self) -> AcceptedRun | None:
+        return self.runs[-1] if self.runs else None
+
+    def values(self, field_name: str) -> list[str]:
+        return [r[field_name] for run in self.runs for r in run.rows if field_name in r]
+
+    def __len__(self) -> int:
+        return len(self.runs)
+```
+
+`RowKeyContinuity` (Task 22) reads `history.previous().by_key()`; `DistributionalAssertion` (Task 23)
+reads `history.values(field)`, `len(history)` for warm-up, and the trailing runs' `shift_alerts` and
+`marked_expected` for persistence. Tasks 22–23's `history(n=..., consecutive_shifts=...,
+marked_expected=..., shifted_tail=...)` helper builds `History` in `tests/validate/conftest.py`. The
+production builder is `orchestrate.history.history_for(session, target, spec_version, limit=90)`
+(Task 26A), in `orchestrate/`, so the judge never reads storage itself.
+
+**2. `Verdict.field: str | None = None` and `Verdict.confirmed_by: Confirmation | None = None`.**
+A run has several fields; `heal_events.verdicts` is per heal, i.e. per field, and the heal screen shows
+one field's verdicts — `gate_run` stamps the field. And `heal_events.confirmer_rung` /
+`confirmer_family` existed from day one with **nothing that produced them**: the confirming checks
+reported their confirmer only in prose. The two confirmer checks now say it in structure:
+
+```python
+# selector_drift/validate/verdict.py  (addition)
+class Confirmation(BaseModel, frozen=True):
+    rung: int | None          # None for the VALUE family, which is not a rung
+    family: Family
+
+class Verdict(BaseModel, frozen=True):
+    check: str
+    outcome: Outcome
+    threshold: str | None
+    observed: str | None
+    reason: str
+    field: str | None = None
+    confirmed_by: Confirmation | None = None   # set ONLY by IndependentRungAgreement (a DOM
+                                               # confirmer resolved the same node) and by
+                                               # RowKeyContinuity (VALUE), and only on PASS
+```
+
+`record_heals` (Task 26A) takes the field's `PASS` verdict with a `confirmed_by`, preferring a DOM
+confirmer over `VALUE`, and writes it to `confirmer_rung` / `confirmer_family`; none → both null, which
+the heal screen renders as "no cross-family confirmer resolved". Task 22 adds:
+
+```python
+@pytest.mark.unit
+def test_a_passing_confirmation_names_its_confirmer_in_structure(history):
+    v = IndependentRungAgreement([AxTreeRung(), HeuristicRung()]).check(REORDERED, history, ctx(2))
+    assert v.outcome is Outcome.PASS and v.confirmed_by == Confirmation(rung=4, family=Family.STRUCTURAL)
+
+@pytest.mark.unit
+def test_a_value_confirmation_has_no_rung(history):
+    v = RowKeyContinuity().check(reworded_candidate(), history, ctx(4))
+    assert v.confirmed_by == Confirmation(rung=None, family=Family.VALUE)
+```
+
+**3. `gate_run()` — the gate for a whole run.** `HealContext` is per field (one `winning_rung`, one
+`target`) and `gate()` judges one context. A run is judged once, over all its fields, and minted once:
+
+```python
+# selector_drift/validate/gate.py  (addition; gate() becomes the one-field case of it)
+def gate_run(candidate: CandidateExtraction, history: History | None,
+             contexts: Mapping[str, HealContext],
+             checks: Mapping[str, Sequence[Assertion]]) -> ValidatedExtraction | QuarantinedRun:
+    verdicts: list[Verdict] = []
+    failing: list[Verdict] = []
+    for field_name, ctx in contexts.items():
+        for check in checks[field_name]:
+            v = check.check(candidate, history, ctx).model_copy(update={"field": field_name})
+            verdicts.append(v)
+            if _effective(v, ctx.healed) is not Outcome.PASS:
+                failing.append(v)
+    if failing:
+        names = ", ".join(sorted({f"{v.field}:{v.check}" for v in failing}))
+        return QuarantinedRun(run_key=candidate.run_key, reason=f"gate failed: {names}",
+                              verdicts=verdicts, data_uri="")
+    return ValidatedExtraction(rows=candidate.rows, run_key=candidate.run_key,
+                               verdicts=tuple(verdicts), _token=_TOKEN)   # the one mint site
+
+
+def gate(candidate: CandidateExtraction, history: History | None, ctx: HealContext,
+         checks: Sequence[Assertion]) -> ValidatedExtraction | QuarantinedRun:
+    return gate_run(candidate, history, {ctx.target.name: ctx}, {ctx.target.name: checks})
+```
+
+Add to `tests/validate/test_gate_asymmetry.py`:
+
+```python
+@pytest.mark.unit
+def test_one_failing_field_quarantines_the_whole_run():
+    ok = HealContext(healed=False, winning_rung=1, page=P, target=T, cache=C)
+    bad = HealContext(healed=True, winning_rung=3, page=P, target=T2, cache=C)
+    r = gate_run(CANDIDATE, HISTORY, {"a": ok, "b": bad},
+                 {"a": [AlwaysPass()], "b": [AlwaysInsufficient()]})
+    assert isinstance(r, QuarantinedRun)
+    assert {v.field for v in r.verdicts} == {"a", "b"}
 ```
 
 ---
@@ -2436,120 +6603,409 @@ git add selector_drift/validate/quarantine.py tests/validate/test_quarantine.py
 git commit -m "feat(validate): quarantine with audited promotion that re-runs the gate"
 ```
 
+**Amended 2026-09-26 — four things later tasks rely on.**
+
+1. **`checks_for(spec, field, confirmers, *, warmup_runs) -> list[Assertion]`** in
+   `selector_drift/validate/checks.py`. Nothing turned a field's declared `AssertionSpec`s into the
+   check objects the gate runs; Task 26A's diagram called `gate(candidate, history, ctx)` with no
+   checks at all. The confirming rungs are **injected** by `orchestrate/`, so `validate/` still sees
+   only the `Rung` protocol:
+
+   ```python
+   # selector_drift/validate/checks.py
+   from __future__ import annotations
+
+   from collections.abc import Sequence
+
+   from selector_drift.resolve.trace import Rung                 # the protocol, not a rung
+   from selector_drift.spec.schema import FieldTarget, SpecError, TaskSpec
+   from selector_drift.validate.assertions.base import Assertion
+   from selector_drift.validate.assertions.cross_field import CrossFieldAssertion
+   from selector_drift.validate.assertions.distribution import DistributionalAssertion
+   from selector_drift.validate.assertions.domain import DomainAssertion
+   from selector_drift.validate.assertions.first_heal import FirstHealConfirmation
+   from selector_drift.validate.assertions.format import FormatAssertion
+   from selector_drift.validate.assertions.independence import (IndependentRungAgreement,
+                                                                  RowKeyContinuity)
+
+
+   def checks_for(spec: TaskSpec, field: FieldTarget, confirmers: Sequence[Rung], *,
+                  warmup_runs: int) -> list[Assertion]:
+       out: list[Assertion] = []
+       for a in field.assertions:
+           match a.type:
+               case "format":
+                   out.append(FormatAssertion(a.pattern))
+               case "domain":
+                   out.append(DomainAssertion(a.rule))
+               case "cross_field":
+                   out.append(CrossFieldAssertion(a.expression))
+               case other:
+                   raise SpecError(f"unknown assertion type {other!r} on {field.name}")
+       out.append(IndependentRungAgreement(list(confirmers)))
+       out.append(RowKeyContinuity())
+       if field.distributional:
+           out.append(DistributionalAssertion(warmup_runs=warmup_runs))
+       out.append(FirstHealConfirmation())
+       return out
+   ```
+
+   **Import note:** `Rung` is imported from `resolve.trace` (Task 13 amendment), so the
+   `judge-reaches-rungs-only-by-protocol` contract holds with no exception — the same move Task 22's
+   `independence.py` needs, and the one the contract's name always implied. `warmup_runs` comes from the `AuthorisedTarget` (Task 2), never
+   from config — the same rule as `first_heal_policy`. An unknown assertion type is a refusal, not a
+   skip: a check that silently does not run is the green tick `00` §7 calls a lie.
+2. **`StillInvalid(verdicts: list[Verdict])`** carries the failing verdicts; the API returns them in its
+   `409 still-invalid` (API spec §5).
+3. **`promote()` does not land data.** It re-runs the gate and returns the `ValidatedExtraction`;
+   landing, the cache write and the last-accepted snapshot happen in `orchestrate` (`accept_promoted`,
+   Task 26A), reached from the API through the injected `QuarantineActions` (Task 34). `validate/`
+   stays free of `land/`.
+4. **Audit rows use `subject=run_key`** for `promote` and `discard`; `derive.py` and the quarantine
+   history view join on it.
+
+Add to `tests/validate/test_quarantine.py`:
+
+```python
+@pytest.mark.unit
+def test_an_unknown_assertion_type_is_refused_not_skipped():
+    field = FieldTarget(name="x", description="x", relation=None,
+                        assertions=[AssertionSpec(type="vibes")])
+    with pytest.raises(SpecError):
+        checks_for(SPEC, field, [], warmup_runs=5)
+
+@pytest.mark.unit
+def test_every_field_gets_the_value_family_confirmer():
+    names = [c.name for c in checks_for(SPEC, SPEC.targets[0], [], warmup_runs=5)]
+    assert "RowKeyContinuity" in names and "IndependentRungAgreement" in names
+```
+
 ---
 
-### Task 26A: Assemble the pipeline — R7 (C1)
+### Task 27: Typed extraction into `Claim`s — the row model
 
 **Files:**
-- **Modify: `selector_drift/orchestrate/flows.py`** — the only task in the plan that does
-- Create: `selector_drift/orchestrate/pipeline.py`
-- Test: `tests/orchestrate/test_pipeline_end_to_end.py`
+- Create: `selector_drift/extract/reader.py`, `selector_drift/extract/rows.py`, `selector_drift/extract/models.py`
+- Test: `tests/extract/conftest.py`, `tests/extract/test_rows.py`, `tests/extract/test_reader.py`
 
 **Interfaces:**
-- Consumes: `authorise`, `browser.driver.open`, `resolve_cascade`, `extract.read`, `validate.gate`,
-  `SelectorCache.put`, `land.write`, `heallog.capture`/`store`, `quality.evaluate`.
-- Produces: an `extraction_flow` that actually runs the product.
+- Consumes: `ResolvedElement`, `CascadeTrace`, `NODE_ATTR` (Tasks 13, 19); `TaskSpec` (Task 5);
+  `bok_core.provenance` `Claim`, `Method`, `DomSource` (P-1).
+- Produces:
+  - `CandidateExtraction(rows: list[dict[str, Claim]], trace: dict[str, CascadeTrace], spec_version: int, run_key: str)` — frozen dataclass in `models.py`
+  - `read(dom: str, resolved: Mapping[str, ResolvedElement], spec: TaskSpec, *, run_key: str, snapshot_id: str, traces: Mapping[str, CascadeTrace], observed_at: datetime) -> CandidateExtraction`
+  - `locate(root, node_id) -> HtmlElement` · `row_of(el) -> HtmlElement` · `rel_path(row, el) -> RelPath` · `follow(row, path) -> HtmlElement | None`
+  - `RowMisaligned(Exception)`
 
-**Why this task exists.** `flows.py` is created in Task 6, where `extraction_flow` deliberately
-*"does nothing else — no cascade exists yet"*, and **it appears in no later task's file list.** Tasks
-13–33 build the cascade, the gate, extraction, the lake, quality and evidence, and nothing wires them
-together. Task 41's definition-of-done sweep then asserts `rung_stats()` and
-`select count(*) from lake` against a pipeline that has never run end to end. Forty-one tasks
-produced a parts bin.
+**Why this task is rewritten (found 2026-09-26).** Its step 3 was *"Implement `read()`"*, its tests called
+`read` with two different signatures, and Task 26A called a third (`extract.read(elements, spec)`). It
+never said how one resolved cell becomes N rows — audit M5's missing row model, still missing. It also
+said `ConfidenceMeter` renders "uncalibrated", which design §3.5 now forbids.
 
-This sits between Task 25 (the gate exists) and Task 26 (the suites measure it) because that is the
-first moment it can be written and the last moment it can be skipped.
+**The row model.** The cascade resolves each field to **one** node — the field's cell in the first data
+row. Extraction generalises that to every row, deterministically, in a way that survives `TableToDiv`:
 
-**The order is the safety argument. Write it once, here:**
+1. **Row container:** `row_of(el)` walks up to the nearest ancestor that has a sibling with the same tag
+   — a `<tr>`, or a repeated `<div>` after `TableToDiv`.
+2. **Relative path:** `rel_path(row, el)` records the path from the row to the cell as
+   `(tag, index-among-same-tag-siblings)` steps.
+3. **Rows:** the rows are the anchor row (the natural key's row) and its same-tag siblings **from the
+   anchor onward**. Rows before the anchor are headers, by position — extraction does not judge
+   values; the gate does. A row where any field's path leads nowhere (a pagination row) is skipped.
+4. **Alignment:** every field's row must be a same-tag sibling of the anchor row. If one is not, the
+   fields do not share a row and extraction raises `RowMisaligned` rather than zipping two unrelated
+   lists — a silent misalignment is the adjacent-column failure by another route. Task 26A quarantines
+   it with a `RowAlignment` verdict.
 
-```
-authorise(scope)                       -> AuthorisedTarget      | ScopeRefusal -> state=refused
-  open(target, credentials)            -> Session               | -> state=failed
-  capture(page)                        -> Evidence              (before any resolution)
-  for each field in spec.targets:
-      resolve_cascade(page, field)     -> ResolvedElement, CascadeTrace
-                                          + one `resolutions` row, win or lose      (C4)
-  extract.read(elements, spec)         -> CandidateExtraction
-  quality.evaluate(candidate)          -> list[Finding]         -> alert channel    (M2)
-  validate.gate(candidate, history, ctx)
-      |
-      +-- ValidatedExtraction:
-      |       land.write(validated)                                                  (idempotent)
-      |       cache.put(validated, element)   <- ONLY here. Never at heal time.      (C2)
-      |       heallog.store(evidence)  if trace.healed
-      |       state = healed if trace.healed else completed
-      |
-      +-- QuarantinedRun:
-              heallog.store(evidence);  quarantine row;  alert
-              NO land.write.  NO cache.put.
-              state = quarantined
-```
-
-**Two orderings in that diagram are load-bearing and neither was written down before:**
-
-1. **`cache.put()` happens only on the `ValidatedExtraction` branch (R11/C2).** Writing the cache when
-   a rung heals — the obvious reading of Task 17 — means a quarantined heal poisons the cache, the
-   next run takes a rung-1 hit on the wrong selector, `trace.healed` is `False`, and the strict path
-   never engages again. Task 17's `put(validated, element)` signature makes this impossible to spell
-   wrongly; this diagram says why.
-2. **`capture()` happens before resolution, not after.** Evidence must be of the page the resolver
-   actually saw. Capturing after a heal captures a page that a `page.route` abort or a timeout may
-   already have changed, and a heal you cannot reproduce is an anecdote (B5).
+Extraction reads the **DOM string** (`Evidence.dom.value`, which carries `data-sd-node` on a live run),
+not a live page: one snapshot, every rung, every field (P1). `locate()` finds a static `node_id` by
+XPath and a live one by its `data-sd-node` attribute.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/orchestrate/test_pipeline_end_to_end.py
-def test_a_clean_run_writes_rows_and_updates_nothing_else(bench, session):
-    key = extraction_flow("specs/testbench.yaml")
-    assert session.get(Run, key).state == "completed"
-    assert rows_in_lake(key) > 0
-    assert session.query(HealEvent).filter_by(run_key=key).count() == 0
+# tests/extract/test_rows.py
+import pytest
+from lxml import html as lh
 
-def test_a_healed_run_writes_rows_a_heal_event_and_the_cache(bench_mutated, session):
-    key = extraction_flow("specs/testbench.yaml")
-    assert session.get(Run, key).state == "healed"
-    assert session.query(HealEvent).filter_by(run_key=key).one().confirmer_rung
-    assert cache_entry("testbench", "claim_number").set_by_run_key == key
+from selector_drift.extract.rows import follow, locate, rel_path, row_of
 
-def test_a_quarantined_run_writes_no_rows_and_does_not_touch_the_cache(bench_decoy, session):
-    before = cache_entry("testbench", "amount")
-    key = extraction_flow("specs/testbench.yaml")
-    assert session.get(Run, key).state == "quarantined"
-    assert rows_in_lake(key) == 0
-    assert cache_entry("testbench", "amount") == before          # C2
+TABLE = """<html><body><table>
+<tr><th>Claim Number</th><th>Amount</th></tr>
+<tr><td>AB12345678</td><td>1,200.00</td></tr>
+<tr><td>CD87654321</td><td>90.50</td></tr>
+</table></body></html>"""
 
-def test_a_refused_target_never_opens_a_browser_and_never_captures(expired_spec, monkeypatch):
-    opened = []
-    monkeypatch.setattr("selector_drift.browser.driver.open", lambda *a, **k: opened.append(1))
-    assert state_of(extraction_flow(expired_spec)) == "refused"
-    assert opened == []
+DIVS = """<html><body><div class="grid">
+<div class="r"><span>Claim Number</span><span>Amount</span></div>
+<div class="r"><span>AB12345678</span><span>1,200.00</span></div>
+<div class="r"><span>CD87654321</span><span>90.50</span></div>
+</div></body></html>"""
 
-def test_every_resolution_lands_in_the_resolutions_table(bench, session):
-    key = extraction_flow("specs/testbench.yaml")
-    assert session.query(Resolution).filter_by(run_key=key).count() == len(SPEC.targets)
 
-def test_a_failed_run_writes_an_attempt_row_and_a_retry_writes_a_second(flaky_bench, session):
-    key = extraction_flow("specs/testbench.yaml")            # fails
-    extraction_flow("specs/testbench.yaml")                  # retries, succeeds
-    assert session.query(RunAttempt).filter_by(run_key=key).count() == 2   # M13
-    assert {a.state for a in attempts(key)} == {"failed", "completed"}
+@pytest.mark.unit
+@pytest.mark.parametrize(("html", "cell"), [(TABLE, "//tr[2]/td[2]"),
+                                            (DIVS, "//div[@class='r'][2]/span[2]")])
+def test_the_row_model_survives_table_to_div(html: str, cell: str) -> None:
+    root = lh.fromstring(html)
+    el = root.xpath(cell)[0]
+    row = row_of(el)
+    path = rel_path(row, el)
+    values = [c.text_content() for r in row.getparent() if (c := follow(r, path)) is not None]
+    assert values[-2:] == ["1,200.00", "90.50"]
+
+
+@pytest.mark.unit
+def test_locate_finds_a_static_node_by_xpath_and_a_live_one_by_attribute() -> None:
+    root = lh.fromstring('<html><body><p data-sd-node="n-3">x</p></body></html>')
+    assert locate(root, "n-3").text == "x"
+    assert locate(root, root.getroottree().getpath(root.xpath("//p")[0])).text == "x"
 ```
 
-- [ ] **Step 2: Run them and watch them fail.** Every one, for a different reason — nothing is wired.
+```python
+# tests/extract/test_reader.py
+import datetime as dt
 
-- [ ] **Step 3: Implement `pipeline.py` and rewrite `extraction_flow` to call it.** The flow owns
-  Prefect concerns (retries, timeout, logging); `pipeline.py` owns the order above and is a plain
-  function, so it is testable without a scheduler.
+import pytest
+from bok_core.provenance import DomSource, Method
 
-- [ ] **Step 4: Run the full check.** Expected: PASS, 6 tests, and the run states in `psql` now
-  include `healed` and `quarantined` for the first time.
+from selector_drift.extract.reader import RowMisaligned, read
+from tests.extract.conftest import (AT, SPEC, TABLE, TABLE_PLUS_SIDEBAR, TABLE_WITH_PAGER,
+                                    TRACES)
+
+
+@pytest.mark.unit
+def test_every_extracted_value_is_a_deterministic_claim_with_no_confidence(table_resolved) -> None:
+    c = read(TABLE, table_resolved, SPEC, run_key="testbench:1:2026-10-01",
+             snapshot_id="s" * 64, traces=TRACES, observed_at=AT)
+    assert [r["claim_number"].value for r in c.rows] == ["AB12345678", "CD87654321"]
+    for row in c.rows:
+        for claim in row.values():
+            assert claim.method is Method.DETERMINISTIC and claim.confidence is None
+
+
+@pytest.mark.unit
+def test_every_claim_points_back_to_the_snapshot_it_came_from(table_resolved) -> None:
+    # H8/4: snapshot_id is the provenance rail's link from a figure to its stored page.
+    c = read(TABLE, table_resolved, SPEC, run_key="k", snapshot_id="s" * 64,
+             traces=TRACES, observed_at=AT)
+    claim = c.rows[0]["amount"]
+    assert isinstance(claim.source, DomSource)
+    assert claim.source.snapshot_id == "s" * 64
+    assert claim.source.rung == table_resolved["amount"].rung_id
+
+
+@pytest.mark.unit
+def test_fields_that_do_not_share_a_row_are_refused_not_zipped(misaligned_resolved) -> None:
+    with pytest.raises(RowMisaligned):
+        read(TABLE_PLUS_SIDEBAR, misaligned_resolved, SPEC, run_key="k",
+             snapshot_id="s" * 64, traces=TRACES, observed_at=AT)
+
+
+@pytest.mark.unit
+def test_a_pagination_row_is_not_a_data_row(table_with_pager_resolved) -> None:
+    c = read(TABLE_WITH_PAGER, table_with_pager_resolved, SPEC, run_key="k",
+             snapshot_id="s" * 64, traces=TRACES, observed_at=AT)
+    assert [r["claim_number"].value for r in c.rows] == ["AB12345678", "CD87654321"]
+```
+
+```python
+# tests/extract/conftest.py
+import datetime as dt
+
+import pytest
+from lxml import html as lh
+
+from selector_drift.resolve.trace import AnchorEvidence, ResolvedElement
+from selector_drift.spec.schema import FieldTarget, TaskSpec
+
+AT = dt.datetime(2026, 10, 1, 4, 12, tzinfo=dt.UTC)
+TRACES: dict = {}
+SPEC = TaskSpec.model_validate({
+    "version": 1, "scope_ref": "scopes/testbench.yaml", "schedule": "12 4 * * *",
+    "row_scope": "each row", "natural_key": ["claim_number"],
+    "expected_schema": {"claim_number": "string", "amount": "decimal"}, "navigate": [],
+    "targets": [{"name": "claim_number", "description": "claim number", "assertions": []},
+                {"name": "amount", "description": "amount", "assertions": []}]})
+TABLE = """<html><body><table>
+<tr><th>Claim Number</th><th>Amount</th></tr>
+<tr><td>AB12345678</td><td>1,200.00</td></tr>
+<tr><td>CD87654321</td><td>90.50</td></tr></table></body></html>"""
+TABLE_WITH_PAGER = TABLE.replace("</table>", "<tr><td colspan='2'><a>1</a> <a>2</a></td></tr></table>")
+TABLE_PLUS_SIDEBAR = TABLE.replace("</body>", "<ul><li>9.99</li><li>1.00</li></ul></body>")
+
+
+def _el(html: str, xpath: str, rung: int = 3) -> ResolvedElement:
+    root = lh.fromstring(html)
+    node = root.xpath(xpath)[0]
+    return ResolvedElement(selector=xpath, node_id=root.getroottree().getpath(node),
+                           anchor=AnchorEvidence(accessible_name=None, label_text=None,
+                                                 header_text=None), rung_id=rung)
+
+
+@pytest.fixture
+def table_resolved() -> dict[str, ResolvedElement]:
+    return {"claim_number": _el(TABLE, "//tr[2]/td[1]"), "amount": _el(TABLE, "//tr[2]/td[2]", 4)}
+
+
+@pytest.fixture
+def table_with_pager_resolved() -> dict[str, ResolvedElement]:
+    return {"claim_number": _el(TABLE_WITH_PAGER, "//tr[2]/td[1]"),
+            "amount": _el(TABLE_WITH_PAGER, "//tr[2]/td[2]")}
+
+
+@pytest.fixture
+def misaligned_resolved() -> dict[str, ResolvedElement]:
+    return {"claim_number": _el(TABLE_PLUS_SIDEBAR, "//tr[2]/td[1]"),
+            "amount": _el(TABLE_PLUS_SIDEBAR, "//ul/li[1]")}
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `uv run pytest tests/extract -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.extract.rows'`.
+
+- [ ] **Step 3: Implement the row model and the reader**
+
+```python
+# selector_drift/extract/models.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from bok_core.provenance import Claim
+
+from selector_drift.resolve.trace import CascadeTrace
+
+
+@dataclass(frozen=True)
+class CandidateExtraction:
+    rows: list[dict[str, Claim]]      # type: ignore[type-arg]  -- bare Claim, contract §2.1
+    trace: dict[str, CascadeTrace]
+    spec_version: int
+    run_key: str
+```
+
+```python
+# selector_drift/extract/rows.py
+from __future__ import annotations
+
+from lxml.html import HtmlElement
+
+from selector_drift.resolve.page import NODE_ATTR       # "data-sd-node"
+
+RelPath = tuple[tuple[str, int], ...]
+
+
+def locate(root: HtmlElement, node_id: str) -> HtmlElement:
+    hits = (root.xpath(node_id) if node_id.startswith("/")
+            else root.xpath(f"//*[@{NODE_ATTR}=$n]", n=node_id))
+    if len(hits) != 1:
+        raise LookupError(f"node {node_id!r} found {len(hits)} times")
+    found: HtmlElement = hits[0]
+    return found
+
+
+def row_of(el: HtmlElement) -> HtmlElement:
+    node = el
+    while (parent := node.getparent()) is not None:
+        if sum(1 for s in parent if s.tag == node.tag) >= 2:
+            return node
+        node = parent
+    raise LookupError("no repeated ancestor: this element is not inside a list of rows")
+
+
+def rel_path(row: HtmlElement, el: HtmlElement) -> RelPath:
+    steps: list[tuple[str, int]] = []
+    node = el
+    while node is not row:
+        parent = node.getparent()
+        if parent is None:
+            raise LookupError("element is not inside the given row")
+        same = [s for s in parent if s.tag == node.tag]
+        steps.append((str(node.tag), same.index(node)))
+        node = parent
+    return tuple(reversed(steps))
+
+
+def follow(row: HtmlElement, path: RelPath) -> HtmlElement | None:
+    node = row
+    for tag, index in path:
+        same = [c for c in node if c.tag == tag]
+        if index >= len(same):
+            return None
+        node = same[index]
+    return node
+```
+
+```python
+# selector_drift/extract/reader.py
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Mapping
+
+from bok_core.provenance import Claim, DomSource, Method
+from lxml import html as lh
+
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.extract.rows import RelPath, follow, locate, rel_path, row_of
+from selector_drift.resolve.trace import CascadeTrace, ResolvedElement
+from selector_drift.spec.schema import TaskSpec
+
+
+class RowMisaligned(Exception):
+    """Two fields resolved into different row lists. Refused, never zipped."""
+
+
+def _text(el: lh.HtmlElement) -> str:
+    return " ".join(el.text_content().split())
+
+
+def read(dom: str, resolved: Mapping[str, ResolvedElement], spec: TaskSpec, *, run_key: str,
+         snapshot_id: str, traces: Mapping[str, CascadeTrace],
+         observed_at: dt.datetime) -> CandidateExtraction:
+    root = lh.fromstring(dom)
+    anchor_field = spec.natural_key[0]
+    anchor_row = row_of(locate(root, resolved[anchor_field].node_id))
+    container = anchor_row.getparent()
+    paths: dict[str, RelPath] = {}
+    for name, el in resolved.items():
+        cell = locate(root, el.node_id)
+        row = row_of(cell)
+        if row.getparent() is not container or row.tag != anchor_row.tag:
+            raise RowMisaligned(f"{name} does not share a row with {anchor_field}")
+        paths[name] = rel_path(row, cell)
+
+    siblings = [r for r in container if r.tag == anchor_row.tag]
+    data_rows = siblings[siblings.index(anchor_row):]          # before the anchor: headers
+    rows: list[dict[str, Claim]] = []                           # type: ignore[type-arg]
+    for row in data_rows:
+        cells = {name: follow(row, p) for name, p in paths.items()}
+        if any(c is None for c in cells.values()):
+            continue                                            # pagination or footer row
+        rows.append({
+            name: Claim(value=_text(cell), method=Method.DETERMINISTIC, confidence=None,
+                        observed_at=observed_at,
+                        source=DomSource(snapshot_id=snapshot_id,
+                                         selector=resolved[name].selector,
+                                         rung=resolved[name].rung_id))
+            for name, cell in cells.items() if cell is not None
+        })
+    return CandidateExtraction(rows=rows, trace=dict(traces), spec_version=spec.version,
+                               run_key=run_key)
+```
+
+- [ ] **Step 4: Run them and make sure they pass**
+
+Run: `uv run pytest tests/extract -v && uv run mypy --strict selector_drift/extract`
+Expected: PASS, 6 tests. mypy clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add selector_drift/orchestrate tests/orchestrate
-git commit -m "feat(orchestrate): assemble the pipeline -- resolve, gate, land, log"
+git add selector_drift/extract tests/extract
+git commit -m "feat(extract): row model and deterministic Claims with DomSource provenance"
 ```
 
 ---
@@ -2564,43 +7020,234 @@ git commit -m "feat(orchestrate): assemble the pipeline -- resolve, gate, land, 
 - Consumes: every rung, `gate`, `replay`, all nine mutations. Imports `testbench.answers.key` — **permitted in tests, forbidden in `selector_drift/`.**
 - Produces: the regression suite the resolver is measured against for the rest of the project.
 
+**Amended 2026-09-26 — the suite's names, defined once.** The first draft called five names nothing
+defined — `extract`, `ALL_SIX_CHECKS`, `warm_cache()`, `bench_evidence`, `history` — and `extract` was
+built by a task that ran *after* this one. There are **seven** checks per field, not six:
+`RowKeyContinuity` joined in Task 22. `test_no_adversarial_mutation_ever_writes` moves to Task 26A: it
+reads `rows_written_for(...)`, which only the assembled pipeline produces.
+
+- [ ] **Step 0: Write the suite fixtures**
+
+```python
+# tests/suite/conftest.py
+from __future__ import annotations
+
+import datetime as dt
+import random
+from collections.abc import Callable, Mapping
+
+import pytest
+from bok_core.boundary.sensitivity import Sensitivity
+
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.extract.reader import read
+from selector_drift.heallog.capture import Evidence
+from selector_drift.resolve.cache import CachedSelector
+from selector_drift.resolve.cascade import resolve_cascade
+from selector_drift.resolve.page import StaticPageSource
+from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
+from selector_drift.resolve.rungs.r3_anchors import AnchorRung
+from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
+from selector_drift.resolve.trace import ResolvedElement
+from selector_drift.spec.loader import load_spec
+from selector_drift.spec.schema import FieldTarget
+from selector_drift.validate.assertions.base import Assertion
+from selector_drift.validate.checks import checks_for
+from selector_drift.validate.history import AcceptedRun, History
+from testbench.mutations.base import apply_all
+from testbench.mutations.catalogue import CATALOGUE
+from testbench.portal.data import render_results
+
+SPEC = load_spec("specs/testbench.yaml")                 # version 2 (Task 12): six fields
+CLAIM_NUMBER = next(t for t in SPEC.targets if t.name == "claim_number")
+AMOUNT = next(t for t in SPEC.targets if t.name == "amount")
+BASE_DAY = dt.date(2026, 10, 1)        # fixed: the suite must not depend on the clock (M20)
+AT = dt.datetime(2026, 10, 1, 4, 12, tzinfo=dt.UTC)
+CONFIRMERS = [AxTreeRung(), AnchorRung(), HeuristicRung()]
+
+
+def all_checks(field: FieldTarget) -> list[Assertion]:
+    return checks_for(SPEC, field, CONFIRMERS, warmup_runs=5)      # the bench warms up in 5
+
+
+class _EmptyCache:
+    def get(self, target: str, field: str, spec_version: int | None = None) -> None:
+        return None
+
+
+class _DictCache:
+    """Read-only per-field cache satisfying CacheReader (Task 19)."""
+    def __init__(self, entries: Mapping[str, CachedSelector]) -> None:
+        self._entries = dict(entries)
+
+    def get(self, target: str, field: str,
+            spec_version: int | None = None) -> CachedSelector | None:
+        return self._entries.get(field)
+
+
+def _resolve_all(html: str) -> dict[str, ResolvedElement]:
+    page = StaticPageSource(html)
+    return {t.name: resolve_cascade(page, t, _EmptyCache(), record=False)[0] for t in SPEC.targets}
+
+
+def extract(el: ResolvedElement, field: str, *, dom: str,
+            run_key: str = f"testbench:2:{BASE_DAY}") -> CandidateExtraction:
+    """One field's (possibly healed) element over the mutated page; the other fields resolve
+    cleanly on the same page."""
+    resolved = _resolve_all(dom) | {field: el}
+    return read(dom, resolved, SPEC, run_key=run_key, snapshot_id="0" * 64,
+                traces={}, observed_at=AT)
+
+
+@pytest.fixture
+def warm_cache() -> Callable[[], _DictCache]:
+    """A cache holding the UNMUTATED page's selectors and anchors, as after a clean run."""
+    def make() -> _DictCache:
+        clean = _resolve_all(render_results(BASE_DAY))
+        return _DictCache({name: CachedSelector(selector=el.selector, anchor=el.anchor,
+                                                set_by_rung=el.rung_id)
+                           for name, el in clean.items()})
+    return make
+
+
+_PAGES: dict[str, tuple[str, str]] = {}        # name -> (page, truth-marked twin)
+
+
+def _pages(name: str) -> tuple[str, str]:
+    """ONE mutation instance applied to the page and to its truth-marked twin (Task 7's
+    mark_truth), so the answer is structurally identical to the page -- the technique Task 8's
+    expected_xpaths uses."""
+    if name not in _PAGES:
+        entry = next(e for e in CATALOGUE if e.name == name)
+        m = entry.build(random.Random(0))
+        _PAGES[name] = (apply_all([m], render_results(BASE_DAY)),
+                        apply_all([m], render_results(BASE_DAY, mark_truth=True)))
+    return _PAGES[name]
+
+
+@pytest.fixture(scope="session")
+def bench_evidence() -> dict[str, Evidence]:
+    """One page per mutation class, each with exactly that ONE class applied to BASE_DAY's
+    page, so a failure names the class that caused it."""
+    return {e.name: Evidence.from_static(_pages(e.name)[0], run_key=f"testbench:2:{BASE_DAY}",
+                                         sensitivity=Sensitivity.SYNTHETIC, captured_at=AT)
+            for e in CATALOGUE}
+
+
+@pytest.fixture(scope="session")
+def truth() -> dict[str, dict[str, list[str]]]:
+    """name -> field -> the lxml paths of that field's true cells in the mutated page."""
+    from lxml import html as lh
+    out: dict[str, dict[str, list[str]]] = {}
+    for e in CATALOGUE:
+        root = lh.fromstring(_pages(e.name)[1])
+        tree = root.getroottree()
+        out[e.name] = {t.name: [tree.getpath(n) for n in
+                                root.xpath("//*[@data-sd-truth=$f]", f=t.name)]
+                       for t in SPEC.targets}
+    return out
+
+
+@pytest.fixture
+def decoy_evidence(bench_evidence: dict[str, Evidence]) -> Evidence:
+    return bench_evidence["DecoyColumn"]
+
+
+@pytest.fixture(scope="session")
+def history() -> History:
+    """Six accepted clean runs (the bench warms up in 5), so every history-dependent check
+    has a basis and a refusal cannot be blamed on warm-up."""
+    runs = []
+    for i in range(6):
+        day = BASE_DAY - dt.timedelta(days=6 - i)
+        html = render_results(day)
+        cand = read(html, _resolve_all(html), SPEC, run_key=f"testbench:2:{day}",
+                    snapshot_id="0" * 64, traces={}, observed_at=AT)
+        rows = tuple({k: str(c.value) for k, c in row.items()} for row in cand.rows)
+        runs.append(AcceptedRun(run_key=f"testbench:2:{day}", window=day, rows=rows,
+                                natural_key=tuple(SPEC.natural_key)))
+    return History(runs=tuple(runs))
+```
+
 - [ ] **Step 1: Write the failing heal suite**
 
 ```python
 # tests/suite/test_mutation_heals.py
 import pytest
-from selector_drift.heallog.replay import replay
-from testbench.answers.key import expected_selector
 
-@pytest.mark.parametrize("mutation", ALL_EIGHT_MUTATION_CLASSES, ids=lambda m: m.name)
-def test_every_mutation_class_heals_to_the_right_element(mutation, bench_evidence):
-    ev = bench_evidence[mutation.name]
-    el, trace = replay(ev, CLAIM_NUMBER, warm_cache())
-    assert el.selector == expected_selector(ev.day, "claim_number")
-    assert trace.winner in (2, 3, 4), "rungs 1-4 must carry this; rung 5 escalates"
+from selector_drift.heallog.replay import replay
+from tests.suite.conftest import ALL_BENIGN_MUTATION_CLASSES, AMOUNT, CLAIM_NUMBER
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("m", ALL_BENIGN_MUTATION_CLASSES, ids=lambda m: m.name)
+@pytest.mark.parametrize("field", [CLAIM_NUMBER, AMOUNT], ids=lambda f: f.name)
+def test_every_mutation_class_heals_to_the_right_element(m, field, bench_evidence, truth,
+                                                         warm_cache):
+    el, trace = replay(bench_evidence[m.name], field, warm_cache())
+    # C5: node identity, never selector text. replay() uses a StaticPageSource, whose node_id is
+    # lxml's getpath() (Task 13) -- the same call that built `truth`. Any row's cell in the true
+    # column is the true column.
+    assert el.node_id in truth[m.name][field.name]
+    # Rung 1 may legitimately win when a mutation does not touch this field's cell and its
+    # anchor still verifies (Task 17). Rung 5 may never: it escalates, it does not heal.
+    assert trace.winner in (1, 2, 3, 4), "rungs 1-4 must carry this; rung 5 escalates"
 ```
 
 - [ ] **Step 2: Write the failing adversarial suite — this set matters more**
 
 ```python
 # tests/suite/test_adversarial_refused.py
-from selector_drift.validate.gate import gate, HealContext
+import pytest
+
+from selector_drift.heallog.replay import replay
+from selector_drift.validate.gate import HealContext, gate
 from selector_drift.validate.quarantine import QuarantinedRun
 from selector_drift.validate.verdict import Outcome
+from tests.suite.conftest import AMOUNT, CLAIM_NUMBER, all_checks, extract
 
-def test_decoy_column_is_refused_by_the_gate(decoy_evidence):
-    """The plausible-but-wrong heal. Every value looks valid. Only cross-family
-    disagreement catches it, and it must catch it on run one with no history."""
+
+@pytest.mark.unit
+def test_decoy_column_is_refused_by_the_gate(decoy_evidence, warm_cache):
+    """The plausible-but-wrong heal. Every value looks valid. Cross-family disagreement
+    catches it, and it must catch it on run one with no history."""
     el, trace = replay(decoy_evidence, AMOUNT, warm_cache())
-    ctx = HealContext(healed=True, winning_rung=trace.winner, page=None, target=AMOUNT, cache=warm_cache())
-    result = gate(extract(el), history=None, ctx=ctx, checks=ALL_SIX_CHECKS)
+    ctx = HealContext(healed=True, winning_rung=trace.winner, page=None, target=AMOUNT,
+                      cache=warm_cache())
+    result = gate(extract(el, "amount", dom=decoy_evidence.dom.value), None, ctx,
+                  all_checks(AMOUNT))
     assert isinstance(result, QuarantinedRun)
     assert any(v.check == "IndependentRungAgreement" and v.outcome is Outcome.FAIL
                for v in result.verdicts)
 
-def test_no_adversarial_mutation_ever_writes(decoy_evidence):
-    assert rows_written_for(decoy_evidence.run_key) == 0
+
+ADVERSARIAL_REFUSALS = [          # (class, field, the verdict that must refuse it) -- Task 11A table
+    ("HiddenDecoy", CLAIM_NUMBER, "IndependentRungAgreement"),
+    ("DuplicateLabel", CLAIM_NUMBER, "IndependentRungAgreement"),
+    ("ValueSwap", AMOUNT, "RowKeyContinuity"),
+    ("LocaleFlip", AMOUNT, "DomainAssertion"),
+    ("ImageHeader", AMOUNT, "IndependentRungAgreement"),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("name", "field", "check"), ADVERSARIAL_REFUSALS, ids=lambda x: str(x))
+def test_every_adversarial_class_is_refused_by_its_named_verdict(name, field, check,
+                                                                 bench_evidence, history,
+                                                                 warm_cache):
+    # Moved here from Task 11A (2026-09-26): gate() exists only from Task 20-25.
+    # VirtualisedRows is absent on purpose: the row-count contract (Task 29) catches it.
+    ev = bench_evidence[name]
+    el, trace = replay(ev, field, warm_cache())
+    ctx = HealContext(healed=True, winning_rung=trace.winner, page=None, target=field,
+                      cache=warm_cache())
+    result = gate(extract(el, field.name, dom=ev.dom.value), history, ctx, all_checks(field))
+    assert isinstance(result, QuarantinedRun)
+    assert any(v.check == check and v.outcome is not Outcome.PASS for v in result.verdicts),         f"{name} was quarantined, but not by {check} -- a refusal for the wrong reason is a coincidence"
 ```
+
+`test_no_adversarial_mutation_ever_writes` is in Task 26A (`tests/orchestrate/test_pipeline_end_to_end.py`),
+against `bench_decoy`: it needs the assembled pipeline to have a lake to not write to.
 
 - [ ] **Step 3: Run both and watch them fail**
 
@@ -2631,158 +7278,7 @@ git commit -m "test: mutation heal suite and adversarial refusal suite"
 
 ---
 
-### Task 26B: The third suite — every benign heal is *accepted* — R14 (C3, M3)
-
-**Files:**
-- Create: `tests/suite/test_benign_heals_are_accepted.py`
-- Create: `tests/suite/test_degraded_mode.py`
-
-**Interfaces:**
-- Consumes: the pipeline (Task 26A), all seven checks, all fifteen mutation classes.
-- Produces: the false-positive half of the gate's measurement, and the degraded-mode floor.
-
-**Why this task exists.** Task 26 asserts two things: benign mutations **resolve**
-(`trace.winner in (2,3,4)`) and adversarial mutations are **refused**. Neither asserts that a benign
-mutation is *accepted by the gate*. **A resolver that quarantines 100% of legitimate heals passes
-every test in this plan** — and then the headline *"zero manual selector fixes"* is only true because
-a human cleared the queue by hand every night, which is the opposite of the product.
-
-Worse, per C3 the design **does** quarantine every label rewording until R14 lands. That defect was
-invisible precisely because this suite did not exist.
-
-- [ ] **Step 1: Write the failing acceptance suite**
-
-```python
-# tests/suite/test_benign_heals_are_accepted.py
-@pytest.mark.parametrize("mutation", ALL_BENIGN_MUTATION_CLASSES, ids=lambda m: m.name)
-def test_every_benign_mutation_is_healed_AND_accepted(mutation, bench_evidence, history):
-    # The complement of test_adversarial_refused. Refusing everything is safe
-    # and worthless; this is the suite that says the product works.
-    result = run_pipeline_on(bench_evidence[mutation.name], history=history)
-    assert isinstance(result, ValidatedExtraction), verdicts_of(result)
-
-@pytest.mark.parametrize("mutation", ALL_BENIGN_MUTATION_CLASSES, ids=lambda m: m.name)
-def test_each_acceptance_names_the_confirmer_that_carried_it(mutation, bench_evidence, history):
-    # An acceptance with no named confirmer is a check that silently passed.
-    heal = heal_event_for(run_pipeline_on(bench_evidence[mutation.name], history=history))
-    assert heal.confirmer_rung and heal.confirmer_family != heal.healed_family
-
-def test_the_label_reword_case_specifically(bench_evidence, history):
-    # C3. Before R14 this quarantines, forever, on the most common real UI change.
-    result = run_pipeline_on(bench_evidence["LabelReword"], history=history)
-    assert isinstance(result, ValidatedExtraction)
-    assert heal_event_for(result).confirmer_family == "VALUE"
-
-def test_the_quarantine_rate_on_benign_mutations_is_zero(bench_evidence, history):
-    # The number that goes in the methodology next to the heal count.
-    q = [m for m in ALL_BENIGN_MUTATION_CLASSES
-         if not isinstance(run_pipeline_on(bench_evidence[m.name], history=history),
-                           ValidatedExtraction)]
-    assert q == [], f"benign mutations quarantined: {[m.name for m in q]}"
-```
-
-- [ ] **Step 2: Write the failing degraded-mode test**
-
-```python
-# tests/suite/test_degraded_mode.py
-from bok_core.testing.degraded import blackout, assert_blackout_complete
-
-def test_degraded_mode_still_produces_findings():
-    # 00 R3 names this test by exactly this name; INTERFACE-CONTRACT.md section 5
-    # sets this repo's floor and unit: "majority of mutation classes healed by
-    # rungs 1-4". v1 makes zero model calls so it should be trivially green --
-    # which is the point. It is a regression guard against a model dependency
-    # creeping in, and design section 12 said to keep it. The plan had no such
-    # test at all (M3).
-    with blackout():
-        healed = [m for m in ALL_BENIGN_MUTATION_CLASSES if heals_under_blackout(m)]
-        assert len(healed) > len(ALL_BENIGN_MUTATION_CLASSES) / 2
-        assert_blackout_complete()
-```
-
-- [ ] **Step 3: Run both and watch them fail.** Run: `uv run pytest tests/suite -v`
-
-- [ ] **Step 4: Fix the gate until the acceptance suite passes.** If a benign mutation quarantines,
-  that is a **gate defect**, exactly as a mutation that will not heal is a resolver defect. Read the
-  named verdict before changing a threshold; the answer is usually a missing confirmer family, not a
-  looser check.
-
-- [ ] **Step 5: Record both rates in `docs/methodology.md`** — benign acceptance rate, adversarial
-  refusal rate, and the degraded-mode floor with its unit. Three numbers, and they only mean something
-  together: refusing everything scores 100% on the second and 0% on the first.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add tests/suite docs/methodology.md
-git commit -m "test: benign-heal acceptance suite and degraded-mode floor"
-```
-
----
-
 # Phase E — Extract, land, quality (weeks 17–18)
-
----
-
-### Task 27: Typed extraction into `Claim`s
-
-**Files:**
-- Create: `selector_drift/extract/reader.py`, `selector_drift/extract/models.py`
-- Test: `tests/extract/test_reader.py`
-
-**Interfaces:**
-- Consumes: `ResolvedElement` (Task 13), `TaskSpec` (Task 5), `bok_core.provenance.Claim`, `Method`.
-- Produces:
-  - `CandidateExtraction(rows: list[dict[str, Claim]], trace: CascadeTrace, spec_version: int, run_key: str)`
-  - `read(element: ResolvedElement, spec: TaskSpec) -> CandidateExtraction`
-
-Every value is a `Claim` with `method=DETERMINISTIC` and therefore `confidence=None` — the honest encoding, which makes `ConfidenceMeter` render as uncalibrated (`00` B10).
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# tests/extract/test_reader.py
-from bok_core.provenance import Method
-from selector_drift.extract.reader import read
-
-def test_every_extracted_value_is_a_deterministic_claim(resolved):
-    for row in read(resolved, SPEC).rows:
-        for claim in row.values():
-            assert claim.method is Method.DETERMINISTIC and claim.confidence is None
-
-def test_claim_source_is_a_DomSource_carrying_the_snapshot_it_came_from(resolved, evidence):
-    # H8/4. INTERFACE-CONTRACT 2.2 defines DomSource(snapshot_id, selector, rung)
-    # specifically for this project. `snapshot_id` is the link from a claim back to
-    # the stored evidence -- i.e. the entire point of the provenance rail here -- and
-    # the first draft asserted only that the selector appeared somewhere in str(source).
-    claim = read(resolved, SPEC, evidence).rows[0]["claim_number"]
-    assert isinstance(claim.source, DomSource)
-    assert claim.source.snapshot_id == evidence.sha256
-    assert claim.source.selector == resolved.selector and claim.source.rung == resolved.rung_id
-
-def test_candidate_carries_the_run_key_and_spec_version(resolved):
-    c = read(resolved, SPEC)
-    assert c.run_key and c.spec_version == SPEC.version
-```
-
-- [ ] **Step 2: Run them and watch them fail**
-
-Run: `uv run pytest tests/extract -v`
-Expected: FAIL.
-
-- [ ] **Step 3: Implement `read()`.**
-
-- [ ] **Step 4: Run them and make sure they pass**
-
-Run: `uv run pytest tests/extract -v`
-Expected: PASS, 3 tests.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add selector_drift/extract tests/extract
-git commit -m "feat(extract): typed extraction into deterministic Claims"
-```
 
 ---
 
@@ -2795,7 +7291,7 @@ git commit -m "feat(extract): typed extraction into deterministic Claims"
 **Interfaces:**
 - Consumes: `ValidatedExtraction` (Task 20), `run_key` (Task 6).
 - Produces:
-  - `write(validated: ValidatedExtraction) -> Path` — **accepts no other type**; one Parquet file per **attempt**, named `{run_key}-{attempt}-{ulid}.parquet`, into `lake/target=<t>/window=<w>/`
+  - `write(validated: ValidatedExtraction) -> Path` — **accepts no other type**; one Parquet file per **attempt**, named `{fs_key(run_key)}-{attempt}-{ulid}.parquet` where `fs_key(k) = k.replace(":", "_")` (a `run_key` carries two colons, illegal in Windows file names — found 2026-09-26), into `lake/target=<t>/window=<w>/`. Every row carries `run_key` and `ingested_at` columns
   - `query(sql: str)` — DuckDB over the partitioned tree, **never a shared file written by parallel flows**. The `lake` view deduplicates on `spec.natural_key`, keeping the row with the greatest `ingested_at`
   - `compact(target: str) -> None` — writes to a sibling directory and **swaps atomically**; triggered when a partition exceeds `COMPACT_AFTER_FILES` (default 24)
 
@@ -3053,6 +7549,15 @@ git add selector_drift/quality/alerts.py selector_drift/orchestrate tests
 git commit -m "feat(quality): alerting, intervention ledger, deploy-history ingest"
 ```
 
+**Amended 2026-09-26.**
+- **Schedule edits are interventions.** `derive.missed_runs` (Task 34B) counts expected cron slots
+  "as versioned at the time", and no table holds schedule history. Any change to a spec's `schedule`
+  writes `interventions(kind="spec_edit", field="schedule", before={"schedule": old},
+  after={"schedule": new})`, and `derive.py` replays those rows to rebuild the schedule in force on
+  each day.
+- **`notify()` also fires, at `HIGH`, on every new `audit_log` row with
+  `detail->>'judgement' = 'false_accept'`** — a wrong heal the gate let through (Task 26C).
+
 ---
 
 # Phase F — Credentials and evidence (week 18)
@@ -3135,6 +7640,57 @@ git add selector_drift/credentials tests/credentials
 git commit -m "feat(credentials): provider protocol, session injection, no TOTP seed"
 ```
 
+
+**Amended 2026-09-26: one registry names each target's credential posture.** Task 26A's flow calls
+`selector_drift.credentials.registry.provider_for(target: str) -> CredentialProvider`, and no task
+created it. Create `selector_drift/credentials/registry.py` here: a mapping from target name to a
+provider factory, read from the target's scope record, with `SessionInjection` registered in this
+task and `ClientBroker` and `EncryptedStore` registered by Task 32. **Task 32 also adds
+`credential_posture: Literal["session_injection", "client_broker", "encrypted_store"] =
+"session_injection"` to `ScopeRecord`** — the Pydantic field only. Its `scope_records` mirror column, `credential_posture` (text, not null,
+default `'session_injection'`), is created **in Task 3**, because the schema freezes on day one and a
+column added in week 18 is exactly what that rule forbids. Until Task 32 every target uses the default,
+which is also the default offer (design §2.1 Q2). An unknown posture is a refusal, never a fallback to a weaker
+one:
+
+```python
+# selector_drift/credentials/registry.py
+from collections.abc import Callable
+
+from selector_drift.config import get_settings
+from selector_drift.credentials.provider import CredentialProvider
+from selector_drift.credentials.session import SessionInjection
+from selector_drift.scope.gate import load_scope
+
+_FACTORIES: dict[str, Callable[[str], CredentialProvider]] = {
+    "session_injection": lambda target: SessionInjection(
+        get_settings().evidence_root.parent / "sessions" / f"{target}.json"),
+}
+
+
+def register(posture: str, factory: Callable[[str], CredentialProvider]) -> None:
+    _FACTORIES[posture] = factory
+
+
+def provider_for(target: str) -> CredentialProvider:
+    record = load_scope(get_settings().scope_dir / f"{target}.yaml")
+    posture = getattr(record, "credential_posture", "session_injection")   # field added by Task 32
+    if posture not in _FACTORIES:
+        raise LookupError(f"{target}: unknown credential posture {posture!r} -- refusing, not downgrading")
+    return _FACTORIES[posture](target)
+```
+
+```python
+# tests/credentials/test_registry.py
+import pytest
+
+@pytest.mark.unit
+def test_an_unknown_posture_is_refused_not_downgraded(monkeypatch, scope_with_posture):
+    from selector_drift.credentials.registry import provider_for
+    scope_with_posture("testbench", "totp_seed_store")
+    with pytest.raises(LookupError):
+        provider_for("testbench")
+```
 ---
 
 ### Task 32: The client broker and the encrypted store
@@ -3213,14 +7769,27 @@ git commit -m "feat(credentials): client broker and envelope-encrypted store"
 ### Task 33: Evidence storage — capture, redact, verify, store
 
 **Files:**
-- Create: `selector_drift/heallog/evidence.py`, `selector_drift/heallog/diff.py`
-- Test: `tests/heallog/test_redaction_order.py`, `tests/heallog/test_diff.py`
+- Create: `selector_drift/config.py`, `selector_drift/heallog/evidence.py`, `selector_drift/heallog/diff.py`, `selector_drift/heallog/retention.py`
+- Modify: `selector_drift/orchestrate/deployments.py` (register `evidence_retention`), `docs/methodology.md` (Retention section), `.env.example`
+- Test: `tests/heallog/test_redaction_order.py`, `tests/heallog/test_bundle_store.py`, `tests/heallog/test_diff.py`, `tests/heallog/test_retention.py`
 
 **Interfaces:**
-- Consumes: `Evidence` (Task 19), `bok_core.boundary.redact`, `Sensitivity`.
+- Consumes: `Evidence`, `BBox`, `credential_input_nodes`, `NODE_ATTR`, `Masker` (Task 19); the whole of `heallog/bundle.py` (Task 19); `bok_core.boundary.redact.redact`, `RedactionResult`; `bok_core.boundary.egress.Plane`, `write_guarded`; `bok_core.boundary.sensitivity.Labelled`, `Sensitivity`, `SensitivityViolation`; `HealEvent`, `ScopeRecordRow`, `AuditLog` (Task 3).
 - Produces:
-  - `store(evidence: Evidence, plane: Plane) -> str` — returns an `evidence_uri`. Order is **capture → scrub credentials → redact → verify → `egress.guard_write` → store**; on verification failure it raises `RedactionFailed`, writes nothing, and the caller quarantines the run with reason `evidence redaction failed`.
-  - `scrub_credentials(dom: str, shot: bytes) -> tuple[str, bytes]` — **R15/H6**
+  - `Settings` and `get_settings() -> Settings` (`lru_cache`d; tests call `get_settings.cache_clear()`), `ConfigError`
+  - `scrub_credentials(dom: str) -> tuple[str, int]` — **R15/H6**; returns the scrubbed DOM and how many values it removed
+  - `strip_png_metadata(png: bytes) -> bytes`
+  - `pii_node_ids(dom: str, *, key: bytes, sensitivity: Sensitivity) -> frozenset[str]` and `PiiMasker(key: bytes, sensitivity: Sensitivity)` — the production `Masker`
+  - `RedactedEvidence` — frozen; minted only by `redact_evidence()`
+  - `redact_evidence(evidence: Evidence, *, key: bytes) -> RedactedEvidence` — scrub → redact → verify, **in memory, before any write**; raises `RedactionFailed`
+  - `last_accepted_dir(target: str) -> Path`, `heal_bundle_dir(heal_id: int) -> Path`
+  - `write_last_accepted(redacted: RedactedEvidence, target: str, plane: Plane) -> Path`
+  - `write_heal_bundle(heal_id: int, target: str, after: RedactedEvidence, plane: Plane) -> str` — returns the `evidence_uri`; `before` copied from `last-accepted/<target>/`
+  - `promote_heal_bundle_to_last_accepted(heal_id: int, target: str, plane: Plane) -> Path`
+  - `store(evidence: Evidence, plane: Plane, *, target: str, heal_id: int | None = None) -> str` — the composed write path: capture → scrub → redact → verify → `egress` guard → write. `heal_id=None` writes `last-accepted/<target>/`
+  - `RedactionFailed(Exception)`
+  - `DiffSpan(kind: Literal["add", "remove", "same"], text: str)` (frozen Pydantic), `tokenize_html(html: str) -> list[str]`, `dom_diff(before: str, after: str) -> list[DiffSpan]`
+  - `evidence_retention(today: date | None = None) -> int` — Prefect flow; `retention_deployment()` in `orchestrate/deployments.py`
 
 **Three corrections against `INTERFACE-CONTRACT.md` (H8) and one gap it does not cover (H6).**
 
@@ -3231,97 +7800,2723 @@ git commit -m "feat(credentials): client broker and envelope-encrypted store"
    comes from the `AuthorisedTarget`'s derived property (R4/H7) — never from a parameter a caller
    could get wrong.
 2. **`redact` returns a `RedactionResult`, not a string.** Contract §1.3:
-   `redact(payload: Labelled[str]) -> RedactionResult` with `verified: bool` —
+   `redact(payload: Labelled[str], *, key: bytes) -> RedactionResult` with `verified: bool` —
    *"a field on a result the caller must destructure, never a bare bool that can be dropped."*
-3. **The write goes through `egress.guard_write` (contract §1.5).** It is listed there as
-   **"Required by `selector-drift`"** for this exact path, and *"consumers route their write paths
-   through this rather than writing bespoke guards."* The first draft wrote a bespoke guard.
+3. **Every write goes through `egress.write_guarded` (contract §1.5)** — the guard and the write
+   together, atomically. It is listed there as **"Required by `selector-drift`"** for this exact path.
+   The first draft wrote a bespoke guard.
 4. **Redaction looks for PII and misses every credential (H6).** `00` §4.2 scopes `redact` to
    *"emails, phones, tax ids, bank/routing numbers, addresses, person names"*. Evidence is a DOM
    snapshot and a screenshot **of a logged-in portal**: session cookies, `Authorization` headers,
    CSRF tokens in hidden inputs, and the contents of `input[type=password]` if a login page is
    captured mid-flow. None of these look like PII, so none are redacted — the highest-value secret in
    the system is the one thing the pass does not look for. `scrub_credentials` runs **first**, over
-   password and hidden input values, any `Set-Cookie` / `Authorization` text, and anything matching
-   the storage-state shape.
-  - `RedactionFailed(Exception)`
-  - `dom_diff(before: str, after: str) -> list[DiffSpan]` — word-level, for the heal-log screen
-  - `DiffSpan(kind: Literal["add","remove","same"], text: str)`
+   password and hidden input values, credential-named attributes, `<script>` bodies, any
+   `Set-Cookie` / `Authorization` / `Bearer` text, and anything matching the storage-state shape.
+
+**Four more, from the API contract (§7), found 2026-09-26:**
+
+5. **Two stores, one write path.** `last-accepted/<target>/` (overwritten on every accepted run) and
+   `heals/<heal_id>/` (written once). Both go through the same scrub → redact → verify → guard →
+   write sequence, and redaction is its own function (`redact_evidence`) so that Task 26A can prove it
+   *before* `land.write()` — a redaction failure must leave `last-accepted/` untouched, which is
+   impossible if redaction is the first half of the write.
+6. **Writes are atomic.** A bundle is assembled in a sibling `.tmp-<token>/` directory and renamed
+   into place; a reader never sees a half-written bundle, and a failure mid-assembly leaves nothing.
+   The suffix is `secrets.token_hex(13)`, not a ULID: it only has to be unique, and the plan
+   declares no ULID dependency.
+7. **The screenshot is verified structurally.** A PNG has no text for a detector to re-run over.
+   `redact_evidence` recomputes, from the DOM, every node the redactor would flag plus every
+   credential input, and refuses unless the capture masked all of them (Task 19). It then strips
+   every PNG chunk that is not image data (`tEXt`, `iTXt`, `zTXt`, `eXIf`, `tIME`, …), because a
+   screenshot tool can write a URL — or a cookie — into metadata.
+8. **Retention closes M30.** `heals/` bundles of a `client-authorised` target are deleted after the
+   scope record's `evidence_retention_days` by a daily Prefect deployment; the `heal_events` row and
+   every count derived from it remain, and each deletion is an `audit_log` row, which is also how the
+   read path tells *expired* from *corrupted* (Task 34C).
+
+**Test fix (found 2026-09-26).** The first draft's `test_stored_evidence_contains_no_original_identifier`
+passed `Sensitivity.CLIENT_CONFIDENTIAL` to `store()` while every other test passed a `Plane`. The
+second argument is the **plane** — sensitivity comes from the `Labelled` inside the evidence — so the
+test now passes `Plane.CLIENT` like the rest. **Diff fix (audit L2).** "Word-level" over HTML is
+ambiguous: `str.split()` makes `<td class=a>X</td>` one token and the test could never pass. The
+tokenizer is now HTML-aware: a tag becomes its name, one token per attribute, and its closer; text
+between tags splits on whitespace.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/heallog/test_redaction_order.py
 from pathlib import Path
-import pytest
-from selector_drift.heallog.evidence import store, RedactionFailed
-from bok_core.boundary import Sensitivity
 
-def test_redaction_failure_writes_nothing(leaky_evidence, evidence_root):
+import pytest
+
+from bok_core.boundary.egress import Plane
+from bok_core.boundary.redact import RedactionResult
+from bok_core.boundary.sensitivity import Sensitivity, SensitivityViolation
+from selector_drift.config import get_settings
+from selector_drift.heallog import evidence as evidence_mod
+from selector_drift.heallog.bundle import read_heal_manifest
+from selector_drift.heallog.capture import Evidence
+from selector_drift.heallog.evidence import PiiMasker, RedactionFailed, store
+
+KEY = b"test-only-redaction-key-not-a-secret!"      # a test constant, not a credential
+SESSION_COOKIE_VALUE = "sid-7f3e9a1c"
+CSRF_TOKEN = "csrf-51b2c0d4"
+RUN_KEY = "client-portal:1:2026-09-07"
+
+LOGGED_IN = f"""<html><head><meta name="csrf-token" content="{CSRF_TOKEN}"></head><body>
+<pre data-sd-node="n1">Cookie: session={SESSION_COOKIE_VALUE}</pre>
+<form><input data-sd-node="n2" type="hidden" name="authenticity_token" value="{CSRF_TOKEN}">
+</form><table><tr><td data-sd-node="n3">AB12345678</td></tr></table></body></html>"""
+LOGIN_PAGE = """<html><body><form><input data-sd-node="n1" name="username" value="demo">
+<input data-sd-node="n2" type="password" name="password" value="hunter2"></form></body></html>"""
+WITH_PII = """<html><body><table><tr><td data-sd-node="n1">AB12345678</td>
+<td data-sd-node="n2">Jane Okafor</td><td data-sd-node="n3">jane.okafor@example.invalid</td>
+</tr></table></body></html>"""
+
+
+def _ev(html: str, sensitivity: Sensitivity, *, masked: bool = True) -> Evidence:
+    return Evidence.from_static(html, run_key=RUN_KEY, sensitivity=sensitivity,
+                                masker=PiiMasker(KEY, sensitivity) if masked else None)
+
+
+def bundle_bytes(uri: str) -> bytes:
+    return b"".join(p.read_bytes() for p in sorted(Path(uri).rglob("*")) if p.is_file())
+
+
+def was_redacted(uri: str) -> bool:
+    red = read_heal_manifest(Path(uri)).redaction
+    return red.verified and red.redacted_identifiers > 0
+
+
+@pytest.fixture
+def evidence_root(tmp_path, monkeypatch):
+    root = tmp_path / "evidence"
+    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(root))
+    monkeypatch.setenv("SD_REDACTION_KEY", KEY.hex())
+    get_settings.cache_clear()
+    yield root
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+def test_redaction_failure_writes_nothing(evidence_root):
     # Un-redacted evidence is never written to be cleaned up later. There is no later.
-    # NOTE the fixture: the first draft asserted on a `tmp_path` that `store()` was
-    # never told about, so it passed whatever store() actually did (M19).
+    # `evidence_root` is the directory store() writes to -- the first draft asserted on a
+    # tmp_path store() was never told about (M19).
+    leaky = _ev(WITH_PII, Sensitivity.CLIENT_CONFIDENTIAL, masked=False)
     with pytest.raises(RedactionFailed):
-        store(leaky_evidence, Plane.CLIENT)
+        store(leaky, Plane.CLIENT, target="client-portal", heal_id=1)
     assert not list(evidence_root.rglob("*"))
 
-def test_no_session_cookie_survives_into_stored_evidence(logged_in_evidence):
+
+@pytest.mark.unit
+def test_an_unverified_redaction_writes_nothing(evidence_root, monkeypatch):
+    monkeypatch.setattr(evidence_mod, "redact", lambda payload, *, key: RedactionResult(
+        text=payload.value, verified=False, surrogate_count={}, failures=["email"]))
+    with pytest.raises(RedactionFailed, match="email"):
+        store(_ev(LOGIN_PAGE, Sensitivity.CLIENT_CONFIDENTIAL), Plane.CLIENT,
+              target="client-portal", heal_id=1)
+    assert not list(evidence_root.rglob("*"))
+
+
+@pytest.mark.unit
+def test_no_session_cookie_survives_into_stored_evidence(evidence_root):
     # R15/H6. A portal DOM snapshot is taken while authenticated.
-    uri = store(logged_in_evidence, Plane.CLIENT)
-    blob = Path(uri).read_bytes()
+    uri = store(_ev(LOGGED_IN, Sensitivity.CLIENT_CONFIDENTIAL), Plane.CLIENT,
+                target="client-portal", heal_id=1)
+    blob = bundle_bytes(uri)
     assert SESSION_COOKIE_VALUE.encode() not in blob
     assert CSRF_TOKEN.encode() not in blob
 
-def test_a_password_field_value_never_reaches_the_snapshot(login_page_evidence):
-    uri = store(login_page_evidence, Plane.CLIENT)
-    assert b"hunter2" not in Path(uri).read_bytes()
 
-def test_client_confidential_evidence_cannot_be_written_to_the_demo_plane(client_evidence):
+@pytest.mark.unit
+def test_a_password_field_value_never_reaches_the_snapshot(evidence_root):
+    uri = store(_ev(LOGIN_PAGE, Sensitivity.CLIENT_CONFIDENTIAL), Plane.CLIENT,
+                target="client-portal", heal_id=1)
+    assert b"hunter2" not in bundle_bytes(uri)
+
+
+@pytest.mark.unit
+def test_client_confidential_evidence_cannot_be_written_to_the_demo_plane(evidence_root):
     # Contract 1.5. This is the check guard_write exists to make, and the reason
     # it is not a bespoke local guard.
     with pytest.raises(SensitivityViolation):
-        store(client_evidence, Plane.DEMO)
+        store(_ev(LOGIN_PAGE, Sensitivity.CLIENT_CONFIDENTIAL), Plane.DEMO,
+              target="client-portal", heal_id=1)
+    assert not [p for p in evidence_root.rglob("*") if p.is_file()]
 
-def test_stored_evidence_contains_no_original_identifier(evidence_with_pii):
-    uri = store(evidence_with_pii, Sensitivity.CLIENT_CONFIDENTIAL)
-    assert "Jane Okafor" not in Path(uri).read_text()
 
-def test_synthetic_evidence_is_still_redacted_before_storage(bench_evidence):
+@pytest.mark.unit
+def test_stored_evidence_contains_no_original_identifier(evidence_root):
+    # Fixed 2026-09-26: the second argument is a Plane, as in every other test. The
+    # first draft passed Sensitivity.CLIENT_CONFIDENTIAL here. Person-name detection is
+    # a bok-core detector class (contract 1.3); if the shipped version does not cover
+    # it, this is the test that says so, and docs/methodology.md must declare the gap.
+    uri = store(_ev(WITH_PII, Sensitivity.CLIENT_CONFIDENTIAL), Plane.CLIENT,
+                target="client-portal", heal_id=1)
+    blob = bundle_bytes(uri)
+    assert b"Jane Okafor" not in blob
+    assert b"jane.okafor@example.invalid" not in blob
+
+
+@pytest.mark.unit
+def test_synthetic_evidence_is_still_redacted_before_storage(evidence_root):
     # Design 8.2 says a SYNTHETIC target's evidence is publishable with no redaction
     # argument -- true, and exactly why redaction must NOT be conditional on the label
     # (H7). Redact unconditionally; publish from an explicit allowlist, never from a
     # string in a YAML file that one typo could change.
-    uri = store(bench_evidence, Plane.DEMO)
+    uri = store(_ev(WITH_PII, Sensitivity.SYNTHETIC), Plane.DEMO, target="testbench",
+                heal_id=1)
     assert uri and was_redacted(uri)
 ```
 
 ```python
-# tests/heallog/test_diff.py
-from selector_drift.heallog.diff import dom_diff
+# tests/heallog/test_bundle_store.py
+import dataclasses
+import json
+import re
+import struct
+import zlib
+from pathlib import Path
 
+import pytest
+
+from bok_core.boundary.egress import Plane
+from bok_core.boundary.sensitivity import Sensitivity
+from selector_drift.config import get_settings
+from selector_drift.heallog import evidence as evidence_mod
+from selector_drift.heallog.bundle import (AFTER_PNG, MANIFEST, PAGE_HTML, EvidenceCorrupted,
+                                           read_heal_manifest)
+from selector_drift.heallog.capture import BLANK_PNG, BBox, Evidence
+from selector_drift.heallog.evidence import (PiiMasker, RedactionFailed, heal_bundle_dir,
+                                             last_accepted_dir,
+                                             promote_heal_bundle_to_last_accepted,
+                                             redact_evidence, strip_png_metadata, write_heal_bundle,
+                                             write_last_accepted)
+
+KEY = b"test-only-redaction-key-not-a-secret!"
+PAGE = """<html><body><table><tr><th data-sd-node="n0">Claim Number</th></tr>
+<tr><td data-sd-node="n1">AB12345678</td></tr></table></body></html>"""
+
+
+@pytest.fixture(autouse=True)
+def root(tmp_path, monkeypatch):
+    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(tmp_path / "evidence"))
+    monkeypatch.setenv("SD_REDACTION_KEY", KEY.hex())
+    get_settings.cache_clear()
+    yield tmp_path / "evidence"
+    get_settings.cache_clear()
+
+
+def _red(html: str = PAGE, run_key: str = "testbench:1:2026-09-07", png: bytes = BLANK_PNG):
+    ev = Evidence.from_static(html, run_key=run_key, sensitivity=Sensitivity.SYNTHETIC,
+                              masker=PiiMasker(KEY, Sensitivity.SYNTHETIC), screenshot=png)
+    ev = dataclasses.replace(ev, node_ids={"claim_number": "n1"},
+                             boxes={"claim_number": BBox(x=8, y=30, width=120, height=22)})
+    return redact_evidence(ev, key=KEY)
+
+
+def _png_with_text(text: bytes) -> bytes:
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+    body = BLANK_PNG[8:]
+    return BLANK_PNG[:8] + body[:25] + chunk(b"tEXt", b"Comment\x00" + text) + body[25:]
+
+
+@pytest.mark.unit
+def test_heal_bundle_manifest_is_exactly_the_spec_shape(root):
+    """API spec 7.2 -- field for field."""
+    write_last_accepted(_red(run_key="testbench:1:2026-09-06"), "testbench", Plane.CLIENT)
+    uri = write_heal_bundle(3, "testbench", _red(), Plane.CLIENT)
+    data = json.loads((Path(uri) / MANIFEST).read_text())
+    assert set(data) == {"version", "files", "before", "after", "redaction"}
+    assert data["version"] == 1
+    assert set(data["files"]) == {"before.html", "before.png", "after.html", "after.png"}
+    assert all(re.fullmatch(r"sha256:[0-9a-f]{64}", v) for v in data["files"].values())
+    for side in ("before", "after"):
+        assert set(data[side]) == {"run_key", "captured_at", "viewport", "nodes"}
+        assert data[side]["viewport"] == [1280, 900]
+        assert data[side]["captured_at"].endswith("Z")
+    assert data["after"]["nodes"]["claim_number"] == {
+        "node_id": "n1", "bbox": {"x": 8.0, "y": 30.0, "width": 120.0, "height": 22.0}}
+    assert set(data["redaction"]) == {"scrubbed_credentials", "redacted_identifiers", "verified"}
+    assert data["redaction"]["verified"] is True
+
+
+@pytest.mark.unit
+def test_a_failed_bundle_write_leaves_no_bundle_and_no_tmp_dir(root, monkeypatch):
+    real = evidence_mod.write_guarded
+    calls = {"n": 0}
+
+    def flaky(path, payload, plane, *, redaction=None):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        real(path, payload, plane, redaction=redaction)
+    monkeypatch.setattr(evidence_mod, "write_guarded", flaky)
+    with pytest.raises(OSError):
+        write_heal_bundle(4, "testbench", _red(), Plane.CLIENT)
+    assert not heal_bundle_dir(4).exists()
+    assert not [p for p in root.rglob(".tmp-*")]
+
+
+@pytest.mark.unit
+def test_every_file_goes_through_the_egress_guard(root, monkeypatch):
+    real = evidence_mod.write_guarded
+    written: list[str] = []
+    monkeypatch.setattr(evidence_mod, "write_guarded",
+                        lambda path, payload, plane, *, redaction=None:
+                        (written.append(path.name), real(path, payload, plane,
+                                                         redaction=redaction)))
+    uri = write_heal_bundle(5, "testbench", _red(), Plane.CLIENT)
+    assert sorted(written) == sorted(p.name for p in Path(uri).iterdir())
+
+
+@pytest.mark.unit
+def test_a_heal_bundle_is_written_once(root):
+    write_heal_bundle(6, "testbench", _red(), Plane.CLIENT)
+    with pytest.raises(FileExistsError):
+        write_heal_bundle(6, "testbench", _red(), Plane.CLIENT)
+
+
+@pytest.mark.unit
+def test_last_accepted_is_replaced_whole(root):
+    write_last_accepted(_red(PAGE), "testbench", Plane.CLIENT)
+    newer = PAGE.replace("Claim Number", "Claim Reference")
+    write_last_accepted(_red(newer), "testbench", Plane.CLIENT)
+    assert b"Claim Reference" in (last_accepted_dir("testbench") / PAGE_HTML).read_bytes()
+    assert sorted(p.name for p in last_accepted_dir("testbench").parent.iterdir()) == ["testbench"]
+
+
+@pytest.mark.unit
+def test_screenshot_metadata_is_stripped(root):
+    shot = _png_with_text(b"Cookie: session=sid-7f3e9a1c")
+    assert b"sid-7f3e9a1c" in shot
+    uri = write_heal_bundle(7, "testbench", _red(png=shot), Plane.CLIENT)
+    assert b"sid-7f3e9a1c" not in (Path(uri) / AFTER_PNG).read_bytes()
+    assert strip_png_metadata(BLANK_PNG) == BLANK_PNG
+
+
+@pytest.mark.unit
+def test_a_screenshot_that_did_not_mask_an_identifier_node_is_refused():
+    page = PAGE.replace("</table>", '</table><p data-sd-node="n9">jane.okafor@example.invalid</p>')
+    unmasked = Evidence.from_static(page, run_key="testbench:1:2026-09-07",
+                                    sensitivity=Sensitivity.SYNTHETIC)
+    with pytest.raises(RedactionFailed, match="not masked"):
+        redact_evidence(unmasked, key=KEY)
+
+
+@pytest.mark.unit
+def test_a_corrupted_last_accepted_is_recorded_not_silently_dropped(root):
+    write_last_accepted(_red(run_key="testbench:1:2026-09-06"), "testbench", Plane.CLIENT)
+    (last_accepted_dir("testbench") / PAGE_HTML).write_text("<html>edited</html>")
+    manifest = read_heal_manifest(Path(write_heal_bundle(8, "testbench", _red(), Plane.CLIENT)))
+    assert manifest.before is None and manifest.before_unavailable_reason == "corrupted"
+
+
+@pytest.mark.unit
+def test_promotion_copies_the_bundles_after_half_into_last_accepted(root, monkeypatch):
+    # The label lookup reads Postgres; Task 26A's integration test covers it. Here: DB-free.
+    monkeypatch.setattr(evidence_mod, "_stored_sensitivity", lambda t: Sensitivity.SYNTHETIC)
+    uri = write_heal_bundle(9, "testbench", _red(), Plane.CLIENT)
+    promote_heal_bundle_to_last_accepted(9, "testbench", Plane.CLIENT)
+    assert (last_accepted_dir("testbench") / PAGE_HTML).read_bytes() == \
+        (Path(uri) / "after.html").read_bytes()
+    (Path(uri) / "after.html").write_text("<html>edited</html>")
+    with pytest.raises(EvidenceCorrupted):
+        promote_heal_bundle_to_last_accepted(9, "testbench", Plane.CLIENT)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", ["../etc", "Testbench", "a/b", ""])
+def test_a_target_name_cannot_escape_the_evidence_root(bad):
+    with pytest.raises(ValueError):
+        last_accepted_dir(bad)
+```
+
+(`test_a_target_name_cannot_escape_the_evidence_root` carries two decorators; `parametrize` is not
+a tier marker — the one tier marker is `unit`.)
+
+```python
+# tests/heallog/test_diff.py
+import pytest
+
+from selector_drift.heallog.diff import dom_diff, tokenize_html
+
+
+@pytest.mark.unit
 def test_diff_is_word_level_not_line_level():
+    # Fixed 2026-09-26 (audit L2): the tokenizer is HTML-aware -- a tag becomes its
+    # name, one token per attribute, and its closer -- so an attribute change is one
+    # removed and one added token rather than the whole tag.
     spans = dom_diff("<td class=a>X</td>", "<td class=b>X</td>")
     assert [s.text for s in spans if s.kind == "remove"] == ["class=a"]
     assert [s.text for s in spans if s.kind == "add"] == ["class=b"]
+
+
+@pytest.mark.unit
+def test_the_tokenizer_splits_a_tag_into_name_attributes_and_closer():
+    assert tokenize_html('<td class="a b" id=x>Claim Number</td>') == \
+        ["<td", 'class="a b"', "id=x", ">", "Claim", "Number", "</td>"]
+
+
+@pytest.mark.unit
+def test_a_label_reword_changes_one_word():
+    spans = dom_diff("<th>Claim Number</th>", "<th>Claim Reference</th>")
+    assert [s.text for s in spans if s.kind == "remove"] == ["Number"]
+    assert [s.text for s in spans if s.kind == "add"] == ["Reference"]
+
+
+@pytest.mark.unit
+def test_a_tag_rename_shows_the_names_not_the_whole_row():
+    spans = dom_diff("<table><tr><td>X</td></tr></table>", "<div><div><div>X</div></div></div>")
+    assert "X" in [s.text for s in spans if s.kind == "same"]
+
+
+@pytest.mark.unit
+def test_comments_and_doctype_are_single_tokens():
+    assert tokenize_html("<!doctype html><!-- a b -->") == ["<!doctype html>", "<!-- a b -->"]
+```
+
+```python
+# tests/heallog/test_retention.py
+import datetime as dt
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from sqlalchemy import text
+
+from selector_drift.config import get_settings
+from selector_drift.db.models import AuditLog, HealEvent, Run, ScopeRecordRow
+from selector_drift.db.session import Session, engine
+from selector_drift.heallog.retention import evidence_retention
+from selector_drift.orchestrate.deployments import retention_deployment
+
+# `.fn` calls the flow body directly: these tests exercise retention, not Prefect.
+
+TODAY = dt.date(2026, 12, 31)
+
+
+@pytest.fixture(autouse=True)
+def db(tmp_path, monkeypatch):
+    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(tmp_path / "evidence"))
+    get_settings.cache_clear()
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE runs, heal_events, scope_records, audit_log "
+                       "RESTART IDENTITY CASCADE"))
+    yield tmp_path / "evidence"
+    get_settings.cache_clear()
+
+
+def _scope(target: str, basis: str, days: int | None) -> ScopeRecordRow:
+    return ScopeRecordRow(target=target, basis=basis, authorising_party="me",
+                          authorised_on=dt.date(2026, 1, 1), expires_on=dt.date(2027, 1, 1),
+                          evidence_uri=None, evidence_sha256=None,
+                          origins=["https://x.example.invalid"],
+                          rate_limit={"requests": 1, "per_seconds": 30},
+                          user_agent_contact="https://example.invalid/contact",
+                          first_heal_policy="required", legal_review="self_drafted",
+                          warmup_runs=30, evidence_retention_days=days,
+                          record_sha256="0" * 64, loaded_at=datetime(2026, 1, 1, tzinfo=UTC))
+
+
+def _heal(root: Path, target: str, broke: dt.date) -> int:
+    key = f"{target}:1:{broke.isoformat()}"
+    with Session() as s:
+        s.add(Run(run_key=key, target=target, spec_version=1, window=broke,
+                  first_started_at=datetime.combine(broke, dt.time(4, 12), UTC),
+                  state="healed"))
+        heal = HealEvent(run_key=key, target=target, field="claim_number",
+                         broke_at=datetime.combine(broke, dt.time(4, 12), UTC), winning_rung=3,
+                         selector_after="td", anchor_after={}, trace=[], verdicts=[])
+        s.add(heal)
+        s.commit()
+        bundle = root / "heals" / str(heal.id)
+        bundle.mkdir(parents=True)
+        (bundle / "after.html").write_text("<html></html>")
+        heal.evidence_uri = str(bundle)
+        s.commit()
+        return heal.id
+
+
+@pytest.mark.integration
+def test_retention_deletes_client_bundles_and_keeps_counts(db):
+    """API spec 7.4 / 7.5, closes M30."""
+    with Session() as s:
+        s.add(_scope("client-portal", "client-authorised", 90))
+        s.commit()
+    old = _heal(db, "client-portal", TODAY - dt.timedelta(days=91))
+    young = _heal(db, "client-portal", TODAY - dt.timedelta(days=10))
+    assert evidence_retention.fn(today=TODAY) == 1
+    assert not (db / "heals" / str(old)).exists()
+    assert (db / "heals" / str(young)).exists()
+    with Session() as s:
+        assert s.query(HealEvent).count() == 2                  # the counts remain
+        row = s.query(AuditLog).filter_by(action="evidence_expired").one()
+        assert row.subject == f"heal:{old}" and row.actor == "system:evidence_retention"
+        assert row.detail["retention_days"] == 90
+
+
+@pytest.mark.integration
+def test_self_owned_bundles_are_kept_for_the_life_of_the_log(db):
+    with Session() as s:
+        s.add(_scope("testbench", "self-owned", None))
+        s.commit()
+    kept = _heal(db, "testbench", TODAY - dt.timedelta(days=400))
+    assert evidence_retention.fn(today=TODAY) == 0
+    assert (db / "heals" / str(kept)).exists()
+
+
+@pytest.mark.integration
+def test_a_heal_with_no_scope_record_is_kept_and_flagged(db):
+    orphan = _heal(db, "ghost", TODAY - dt.timedelta(days=400))
+    assert evidence_retention.fn(today=TODAY) == 0
+    assert (db / "heals" / str(orphan)).exists()
+    with Session() as s:
+        assert s.query(AuditLog).filter_by(action="retention_skipped").count() == 1
+
+
+@pytest.mark.unit
+def test_retention_is_a_daily_deployment():
+    dep = retention_deployment()
+    assert dep.name == "evidence-retention"
+    assert dep.schedules[0].schedule.cron == "30 3 * * *"
+
+
+@pytest.mark.unit
+def test_methodology_states_the_retention_policy():
+    text_ = Path("docs/methodology.md").read_text().lower()
+    assert "## retention" in text_ and "disk budget" in text_
+    assert "evidence_retention_days" in text_
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/heallog -v`
-Expected: FAIL.
+Run: `uv run pytest tests/heallog -v -m "unit or integration"`
+Expected: FAIL — `ModuleNotFoundError: selector_drift.config`.
 
-- [ ] **Step 3: Implement `store()` and `dom_diff()`.**
+- [ ] **Step 3: Implement `config.py`**
 
-- [ ] **Step 4: Run them and make sure they pass**
+```python
+# selector_drift/config.py
+"""Process settings, from the environment only. No secret has a default."""
+from __future__ import annotations
 
-Run: `uv run pytest tests/heallog -v`
-Expected: PASS, 4 new tests.
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+
+class ConfigError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class Settings:
+    env: str                          # SD_ENV: development | production | typegen
+    evidence_root: Path               # SD_EVIDENCE_ROOT
+    lake_root: Path                   # SD_LAKE_ROOT
+    spec_dir: Path                    # SD_SPEC_DIR
+    scope_dir: Path                   # SD_SCOPE_DIR -- tests point it at a tmp copy
+    database_url: str                 # SD_DATABASE_URL -- read since Task 3 by db/session.py
+    fixture_mode: bool                # SD_FIXTURE_MODE=1 -- E2E only (web UI spec 6)
+    fixture_evidence_root: Path       # SD_FIXTURE_EVIDENCE_ROOT
+    web_origin: str                   # SD_WEB_ORIGIN -- the Origin every non-GET must carry
+    public_base_url: str              # SD_PUBLIC_BASE_URL -- problem-type URIs, method links
+    _redaction_key_hex: str           # SD_REDACTION_KEY -- hex, >= 32 bytes, never committed
+
+    @property
+    def redaction_key(self) -> bytes:
+        if not self._redaction_key_hex:
+            raise ConfigError("SD_REDACTION_KEY is not set; evidence cannot be redacted")
+        key = bytes.fromhex(self._redaction_key_hex)
+        if len(key) < 32:
+            raise ConfigError("SD_REDACTION_KEY must be at least 32 bytes")
+        return key
+
+    @property
+    def evidence_read_root(self) -> Path:
+        """Where the API reads bundles. Fixture mode changes this and nothing else."""
+        return self.fixture_evidence_root if self.fixture_mode else self.evidence_root
+
+    @classmethod
+    def for_typegen(cls) -> Settings:
+        """For scripts/gen-types.sh: builds the app to export its schema. Holds no secret."""
+        return cls(env="typegen", evidence_root=Path("evidence"), lake_root=Path("lake"),
+                   spec_dir=Path("specs"), scope_dir=Path("scopes"),
+                   database_url="postgresql+psycopg://typegen@invalid/none", fixture_mode=False,
+                   fixture_evidence_root=Path("web/e2e/fixtures"),
+                   web_origin="http://localhost:3000",
+                   public_base_url="https://selector-drift.invalid", _redaction_key_hex="")
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    e = os.environ.get
+    return Settings(
+        env=e("SD_ENV", "development"),
+        evidence_root=Path(e("SD_EVIDENCE_ROOT", "evidence")),
+        lake_root=Path(e("SD_LAKE_ROOT", "lake")),
+        spec_dir=Path(e("SD_SPEC_DIR", "specs")),
+        scope_dir=Path(e("SD_SCOPE_DIR", "scopes")),
+        database_url=e("SD_DATABASE_URL", "postgresql+psycopg://selector_drift@localhost:5432/selector_drift"),
+        fixture_mode=e("SD_FIXTURE_MODE", "0") == "1",
+        fixture_evidence_root=Path(e("SD_FIXTURE_EVIDENCE_ROOT", "web/e2e/fixtures")),
+        web_origin=e("SD_WEB_ORIGIN", "http://localhost:3000"),
+        public_base_url=e("SD_PUBLIC_BASE_URL", "https://selector-drift.invalid"),
+        _redaction_key_hex=e("SD_REDACTION_KEY", ""),
+    )
+```
+
+Append to `.env.example` (names only, no values — gitleaks stays clean):
+
+```bash
+SD_ENV=development
+SD_EVIDENCE_ROOT=/data/evidence
+SD_LAKE_ROOT=/data/lake
+SD_SPEC_DIR=specs
+SD_REDACTION_KEY=          # generate: python -c "import secrets; print(secrets.token_hex(32))"
+SD_WEB_ORIGIN=http://localhost:3000
+SD_PUBLIC_BASE_URL=
+SD_FIXTURE_MODE=0
+```
+
+- [ ] **Step 4: Implement `evidence.py`**
+
+```python
+# selector_drift/heallog/evidence.py
+"""The evidence write path: capture -> scrub credentials -> redact -> verify ->
+egress guard -> write (INTERFACE-CONTRACT 1.3, 1.5; API spec 7.2)."""
+from __future__ import annotations
+
+import re
+import secrets
+import shutil
+import struct
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+from lxml import html as lxml_html
+from sqlalchemy import select
+
+from bok_core.boundary.egress import Plane, write_guarded
+from bok_core.boundary.redact import RedactionResult, redact
+from bok_core.boundary.sensitivity import Labelled, Sensitivity
+from selector_drift.config import get_settings
+from selector_drift.db.models import ScopeRecordRow
+from selector_drift.db.session import Session
+from selector_drift.heallog.bundle import (AFTER_HTML, AFTER_PNG, BEFORE_HTML, BEFORE_PNG,
+                                           HEALS_DIR, LAST_ACCEPTED_DIR, MANIFEST, PAGE_HTML,
+                                           PAGE_PNG, EvidenceCorrupted, HealManifest, NodeBox,
+                                           PageManifest, RedactionBlock, SideBlock, file_digest,
+                                           read_heal_manifest, read_page_manifest,
+                                           verified_bytes)
+from selector_drift.heallog.capture import (NODE_ATTR, BBox, Evidence,
+                                            credential_input_nodes)
+
+_TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")      # same pattern as the API (Task 34)
+_SECRET_NAME = re.compile(r"csrf|xsrf|token|authenticity|session|secret|api[-_]?key", re.I)
+_CREDENTIAL_TEXT = (
+    re.compile(r"(?i)\b(?:set-cookie|cookie|authorization)\s*:[^\n<]*"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(r'(?s)"(?:cookies|origins)"\s*:\s*\[.*?\]'),     # Playwright storage state
+)
+_SCRUBBED = "[scrubbed]"
+_PNG_SIG = b"\x89PNG\r\n\x1a\n"
+_PNG_KEEP = frozenset({b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS"})
+
+
+class RedactionFailed(Exception):
+    """The caller quarantines the run with reason 'evidence redaction failed'."""
+
+
+# ----------------------------------------------------------------- scrub, strip, mask
+
+def scrub_credentials(dom: str) -> tuple[str, int]:
+    """R15/H6: runs BEFORE redact(), because credentials do not look like PII."""
+    tree = lxml_html.document_fromstring(dom)
+    n = 0
+    for el in tree.iter():
+        if not isinstance(el.tag, str):
+            continue
+        if el.tag == "script" and (el.text or "").strip():
+            el.text = ""
+            n += 1
+        if el.tag in ("input", "textarea") and (el.get("value") or el.text):
+            kind = (el.get("type") or "text").lower()
+            if kind in ("password", "hidden") or _SECRET_NAME.search(el.get("name") or ""):
+                if el.get("value"):
+                    el.set("value", _SCRUBBED)
+                if el.tag == "textarea":
+                    el.text = _SCRUBBED
+                n += 1
+        for attr, value in list(el.attrib.items()):
+            if attr != NODE_ATTR and value and _SECRET_NAME.search(attr):
+                el.set(attr, _SCRUBBED)
+                n += 1
+        if el.tag == "meta" and _SECRET_NAME.search(el.get("name") or "") and el.get("content"):
+            el.set("content", _SCRUBBED)
+            n += 1
+    out = lxml_html.tostring(tree, encoding="unicode", doctype="<!DOCTYPE html>")
+    for rx in _CREDENTIAL_TEXT:
+        out, k = rx.subn(_SCRUBBED, out)
+        n += k
+    return out, n
+
+
+def strip_png_metadata(png: bytes) -> bytes:
+    """Keep image data only. A screenshot tool can write a URL -- or a cookie -- into tEXt."""
+    if not png.startswith(_PNG_SIG):
+        raise RedactionFailed("screenshot is not a PNG")
+    out, pos = bytearray(_PNG_SIG), len(_PNG_SIG)
+    while pos < len(png):
+        if pos + 8 > len(png):
+            raise RedactionFailed("screenshot PNG is truncated")
+        (length,) = struct.unpack(">I", png[pos:pos + 4])
+        tag, end = png[pos + 4:pos + 8], pos + 12 + length
+        if end > len(png):
+            raise RedactionFailed("screenshot PNG chunk is truncated")
+        if tag in _PNG_KEEP:
+            out += png[pos:end]
+        pos = end
+        if tag == b"IEND":
+            break
+    return bytes(out)
+
+
+def _flagged_leaves(dom: str, *, key: bytes,
+                    sensitivity: Sensitivity) -> tuple[frozenset[str], int]:
+    """(node ids of identifier-bearing leaves, count of such leaves with NO node id)."""
+    flagged: set[str] = set()
+    unmaskable = 0
+    for el in lxml_html.document_fromstring(dom).iter():
+        if not isinstance(el.tag, str) or len(el):
+            continue
+        text = (el.text_content() or "").strip()
+        if not text:
+            continue
+        result = redact(Labelled(value=text, sensitivity=sensitivity), key=key)
+        if sum(result.surrogate_count.values()) or not result.verified:
+            node_id = el.get(NODE_ATTR)
+            if node_id:
+                flagged.add(node_id)
+            else:
+                unmaskable += 1
+    return frozenset(flagged), unmaskable
+
+
+def pii_node_ids(dom: str, *, key: bytes, sensitivity: Sensitivity) -> frozenset[str]:
+    """Every leaf node whose own text the redactor would change. The screenshot must have
+    masked each of them; this is the screenshot's verification (Task 19)."""
+    return _flagged_leaves(dom, key=key, sensitivity=sensitivity)[0]
+
+
+@dataclass(frozen=True)
+class PiiMasker:
+    key: bytes
+    sensitivity: Sensitivity
+
+    def __call__(self, dom: str) -> frozenset[str]:
+        return pii_node_ids(dom, key=self.key, sensitivity=self.sensitivity)
+
+
+# ----------------------------------------------------------------- redact (in memory)
+
+_MINT = object()
+
+
+@dataclass(frozen=True)
+class RedactedEvidence:
+    _token: object
+    run_key: str
+    captured_at: datetime
+    viewport: tuple[int, int]
+    html: bytes
+    png: bytes
+    sensitivity: Sensitivity           # of the source; the label every file is written under
+    redaction: RedactionResult
+    scrubbed_credentials: int
+    node_ids: Mapping[str, str] = field(default_factory=dict)
+    boxes: Mapping[str, BBox] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self._token is not _MINT:
+            raise TypeError("RedactedEvidence is minted only by redact_evidence()")
+
+    def side(self) -> SideBlock:
+        return SideBlock(run_key=self.run_key, captured_at=self.captured_at,
+                         viewport=self.viewport,
+                         nodes={f: NodeBox(node_id=self.node_ids[f], bbox=b)
+                                for f, b in self.boxes.items() if f in self.node_ids})
+
+    def redaction_block(self) -> RedactionBlock:
+        return RedactionBlock(scrubbed_credentials=self.scrubbed_credentials,
+                              redacted_identifiers=sum(self.redaction.surrogate_count.values()),
+                              verified=self.redaction.verified)
+
+
+def redact_evidence(evidence: Evidence, *, key: bytes) -> RedactedEvidence:
+    """Unconditional -- SYNTHETIC evidence is redacted too (H7). Writes nothing."""
+    raw = evidence.dom.value
+    scrubbed, n_scrubbed = scrub_credentials(raw)
+    result = redact(Labelled(value=scrubbed, sensitivity=evidence.dom.sensitivity), key=key)
+    if not result.verified:
+        raise RedactionFailed(f"redaction verification failed: {', '.join(result.failures)}")
+    flagged, unmaskable = _flagged_leaves(raw, key=key, sensitivity=evidence.dom.sensitivity)
+    if unmaskable:
+        # An identifier in an element with no node id cannot have been masked: fail closed.
+        raise RedactionFailed(f"{unmaskable} identifier-bearing element(s) carry no node id, "
+                              "so the screenshot could not mask them (not masked)")
+    missing = (flagged | credential_input_nodes(raw)) - evidence.masked_node_ids
+    if missing:
+        raise RedactionFailed(f"{len(missing)} identifier-bearing node(s) were not masked "
+                              "in the screenshot")
+    return RedactedEvidence(_MINT, run_key=evidence.run_key, captured_at=evidence.captured_at,
+                            viewport=evidence.viewport, html=result.text.encode("utf-8"),
+                            png=strip_png_metadata(evidence.screenshot.value),
+                            sensitivity=evidence.dom.sensitivity, redaction=result,
+                            scrubbed_credentials=n_scrubbed, node_ids=dict(evidence.node_ids),
+                            boxes=dict(evidence.boxes))
+
+
+# ----------------------------------------------------------------- paths and atomic writes
+
+def last_accepted_dir(target: str) -> Path:
+    if not _TARGET_RE.fullmatch(target):
+        raise ValueError(f"not a target name: {target!r}")
+    return get_settings().evidence_root / LAST_ACCEPTED_DIR / target
+
+
+def heal_bundle_dir(heal_id: int) -> Path:
+    if heal_id <= 0:
+        raise ValueError("heal ids are positive")
+    return get_settings().evidence_root / HEALS_DIR / str(heal_id)
+
+
+def _write_dir(final: Path, files: Mapping[str, bytes], manifest: bytes, plane: Plane,
+               sensitivity: Sensitivity, redaction: RedactionResult, *,
+               replace_existing: bool) -> None:
+    """Assemble in a sibling tmp dir, every file through write_guarded, then rename."""
+    if final.exists() and not replace_existing:
+        raise FileExistsError(f"{final} is written once")
+    final.parent.mkdir(parents=True, exist_ok=True)
+    tmp = final.parent / f".tmp-{secrets.token_hex(13)}"
+    tmp.mkdir()
+    try:
+        for name, data in {**files, MANIFEST: manifest}.items():
+            write_guarded(tmp / name, Labelled(value=data, sensitivity=sensitivity), plane,
+                          redaction=redaction)
+        if final.exists():
+            old = final.parent / f".old-{secrets.token_hex(13)}"
+            final.rename(old)
+            tmp.rename(final)
+            shutil.rmtree(old)
+        else:
+            tmp.rename(final)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
+def write_last_accepted(redacted: RedactedEvidence, target: str, plane: Plane) -> Path:
+    final = last_accepted_dir(target)
+    files = {PAGE_HTML: redacted.html, PAGE_PNG: redacted.png}
+    manifest = PageManifest(files={n: file_digest(b) for n, b in files.items()},
+                            page=redacted.side(), redaction=redacted.redaction_block())
+    _write_dir(final, files, manifest.dumps(), plane, redacted.sensitivity, redacted.redaction,
+               replace_existing=True)
+    return final
+
+
+def write_heal_bundle(heal_id: int, target: str, after: RedactedEvidence, plane: Plane) -> str:
+    final = heal_bundle_dir(heal_id)
+    files: dict[str, bytes] = {AFTER_HTML: after.html, AFTER_PNG: after.png}
+    before: SideBlock | None = None
+    before_reason: str | None = None
+    source = last_accepted_dir(target)
+    if source.exists():
+        try:
+            page = read_page_manifest(source)
+            files[BEFORE_HTML] = verified_bytes(source, page.files, PAGE_HTML)
+            files[BEFORE_PNG] = verified_bytes(source, page.files, PAGE_PNG)
+            before = page.page
+        except EvidenceCorrupted:
+            files.pop(BEFORE_HTML, None)
+            files.pop(BEFORE_PNG, None)
+            before_reason = "corrupted"
+    manifest = HealManifest(files={n: file_digest(b) for n, b in files.items()},
+                            before=before, before_unavailable_reason=before_reason,
+                            after=after.side(), redaction=after.redaction_block())
+    _write_dir(final, files, manifest.dumps(), plane, after.sensitivity, after.redaction,
+               replace_existing=False)
+    return str(final)
+
+
+def promote_heal_bundle_to_last_accepted(heal_id: int, target: str, plane: Plane) -> Path:
+    """A promoted run's accepted page is its bundle's 'after' half, re-verified first."""
+    bundle = heal_bundle_dir(heal_id)
+    manifest = read_heal_manifest(bundle)
+    html = verified_bytes(bundle, manifest.files, AFTER_HTML)
+    png = verified_bytes(bundle, manifest.files, AFTER_PNG)
+    files = {PAGE_HTML: html, PAGE_PNG: png}
+    page = PageManifest(files={n: file_digest(b) for n, b in files.items()},
+                        page=manifest.after, redaction=manifest.redaction)
+    sensitivity = _stored_sensitivity(target)
+    proof = RedactionResult(text="", verified=manifest.redaction.verified,
+                            surrogate_count={}, failures=[])
+    _write_dir(last_accepted_dir(target), files, page.dumps(), plane, sensitivity, proof,
+               replace_existing=True)
+    return last_accepted_dir(target)
+
+
+def _stored_sensitivity(target: str) -> Sensitivity:
+    """The label re-attached when stored files are re-written. Derived from the scope
+    record's basis (R4), fail-closed to CLIENT_CONFIDENTIAL when the record is unknown."""
+    with Session() as s:
+        basis = s.scalars(select(ScopeRecordRow.basis).where(ScopeRecordRow.target == target)
+                          .order_by(ScopeRecordRow.loaded_at.desc()).limit(1)).first()
+    return Sensitivity.SYNTHETIC if basis == "self-owned" else Sensitivity.CLIENT_CONFIDENTIAL
+
+
+def store(evidence: Evidence, plane: Plane, *, target: str, heal_id: int | None = None) -> str:
+    redacted = redact_evidence(evidence, key=get_settings().redaction_key)
+    if heal_id is None:
+        return str(write_last_accepted(redacted, target, plane))
+    return write_heal_bundle(heal_id, target, redacted, plane)
+```
+
+`_stored_sensitivity` is the one database read on this path; the unit test for promotion
+monkeypatches it, and Task 26A's integration test `test_promotion_moves_last_accepted_to_the_promoted_page`
+exercises the real lookup.
+
+- [ ] **Step 5: Implement `diff.py` — the HTML-aware tokenizer (audit L2)**
+
+```python
+# selector_drift/heallog/diff.py
+from __future__ import annotations
+
+import re
+from difflib import SequenceMatcher
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
+
+_TAG = re.compile(r"<!--.*?-->|<[^>]*>", re.S)
+_ATTR = re.compile(r"""[^\s=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+))?""")
+
+
+class DiffSpan(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    kind: Literal["add", "remove", "same"]
+    text: str
+
+
+def tokenize_html(html: str) -> list[str]:
+    """A tag -> '<name', one token per attribute, '>' or '/>'; a closer -> '</name>';
+    comments and doctype whole; text between tags split on whitespace."""
+    tokens: list[str] = []
+    pos = 0
+    for m in _TAG.finditer(html):
+        tokens.extend(html[pos:m.start()].split())
+        tag = m.group(0)
+        inner = tag[1:-1].strip()
+        if inner.startswith(("!", "?")):
+            tokens.append(tag)
+        elif inner.startswith("/"):
+            tokens.append(f"</{inner[1:].strip()}>")
+        else:
+            self_closing = inner.endswith("/")
+            parts = _ATTR.findall(inner.rstrip("/").strip())
+            if parts:
+                tokens.append("<" + parts[0])
+                tokens.extend(parts[1:])
+                tokens.append("/>" if self_closing else ">")
+        pos = m.end()
+    tokens.extend(html[pos:].split())
+    return tokens
+
+
+def dom_diff(before: str, after: str) -> list[DiffSpan]:
+    a, b = tokenize_html(before), tokenize_html(after)
+    spans: list[DiffSpan] = []
+
+    def emit(kind: Literal["add", "remove", "same"], words: list[str]) -> None:
+        if not words:
+            return
+        if spans and spans[-1].kind == kind:
+            spans[-1] = DiffSpan(kind=kind, text=spans[-1].text + " " + " ".join(words))
+        else:
+            spans.append(DiffSpan(kind=kind, text=" ".join(words)))
+
+    for op, i1, i2, j1, j2 in SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
+        if op == "equal":
+            emit("same", a[i1:i2])
+        else:
+            emit("remove", a[i1:i2])
+            emit("add", b[j1:j2])
+    return spans
+```
+
+- [ ] **Step 6: Implement the retention flow and register it**
+
+```python
+# selector_drift/heallog/retention.py
+"""Closes M30. Client heal bundles are deleted after the scope record's
+evidence_retention_days; the heal_events row and every count remain."""
+from __future__ import annotations
+
+import shutil
+from datetime import UTC, date, datetime
+from pathlib import Path
+
+from prefect import flow
+from sqlalchemy import select
+
+from selector_drift.db.models import AuditLog, HealEvent, ScopeRecordRow
+from selector_drift.db.session import Session
+
+ACTOR = "system:evidence_retention"
+
+
+@flow(name="evidence_retention")
+def evidence_retention(today: date | None = None) -> int:
+    today = today or datetime.now(UTC).date()
+    now = datetime.now(UTC)
+    deleted = 0
+    with Session() as s:
+        policy: dict[str, int | None] = {}
+        for row in s.scalars(select(ScopeRecordRow).order_by(ScopeRecordRow.loaded_at)):
+            policy[row.target] = row.evidence_retention_days          # latest load wins
+        for heal in s.scalars(select(HealEvent).where(HealEvent.evidence_uri.is_not(None))):
+            bundle = Path(heal.evidence_uri or "")
+            if not bundle.exists():
+                continue
+            if heal.target not in policy:
+                # Fail loud, not open: no record means no stated policy. Keep, and say so.
+                s.add(AuditLog(at=now, actor=ACTOR, action="retention_skipped",
+                               subject=f"heal:{heal.id}",
+                               detail={"target": heal.target, "why": "no scope record"}))
+                continue
+            days = policy[heal.target]
+            if days is None or (today - heal.broke_at.date()).days < days:
+                continue                          # self-owned: life of the log; or not yet due
+            shutil.rmtree(bundle)
+            s.add(AuditLog(at=now, actor=ACTOR, action="evidence_expired",
+                           subject=f"heal:{heal.id}",
+                           detail={"target": heal.target, "retention_days": days,
+                                   "broke_at": heal.broke_at.isoformat()}))
+            deleted += 1
+        s.commit()
+    return deleted
+```
+
+In `selector_drift/orchestrate/deployments.py`:
+
+```python
+from prefect.deployments.runner import RunnerDeployment
+
+from selector_drift.heallog.retention import evidence_retention
+
+RETENTION_CRON = "30 3 * * *"          # daily, 03:30 UTC -- clear of the 04:12 extraction slot
+
+
+def retention_deployment() -> RunnerDeployment:
+    return evidence_retention.to_deployment(name="evidence-retention", cron=RETENTION_CRON,
+                                            job_variables={"mem_limit": "512m"})
+```
+
+and the module's `serve(...)` call gains `retention_deployment()` beside the extraction deployments.
+
+- [ ] **Step 7: Write the Retention section of `docs/methodology.md`**
+
+```markdown
+## Retention
+
+| Store | self-owned target | client-authorised target |
+|---|---|---|
+| `evidence/last-accepted/<target>/` | overwritten on every accepted run; one copy | same |
+| `evidence/heals/<heal_id>/` | kept for the life of the log | deleted after the scope record's `evidence_retention_days` (required for this basis; 90 offered by default) |
+
+Deletion is done by the daily `evidence-retention` Prefect deployment (03:30 UTC). Each deletion
+writes an `audit_log` row (`action = evidence_expired`); the `heal_events` row and every published
+count remain, and the heal screen reads the bundle as *expired* rather than *corrupted*.
+
+**Disk budget.** One heal bundle is two redacted HTML snapshots and two full-page PNGs at 1280 px
+wide — budget 4 MB. The VM (P-4) reserves 20 GB for `evidence/` and `lake/` together; at the bench's
+observed heal rate the ninety-day log needs well under 2 GB. `du -sh evidence lake` is checked at
+each weekly publish and the figure is recorded in the published log's changelog.
+```
+
+- [ ] **Step 8: Run them and make sure they pass**
+
+Run: `uv run pytest tests/heallog -v -m "unit or integration"`
+Expected: PASS — 7 redaction-order, 13 bundle-store (the parametrised target test counts 4),
+5 diff, 5 retention, plus Task 19's 15.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add selector_drift/config.py selector_drift/heallog/evidence.py selector_drift/heallog/diff.py \
+        selector_drift/heallog/retention.py selector_drift/orchestrate/deployments.py \
+        docs/methodology.md .env.example tests/heallog
+git commit -m "feat(heallog): two-store evidence bundle, atomic guarded writes, retention, HTML-aware diff"
+```
+
+---
+
+# Phase F′ — Assembly, and the suites that need it (end of week 18)
+
+**Moved here 2026-09-26.** Task 26A consumes Tasks 27, 28, 29 and 33, so it cannot run earlier; 26B runs the assembled pipeline's decision core and 26C scores the heals 26A records. Task numbers are kept because the specs and the audit cite them.
+
+### Task 26A: Assemble the pipeline — R7 (C1)
+
+**This task has two test cycles.** Part 1 (Steps 1–5) is the first revision's task, unchanged apart
+from one marker per test. Part 2 (Steps 6–11) adds the evidence ordering the API contract requires
+(API spec §7.2) and **runs after Task 33**, because it consumes Task 33's writers. Part 1 is
+independently reviewable and lands first; the `Consumes` line of the first revision already named
+`heallog.store`, which did not exist until Task 33 — found 2026-09-26, fixed by the split.
+
+**Files:**
+- **Modify: `selector_drift/orchestrate/flows.py`** — the only task in the plan that does
+- Create: `selector_drift/orchestrate/pipeline.py`
+- Create (Part 2): `selector_drift/orchestrate/accept.py`, `selector_drift/orchestrate/quarantine_actions.py`
+- Test: `tests/orchestrate/test_pipeline_end_to_end.py`, `tests/orchestrate/test_evidence_ordering.py` (Part 2)
+
+**Interfaces:**
+- Consumes: `authorise`, `browser.driver.open`, `resolve_cascade`, `extract.read`, `validate.gate`,
+  `CacheWriter.put` (Task 17, moved to `orchestrate/cache_writer.py`), `land.write`, `quality.evaluate`; Part 2 adds Task 19's `capture`,
+  `record_boxes`, `replay_bundle`, `HealTimeCache`, `ExpectedHeal`, `NotReproducible`,
+  `LiveCapture`, and Task 33's `redact_evidence`, `RedactionFailed`, `PiiMasker`,
+  `write_heal_bundle`, `write_last_accepted`, `promote_heal_bundle_to_last_accepted`,
+  `get_settings`; Task 25's `promote`, `discard`, `QuarantinedRun`; `Plane`
+  (`bok_core.boundary.egress`).
+- Produces:
+  - an `extraction_flow` that actually runs the product
+  - Part 1: `record_heals(run_key: str, traces: Mapping[str, CascadeTrace], elements: Mapping[str, ResolvedElement], verdicts: Sequence[Verdict], *, target: str, cache_before: Mapping[str, CachedSelector | None]) -> list[HealEvent]`, `run_once(spec_path, *, window, attempt, credentials, confirmers) -> str` and `record_run(...)` in `pipeline.py`; `browser.navigate.run_steps(page, steps, creds, *, target)`; `orchestrate.history.history_for(db, target, spec, *, limit=90) -> History | None` — one `heal_events` row per field whose `trace.healed`, `evidence_uri` null until Part 2 fills it
+  - Part 2, `orchestrate/accept.py`:
+    - `accept(validated: ValidatedExtraction, elements: Mapping[str, ResolvedElement], *, cache: CacheWriter, commit_last_accepted: Callable[[], object]) -> Path` — **the one call site of `land.write`, `cache.put` and the last-accepted replacement, in that order**
+    - `hold(run_key: str, reason: str, verdicts: Sequence[Verdict], candidate: CandidateExtraction) -> str` — writes the candidate rows to `lake_root/quarantine/<run_key>.parquet` and the `quarantine` row; returns `data_uri`
+    - `bundle_and_replay(heal: HealEvent, target: str, after: RedactedEvidence, field_target: FieldTarget, cached_before: CachedSelector | None, node_id: str) -> None`
+    - `settle(*, target: AuthorisedTarget, spec: TaskSpec, candidate: CandidateExtraction, result: ValidatedExtraction | QuarantinedRun, evidence: Evidence, elements: Mapping[str, ResolvedElement], heals: Sequence[HealEvent], cache: CacheWriter, cache_before: Mapping[str, CachedSelector | None], redaction_key: bytes) -> RunState`
+    - `redaction_verdict(exc: RedactionFailed) -> Verdict`
+    - `RunState = Literal["completed", "healed", "quarantined"]`
+  - Part 2, `orchestrate/quarantine_actions.py`: `QuarantineActions(promote: Callable[[str, str, str], None], discard: Callable[[str, str, str], None])`, `build_quarantine_actions() -> QuarantineActions`, `accept_promoted(run_key: str, validated: ValidatedExtraction, *, cache: CacheWriter) -> Path`, `element_from_heal(session: OrmSession, heal: HealEvent) -> ResolvedElement`
+
+**Why this task exists.** `flows.py` is created in Task 6, where `extraction_flow` deliberately
+*"does nothing else — no cascade exists yet"*, and **it appears in no later task's file list.** Tasks
+13–33 build the cascade, the gate, extraction, the lake, quality and evidence, and nothing wires them
+together. Task 41's definition-of-done sweep then asserts `rung_stats()` and
+`select count(*) from lake` against a pipeline that has never run end to end. Forty-one tasks
+produced a parts bin.
+
+This sits between Task 25 (the gate exists) and Task 26 (the suites measure it) because that is the
+first moment it can be written and the last moment it can be skipped.
+
+**The order is the safety argument. Write it once, here** (amended 2026-09-26 for the evidence bundle
+and the heartbeat; the amended lines are marked `§7.2`):
+
+```
+heartbeat(target, slot, run_key)                                                     (Task 6, §6.1)
+authorise(scope)                       -> AuthorisedTarget      | ScopeRefusal -> state=refused
+  open(target, credentials)            -> Session  (1280x900)   | -> state=failed
+  capture(page, masker)                -> Evidence              (before any resolution)
+  for each field in spec.targets:
+      resolve_cascade(page, field)     -> ResolvedElement, CascadeTrace
+                                          + one `resolutions` row, win or lose      (C4)
+  record_boxes(evidence, page, nodes)  -> Evidence + boxes      (live page still open)  §7.2
+  extract.read(elements, spec)         -> CandidateExtraction
+  quality.evaluate(candidate)          -> list[Finding]         -> alert channel    (M2)
+  validate.gate(candidate, history, ctx)
+  record_heals(...)                    -> heal_events rows (evidence_uri null)
+  settle():
+      redact_evidence(evidence)        -> RedactedEvidence      | RedactionFailed:          §7.2
+                                                                    hold("evidence redaction failed")
+                                                                    NO bundle, NO last-accepted,
+                                                                    NO land.write, NO cache.put
+      for each heal: write_heal_bundle(before <- last-accepted/<target>/ AS IT IS NOW)      §7.2
+                     replay_bundle(after.html) -> heal_events.replayed_ok
+      |
+      +-- ValidatedExtraction -> accept():
+      |       land.write(validated)                                                  (idempotent)
+      |       cache.put(validated, element)   <- ONLY here. Never at heal time.      (C2)
+      |       write_last_accepted(...)        <- ONLY here, after land.write returns  §7.2
+      |       state = healed if heals else completed
+      |
+      +-- QuarantinedRun -> hold():
+              quarantine row + candidate parquet;  alert
+              NO land.write.  NO cache.put.  NO last-accepted.                        §7.2
+              state = quarantined
+```
+
+**Two orderings in that diagram are load-bearing and neither was written down before:**
+
+1. **`cache.put()` happens only on the `ValidatedExtraction` branch (R11/C2).** Writing the cache when
+   a rung heals — the obvious reading of Task 17 — means a quarantined heal poisons the cache, the
+   next run takes a rung-1 hit on the wrong selector, `trace.healed` is `False`, and the strict path
+   never engages again. Task 17's `put(validated, element)` signature makes this impossible to spell
+   wrongly; this diagram says why.
+2. **`capture()` happens before resolution, not after.** Evidence must be of the page the resolver
+   actually saw. Capturing after a heal captures a page that a `page.route` abort or a timeout may
+   already have changed, and a heal you cannot reproduce is an anecdote (B5).
+
+**Three more, added 2026-09-26 (API spec §7.2):**
+
+3. **The last-accepted snapshot moves only on acceptance, at the same call site as `cache.put()`,
+   after `land.write()` returns.** It is C2 applied to evidence: the "before" half of every future
+   heal screen is whatever this directory holds, so a quarantined page written there would become
+   the baseline the next heal is judged against. One function, `accept()`, is the only place the
+   three acceptance writes appear, in that order; if `land.write()` raises, neither of the others
+   happens.
+4. **A heal bundle is written *before* last-accepted moves.** Its "before" is copied from
+   `last-accepted/<target>/` at heal time. Writing the bundle after `accept()` would copy this run's
+   own page into "before", and the heal screen would show the same page twice.
+5. **Redaction is proven before anything is written.** `redact_evidence()` runs first in `settle()`,
+   in memory. A failure quarantines the run and writes no evidence at all, *including no update to
+   `last-accepted/`* — which is only possible because redaction is a separate step from the writes,
+   not the first half of one.
+
+**Two found 2026-09-26 while writing Part 2, stated so review can reject them independently:**
+
+- **Promotion must land data, and the API may not.** Task 25's `promote()` returns a
+  `ValidatedExtraction`; nothing in the first revision then wrote it, and the API that calls
+  `promote()` is forbidden from importing `land`, `resolve` or `orchestrate` (Task 34's
+  `api-is-read-side`). `QuarantineActions` inverts the dependency: `orchestrate/` builds the two
+  callables, `__main__ serve-api` hands them to `create_app()`, and a promoted run reaches
+  `accept()` — the same single call site — with its last-accepted snapshot taken from the heal
+  bundle's `after` half. **Task 25's `promote()` must not itself call `land.write()`**; it re-runs
+  the gate, audits, and returns.
+- **`hold()` is named here because nothing named it.** The first revision's diagram said "quarantine
+  row" and no task produced the function that writes one.
+
+#### Part 1 — wire the pipeline
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/orchestrate/test_pipeline_end_to_end.py
+import pytest
+
+
+@pytest.mark.integration
+def test_a_clean_run_writes_rows_and_updates_nothing_else(bench, session):
+    key = extraction_flow("specs/testbench.yaml")
+    assert session.get(Run, key).state == "completed"
+    assert rows_in_lake(key) > 0
+    assert session.query(HealEvent).filter_by(run_key=key).count() == 0
+
+
+@pytest.mark.integration
+def test_a_healed_run_writes_rows_a_heal_event_and_the_cache(bench_mutated, session):
+    key = extraction_flow("specs/testbench.yaml")
+    assert session.get(Run, key).state == "healed"
+    assert session.query(HealEvent).filter_by(run_key=key).one().confirmer_rung
+    assert cache_entry("testbench", "claim_number").set_by_run_key == key
+
+
+@pytest.mark.integration
+def test_a_quarantined_run_writes_no_rows_and_does_not_touch_the_cache(bench_decoy, session):
+    before = cache_entry("testbench", "amount")
+    key = extraction_flow("specs/testbench.yaml")
+    assert session.get(Run, key).state == "quarantined"
+    assert rows_in_lake(key) == 0
+    assert cache_entry("testbench", "amount") == before          # C2
+
+
+@pytest.mark.integration
+def test_a_refused_target_never_opens_a_browser_and_never_captures(expired_spec, monkeypatch):
+    opened = []
+    monkeypatch.setattr("selector_drift.browser.driver.open", lambda *a, **k: opened.append(1))
+    assert state_of(extraction_flow(expired_spec)) == "refused"
+    assert opened == []
+
+
+@pytest.mark.integration
+def test_every_resolution_lands_in_the_resolutions_table(bench, session):
+    key = extraction_flow("specs/testbench.yaml")
+    assert session.query(Resolution).filter_by(run_key=key).count() == len(SPEC.targets)
+
+
+@pytest.mark.integration
+def test_a_failed_run_writes_an_attempt_row_and_a_retry_writes_a_second(flaky_bench, session):
+    key = extraction_flow("specs/testbench.yaml")            # fails
+    extraction_flow("specs/testbench.yaml")                  # retries, succeeds
+    assert session.query(RunAttempt).filter_by(run_key=key).count() == 2   # M13
+    assert {a.state for a in attempts(key)} == {"failed", "completed"}
+```
+
+- [ ] **Step 2: Run them and watch them fail.** Every one, for a different reason — nothing is wired.
+
+- [ ] **Step 3: Implement navigation, the history builder, heal recording and `pipeline.py`, and rewrite `extraction_flow` to call it**
+
+**This step was one sentence in every earlier revision (found 2026-09-26)** — *"Implement
+`pipeline.py`"* — for the function that actually runs the product. It also depended on four things no
+task defined: an executor for a spec's `navigate` steps, `record_heals`, `history_for`, and a way to
+tie a heal to its `resolutions` row. All four are written here. The flow owns Prefect concerns
+(retries, timeout, logging); `pipeline.run_once()` owns the order and is a plain async function,
+testable without a scheduler. `heartbeat()` stays the flow's first statement (Task 6).
+
+**Two orderings differ from the diagram above, deliberately.** Quality is evaluated **after** the lake
+write, because Task 29's `evaluate(run_key)` reads landed rows; the lake is ours, not the client's
+system, so an alert still fires before bad data reaches the client (brief §4). And evidence is
+captured after navigation and before resolution — the page the resolver saw.
+
+**Three small amendments this step relies on:**
+- `CascadeTrace` gains `resolution_id: int | None` — set by `resolve_cascade` when `record=True` (the id
+  of the `resolutions` row it wrote), `None` on replay. `heal_events.resolution_id` is its FK.
+- Task 5's `NavStep` is exactly `NavStep(step: Literal["goto", "fill", "click"], path: str | None = None,
+  field: str | None = None, value_from: Literal["credentials.username", "credentials.password"] | None = None,
+  role: str | None = None, name: str | None = None)`, validated per step kind.
+- Task 28's lake file name uses `fs_key(run_key)` = `run_key.replace(":", "_")`: `:` is illegal in
+  Windows file names, and a `run_key` carries two.
+
+```python
+# selector_drift/browser/navigate.py
+"""Executes a spec's navigate steps. The only code that drives a page from config."""
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+
+from selector_drift.browser import ratelimit
+from selector_drift.browser.driver import PageHandle
+from selector_drift.credentials.provider import Credentials
+from selector_drift.scope.record import AuthorisedTarget
+from selector_drift.spec.schema import NavStep
+
+_FIELD = re.compile(r"^[A-Za-z0-9_-]{1,64}$")       # a form field name, never a selector
+
+
+class NavError(Exception):
+    """A navigate step that cannot run as written. The run fails; it never guesses."""
+
+
+def _value(ref: str | None, creds: Credentials | None) -> str:
+    if creds is None:
+        raise NavError("this step needs credentials and the target has none configured")
+    if ref == "credentials.username" and creds.username is not None:
+        return creds.username
+    if ref == "credentials.password" and creds.password is not None:
+        return creds.password.get_secret_value()        # never logged, never stored
+    raise NavError(f"unknown or unavailable value_from {ref!r}")
+
+
+async def run_steps(page: PageHandle, steps: Sequence[NavStep], creds: Credentials | None, *,
+                    target: AuthorisedTarget) -> None:
+    for i, step in enumerate(steps):
+        match step.step:
+            case "goto":
+                ratelimit.acquire(target)                 # every navigation, not once per run
+                await page.goto_step({"step": "goto", "path": step.path})
+            case "fill":
+                if step.field is None or not _FIELD.fullmatch(step.field):
+                    raise NavError(f"step {i}: fill needs a plain field name")
+                await page.raw.fill(f"[name='{step.field}']", _value(step.value_from, creds))
+            case "click":
+                ratelimit.acquire(target)                 # a click may navigate
+                await page.raw.get_by_role(step.role or "button", name=step.name).click()
+            case other:
+                raise NavError(f"step {i}: unknown step kind {other!r}")
+```
+
+```python
+# selector_drift/orchestrate/history.py
+"""Builds validate.History from what was WRITTEN. validate/ never reads storage itself."""
+from __future__ import annotations
+
+import datetime as dt
+
+import pyarrow.parquet as pq
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from selector_drift.config import get_settings
+from selector_drift.db.models import AuditLog, FindingRow, Quarantine, Run
+from selector_drift.land.writer import fs_key
+from selector_drift.spec.schema import TaskSpec
+from selector_drift.validate.history import AcceptedRun, History
+
+
+def _rows(target: str, window: dt.date, run_key: str) -> tuple[dict[str, str], ...]:
+    part = get_settings().lake_root / f"target={target}" / f"window={window.isoformat()}"
+    files = sorted(part.glob(f"{fs_key(run_key)}-*.parquet"))
+    if not files:
+        return ()
+    latest = files[-1]                                   # {key}-{attempt}-{ulid}: ulid sorts by time
+    return tuple({k: str(v) for k, v in r.items() if k not in ("run_key", "ingested_at")}
+                 for r in pq.read_table(latest).to_pylist())
+
+
+def history_for(db: Session, target: str, spec: TaskSpec, *, limit: int = 90) -> History | None:
+    promoted = select(Quarantine.run_key).where(Quarantine.resolved_as == "promoted")
+    runs = db.scalars(
+        select(Run).where(Run.target == target, Run.spec_version == spec.version,
+                          (Run.state.in_(("completed", "healed"))) | Run.run_key.in_(promoted))
+        .order_by(Run.window.desc()).limit(limit)).all()
+    if not runs:
+        return None
+    out = []
+    for run in reversed(runs):                          # oldest first
+        alerts = frozenset(db.scalars(select(FindingRow.payload["properties"]["field"].astext)
+                                      .where(FindingRow.run_key == run.run_key,
+                                             FindingRow.rule == "distribution_shift")).all())
+        expected = frozenset(db.scalars(select(AuditLog.detail["field"].astext)
+                                        .where(AuditLog.action == "marked_expected",
+                                               AuditLog.subject == run.run_key)).all())
+        out.append(AcceptedRun(run_key=run.run_key, window=run.window,
+                               rows=_rows(target, run.window, run.run_key),
+                               natural_key=tuple(spec.natural_key),
+                               shift_alerts=alerts, marked_expected=expected))
+    return History(runs=tuple(out))
+```
+
+```python
+# selector_drift/orchestrate/pipeline.py
+"""The product, in order. Every write here is reachable only through the gate's output."""
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Mapping, Sequence
+
+from selector_drift.browser.driver import open as open_browser
+from selector_drift.browser.live_capture import LiveCapture
+from selector_drift.browser.navigate import run_steps
+from selector_drift.config import get_settings
+from selector_drift.credentials.provider import CredentialProvider
+from selector_drift.db.models import HealEvent, Quarantine, Run
+from selector_drift.db.session import Session
+from selector_drift.extract.reader import RowMisaligned, read
+from selector_drift.heallog.capture import capture, record_boxes
+from selector_drift.heallog.evidence import PiiMasker
+from selector_drift.land import writer as land_writer
+from selector_drift.orchestrate.cache_writer import CacheWriter
+from selector_drift.orchestrate.history import history_for
+from selector_drift.orchestrate.run_record import record_attempt, run_key
+from selector_drift.quality.contracts import evaluate
+from selector_drift.resolve.cache import CachedSelector, SelectorCache
+from selector_drift.resolve.cascade import resolve_cascade
+from selector_drift.browser.page_source import LivePageSource
+from selector_drift.resolve.trace import CascadeTrace, ResolvedElement, Rung
+from selector_drift.scope.errors import ScopeRefusal
+from selector_drift.scope.gate import authorise, load_scope
+from selector_drift.spec.loader import load_spec
+from selector_drift.validate.checks import checks_for
+from selector_drift.validate.gate import HealContext, ValidatedExtraction, gate_run
+from selector_drift.validate.verdict import Confirmation, Outcome, Verdict
+
+
+def record_run(key: str, *, target: str, spec_version: int, window: dt.date, state: str,
+               rows_written: int | None = None, error: str | None = None) -> None:
+    now = dt.datetime.now(dt.UTC)
+    with Session() as s:
+        run = s.get(Run, key) or Run(run_key=key, target=target, spec_version=spec_version,
+                                     window=window, first_started_at=now)
+        run.state, run.last_finished_at = state, now
+        run.rows_written, run.error = rows_written, error
+        s.merge(run)
+        s.commit()
+
+
+def _confirmer(verdicts: Sequence[Verdict], field: str) -> Confirmation | None:
+    found = [v.confirmed_by for v in verdicts
+             if v.field == field and v.outcome is Outcome.PASS and v.confirmed_by is not None]
+    dom = [c for c in found if c.rung is not None]
+    return (dom or found or [None])[0]
+
+
+def record_heals(key: str, traces: Mapping[str, CascadeTrace],
+                 elements: Mapping[str, ResolvedElement], verdicts: Sequence[Verdict], *,
+                 target: str, cache_before: Mapping[str, CachedSelector | None]) -> list[HealEvent]:
+    now = dt.datetime.now(dt.UTC)
+    heals: list[HealEvent] = []
+    with Session() as s:
+        for name, trace in traces.items():
+            if not trace.healed or trace.winner is None:
+                continue
+            conf, before, el = _confirmer(verdicts, name), cache_before.get(name), elements[name]
+            heals.append(HealEvent(
+                run_key=key, resolution_id=trace.resolution_id, target=target, field=name,
+                broke_at=now, winning_rung=trace.winner,
+                confirmer_rung=conf.rung if conf else None,
+                confirmer_family=conf.family.value if conf else None,
+                selector_before=before.selector if before else None, selector_after=el.selector,
+                anchor_before=before.anchor.model_dump(mode="json") if before else None,
+                anchor_after=el.anchor.model_dump(mode="json"),
+                trace=[a.as_json() for a in trace.attempts],
+                verdicts=[v.model_dump(mode="json") for v in verdicts if v.field == name],
+                evidence_uri=None, replayed_ok=None, promoted_by=None, promoted_at=None))
+        s.add_all(heals)
+        s.commit()
+        for h in heals:
+            s.refresh(h)
+    return heals
+
+
+def _alignment_verdict(exc: RowMisaligned) -> Verdict:
+    return Verdict(check="RowAlignment", outcome=Outcome.FAIL,
+                   threshold="every field resolves into the natural key's row list",
+                   observed=str(exc),
+                   reason="fields from different row lists would be zipped into wrong rows")
+
+
+def _hold_minimal(key: str, reason: str, verdicts: Sequence[Verdict]) -> None:
+    """Part 1's quarantine: the row and its verdicts. Part 2 replaces it with accept.hold(),
+    which also keeps the candidate's data."""
+    with Session() as s:
+        s.merge(Quarantine(run_key=key, reason=reason,
+                           verdicts=[v.model_dump(mode="json") for v in verdicts],
+                           data_uri="", resolved_as=None, actor=None, resolved_at=None))
+        s.commit()
+
+
+async def run_once(spec_path: str, *, window: dt.date, attempt: int,
+                   credentials: CredentialProvider, confirmers: Sequence[Rung]) -> str:
+    settings = get_settings()
+    spec = load_spec(settings.spec_dir / spec_path)
+    record = load_scope(settings.scope_dir / spec.scope_ref.split("/")[-1])
+    key = run_key(record.target, spec.version, window.isoformat())
+    try:
+        target = authorise(record, today=window)
+    except ScopeRefusal as exc:                                  # no attempt row (Task 6)
+        record_run(key, target=record.target, spec_version=spec.version, window=window,
+                   state="refused", error=exc.reason)
+        return key
+    record_attempt(key, attempt, "started", None, target.record_sha256)
+
+    reader = SelectorCache()
+    cache_before = {t.name: reader.get(target.target, t.name, spec.version) for t in spec.targets}
+    creds = credentials.get(target)
+    elements: dict[str, ResolvedElement] = {}
+    traces: dict[str, CascadeTrace] = {}
+    contexts: dict[str, HealContext] = {}
+    async with open_browser(target, creds) as session:
+        await run_steps(session.page, spec.navigate, creds, target=target)
+        page = await LivePageSource.snapshot(session.page)
+        live = LiveCapture(session.page.raw, page.dom())
+        evidence = await capture(live, run_key=key, sensitivity=target.sensitivity,
+                                 masker=PiiMasker(settings.redaction_key, target.sensitivity))
+        for t in spec.targets:
+            el, trace = resolve_cascade(page, t, reader)             # one resolutions row (C4)
+            elements[t.name], traces[t.name] = el, trace
+            contexts[t.name] = HealContext(healed=trace.healed, winning_rung=trace.winner or 5,
+                                           page=page, target=t, cache=reader)
+        evidence = await record_boxes(evidence, live,
+                                      {n: e.node_id for n, e in elements.items()})
+
+    try:
+        candidate = read(evidence.dom.value, elements, spec, run_key=key,
+                         snapshot_id=evidence.sha256, traces=traces,
+                         observed_at=evidence.captured_at)
+    except RowMisaligned as exc:
+        _hold_minimal(key, "fields do not share a row", [_alignment_verdict(exc)])
+        record_attempt(key, attempt, "quarantined", str(exc), target.record_sha256)
+        record_run(key, target=target.target, spec_version=spec.version, window=window,
+                   state="quarantined")
+        return key
+
+    with Session() as db:
+        history = history_for(db, target.target, spec)
+    checks = {t.name: checks_for(spec, t, confirmers, warmup_runs=target.warmup_runs)
+              for t in spec.targets}
+    result = gate_run(candidate, history, contexts, checks)
+    heals = record_heals(key, traces, elements, result.verdicts, target=target.target,
+                         cache_before=cache_before)
+
+    # ---- Part 1's decision. Part 2 (Step 8) replaces this block with settle(). ----
+    if isinstance(result, ValidatedExtraction):
+        land_writer.write(result)
+        writer = CacheWriter(target=target.target, spec_version=spec.version)
+        for name, el in elements.items():
+            writer.put(result, el, field=name)                     # ONLY here (C2)
+        evaluate(key)                                              # Task 29: persists findings
+        state = "healed" if heals else "completed"
+        rows = len(result.rows)
+    else:
+        _hold_minimal(key, result.reason, result.verdicts)
+        state, rows = "quarantined", 0
+    # ---- end of Part 1's decision ----
+
+    record_attempt(key, attempt, state, None, target.record_sha256)
+    record_run(key, target=target.target, spec_version=spec.version, window=window,
+               state=state, rows_written=rows)
+    return key
+```
+
+```python
+# selector_drift/orchestrate/flows.py  (rewritten; heartbeat() stays first)
+import asyncio
+import datetime as dt
+
+from prefect import flow, get_run_logger
+from prefect.runtime import flow_run
+
+from selector_drift.credentials.registry import provider_for     # Tasks 31-32: per-target posture
+from selector_drift.orchestrate.pipeline import run_once
+from selector_drift.orchestrate.run_record import heartbeat
+from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
+from selector_drift.resolve.rungs.r3_anchors import AnchorRung
+from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
+
+CONFIRMERS = (AxTreeRung(), AnchorRung(), HeuristicRung())   # injected: validate/ sees only Rung
+
+
+@flow(name="extraction", retries=2, retry_delay_seconds=300, timeout_seconds=900)
+def extraction_flow(spec_path: str, target: str) -> str:
+    scheduled = flow_run.scheduled_start_time or dt.datetime.now(dt.UTC)
+    heartbeat(target, scheduled, None)
+    attempt = flow_run.run_count or 1
+    window = scheduled.astimezone(dt.UTC).date()                  # UTC, always (M20)
+    key = asyncio.run(run_once(spec_path, window=window, attempt=attempt,
+                               credentials=provider_for(target), confirmers=CONFIRMERS))
+    get_run_logger().info("run finished", extra={"run_key": key})
+    return key
+```
+
+`orchestrate/` constructs the concrete rungs and hands them to the gate — the only package that may
+(the `judge-reaches-rungs-only-by-protocol` contract). `selector_drift.credentials.registry.provider_for(target)`
+returns the `CredentialProvider` a target's posture names; Task 31 creates the module with
+`SessionInjection` as the default and Task 32 registers the other two.
+
+In Part 2 (Step 8), the block between the two `# ----` markers is replaced by:
+
+```python
+    state = settle(target=target, spec=spec, candidate=candidate, result=result,
+                   evidence=evidence, elements=elements, heals=heals,
+                   cache=CacheWriter(target=target.target, spec_version=spec.version),
+                   cache_before=cache_before, redaction_key=settings.redaction_key)
+    rows = len(result.rows) if isinstance(result, ValidatedExtraction) else 0
+    if state != "quarantined":
+        evaluate(key)
+```
+
+and `_hold_minimal` is deleted.
+
+- [ ] **Step 4: Run the full check.** Expected: PASS, 6 tests, and the run states in `psql` now
+  include `healed` and `quarantined` for the first time.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add selector_drift/heallog/evidence.py selector_drift/heallog/diff.py tests/heallog
-git commit -m "feat(heallog): capture-redact-verify-store with word-level DOM diff"
+git add selector_drift/orchestrate tests/orchestrate
+git commit -m "feat(orchestrate): assemble the pipeline -- resolve, gate, land, log"
+```
+
+#### Part 2 — evidence ordering, after Task 33 (API spec §7.2, §7.5)
+
+- [ ] **Step 6: Write the failing tests**
+
+```python
+# tests/orchestrate/test_evidence_ordering.py
+from __future__ import annotations
+
+import ast
+import dataclasses
+import datetime as dt
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from sqlalchemy import text
+
+from bok_core.boundary.egress import Plane
+from bok_core.boundary.sensitivity import Sensitivity
+from bok_core.provenance import Claim, DomSource, Method
+from selector_drift.config import get_settings
+from selector_drift.db.models import HealEvent, Heartbeat, Quarantine, Run
+from selector_drift.db.session import Session, engine
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.heallog.bundle import (AFTER_HTML, BEFORE_HTML, MANIFEST, PAGE_HTML,
+                                           read_heal_manifest)
+from selector_drift.heallog.capture import Evidence
+from selector_drift.heallog.evidence import (PiiMasker, heal_bundle_dir, last_accepted_dir,
+                                             redact_evidence, write_last_accepted)
+from selector_drift.heallog.replay import HealTimeCache
+from selector_drift.orchestrate import accept as accept_mod
+from selector_drift.orchestrate.accept import settle
+from selector_drift.orchestrate.flows import extraction_flow
+from selector_drift.orchestrate.quarantine_actions import accept_promoted
+from selector_drift.resolve.cascade import resolve_cascade
+from selector_drift.resolve.page import StaticPageSource
+from selector_drift.scope.gate import authorise
+from selector_drift.scope.record import Basis, ScopeRecord
+from selector_drift.spec.loader import load_spec
+from selector_drift.validate.gate import HealContext, gate
+from selector_drift.validate.verdict import Outcome, Verdict
+
+KEY = b"test-only-redaction-key-not-a-secret!"       # tests only; production reads SD_REDACTION_KEY
+SPEC = load_spec(Path("specs/testbench.yaml"))
+CLAIM_NUMBER = SPEC.targets[0]
+RUN_KEY = "testbench:1:2026-09-07"
+OLD_PAGE = """<!doctype html><html><body><table><thead><tr><th data-sd-node="n0">Claim Number</th></tr></thead>
+<tbody><tr><td data-sd-node="n1" data-testid="claim-number">AB12345678</td></tr></tbody></table>
+</body></html>"""
+NEW_PAGE = OLD_PAGE.replace("Claim Number", "Claim Reference")           # label reword
+# An identifier in an element with no node id: the screenshot cannot have masked it.
+LEAKY_PAGE = NEW_PAGE.replace("</table>", "</table><p>test.person@example.invalid</p>")
+
+
+class Passes:
+    name = "Passes"
+
+    def check(self, candidate, history, ctx) -> Verdict:
+        return Verdict(check="Passes", outcome=Outcome.PASS, threshold=None,
+                       observed=None, reason="test check")
+
+
+class Fails:
+    name = "Fails"
+
+    def check(self, candidate, history, ctx) -> Verdict:
+        return Verdict(check="Fails", outcome=Outcome.FAIL, threshold="PASS",
+                       observed="FAIL", reason="test check")
+
+
+class FakeCache:
+    def __init__(self) -> None:
+        self.puts: list[object] = []
+
+    def get(self, target, field, spec_version=None):
+        return None
+
+    def put(self, validated, element, *, field) -> None:
+        self.puts.append(element)
+
+
+@pytest.fixture(autouse=True)
+def evidence_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(tmp_path / "evidence"))
+    monkeypatch.setenv("SD_LAKE_ROOT", str(tmp_path / "lake"))
+    monkeypatch.setenv("SD_REDACTION_KEY", KEY.hex())
+    get_settings.cache_clear()
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE runs, heal_events, quarantine, heartbeats "
+                       "RESTART IDENTITY CASCADE"))
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def lands(monkeypatch):
+    written: list[object] = []
+    monkeypatch.setattr(accept_mod.land_writer, "write",
+                        lambda v: (written.append(v), Path("/lake/x.parquet"))[1])
+    return written
+
+
+def _target():
+    rec = ScopeRecord(target="testbench", basis=Basis.SELF_OWNED, authorising_party="me",
+                      authorised_on=dt.date(2026, 9, 1), expires_on=dt.date(2027, 9, 1),
+                      evidence_uri=None, evidence_sha256=None,
+                      origins=["https://bench.example.invalid"],
+                      rate_limit={"requests": 1, "per_seconds": 30},
+                      user_agent_contact="https://example.invalid/contact",
+                      first_heal_policy="auto_promote", legal_review="self_drafted",
+                      warmup_runs=5)
+    return authorise(rec, today=dt.date(2026, 9, 7))
+
+
+def _run(html: str, checks, *, masked: bool = True):
+    """Resolve, extract one claim, gate, and record one heal -- the pipeline's shape."""
+    ev = Evidence.from_static(html, run_key=RUN_KEY, sensitivity=Sensitivity.SYNTHETIC,
+                              masker=PiiMasker(KEY, Sensitivity.SYNTHETIC) if masked else None)
+    el, trace = resolve_cascade(StaticPageSource(html), CLAIM_NUMBER, HealTimeCache(None),
+                                record=False)
+    claim = Claim(value="AB12345678", method=Method.DETERMINISTIC,
+                  source=DomSource(snapshot_id=ev.sha256, selector=el.selector, rung=el.rung_id),
+                  observed_at=datetime.now(UTC))
+    candidate = CandidateExtraction(rows=[{"claim_number": claim}], trace=trace,
+                                    spec_version=1, run_key=RUN_KEY)
+    ctx = HealContext(healed=True, winning_rung=el.rung_id, page=None, target=CLAIM_NUMBER,
+                      cache=FakeCache())
+    result = gate(candidate, None, ctx, checks)
+    with Session() as s:
+        s.add(Run(run_key=RUN_KEY, target="testbench", spec_version=1,
+                  window=dt.date(2026, 9, 7), first_started_at=datetime.now(UTC),
+                  state="completed"))
+        heal = HealEvent(run_key=RUN_KEY, target="testbench", field="claim_number",
+                         broke_at=datetime.now(UTC), winning_rung=el.rung_id,
+                         selector_after=el.selector,
+                         anchor_after=dataclasses.asdict(el.anchor), trace=[],
+                         verdicts=[])
+        s.add(heal)
+        s.commit()
+        s.refresh(heal)
+    return ev, el, candidate, result, heal
+
+
+def _settle(ev, el, candidate, result, heal, cache):
+    return settle(target=_target(), spec=SPEC, candidate=candidate, result=result, evidence=ev,
+                  elements={"claim_number": el}, heals=[heal], cache=cache,
+                  cache_before={"claim_number": None}, redaction_key=KEY)
+
+
+def _seed_last_accepted(html: str) -> bytes:
+    old = Evidence.from_static(html, run_key="testbench:1:2026-09-06",
+                               sensitivity=Sensitivity.SYNTHETIC,
+                               masker=PiiMasker(KEY, Sensitivity.SYNTHETIC))
+    write_last_accepted(redact_evidence(old, key=KEY), "testbench", Plane.CLIENT)
+    return (last_accepted_dir("testbench") / PAGE_HTML).read_bytes()
+
+
+@pytest.mark.integration
+def test_a_quarantined_run_does_not_replace_last_accepted(lands):
+    old = _seed_last_accepted(OLD_PAGE)
+    old_manifest = (last_accepted_dir("testbench") / MANIFEST).read_bytes()
+    ev, el, candidate, result, heal = _run(NEW_PAGE, [Fails()])
+    assert _settle(ev, el, candidate, result, heal, FakeCache()) == "quarantined"
+    assert (last_accepted_dir("testbench") / PAGE_HTML).read_bytes() == old
+    assert (last_accepted_dir("testbench") / MANIFEST).read_bytes() == old_manifest
+    assert lands == []
+
+
+@pytest.mark.integration
+def test_heal_bundle_before_is_the_last_accepted_page(lands):
+    old = _seed_last_accepted(OLD_PAGE)
+    ev, el, candidate, result, heal = _run(NEW_PAGE, [Passes()])
+    assert _settle(ev, el, candidate, result, heal, FakeCache()) == "healed"
+    bundle = heal_bundle_dir(heal.id)
+    assert (bundle / BEFORE_HTML).read_bytes() == old             # copied at heal time
+    assert (last_accepted_dir("testbench") / PAGE_HTML).read_bytes() == \
+        (bundle / AFTER_HTML).read_bytes()                        # then moved, on acceptance
+    assert read_heal_manifest(bundle).before.run_key == "testbench:1:2026-09-06"
+
+
+@pytest.mark.integration
+def test_first_heal_of_a_target_reports_before_not_captured(lands):
+    ev, el, candidate, result, heal = _run(NEW_PAGE, [Passes()])
+    _settle(ev, el, candidate, result, heal, FakeCache())
+    manifest = read_heal_manifest(heal_bundle_dir(heal.id))
+    assert manifest.before is None and manifest.before_unavailable_reason is None
+    assert BEFORE_HTML not in manifest.files
+    assert '"before"' not in (heal_bundle_dir(heal.id) / MANIFEST).read_text()
+
+
+@pytest.mark.integration
+def test_a_redaction_failure_leaves_last_accepted_untouched(lands):
+    old = _seed_last_accepted(OLD_PAGE)
+    cache = FakeCache()
+    ev, el, candidate, result, heal = _run(LEAKY_PAGE, [Passes()], masked=False)
+    assert _settle(ev, el, candidate, result, heal, cache) == "quarantined"
+    assert (last_accepted_dir("testbench") / PAGE_HTML).read_bytes() == old
+    assert not heal_bundle_dir(heal.id).exists()
+    assert lands == [] and cache.puts == []
+    with Session() as s:
+        q = s.get(Quarantine, RUN_KEY)
+        assert q.reason == "evidence redaction failed"
+        assert q.verdicts[0]["check"] == "EvidenceRedaction"
+
+
+@pytest.mark.integration
+def test_last_accepted_moves_only_after_land_write_returns(monkeypatch):
+    old = _seed_last_accepted(OLD_PAGE)
+    cache = FakeCache()
+
+    def refuse(v):
+        raise OSError("lake unavailable")
+    monkeypatch.setattr(accept_mod.land_writer, "write", refuse)
+    ev, el, candidate, result, heal = _run(NEW_PAGE, [Passes()])
+    with pytest.raises(OSError):
+        _settle(ev, el, candidate, result, heal, cache)
+    assert cache.puts == []                                         # C2
+    assert (last_accepted_dir("testbench") / PAGE_HTML).read_bytes() == old
+
+
+@pytest.mark.integration
+def test_a_heal_is_replayed_from_its_bundle_and_the_outcome_recorded(lands):
+    ev, el, candidate, result, heal = _run(NEW_PAGE, [Passes()])
+    _settle(ev, el, candidate, result, heal, FakeCache())
+    with Session() as s:
+        row = s.get(HealEvent, heal.id)
+        assert row.evidence_uri == str(heal_bundle_dir(heal.id))
+        assert row.replayed_ok is True
+
+
+@pytest.mark.integration
+def test_promotion_moves_last_accepted_to_the_promoted_page(lands, monkeypatch):
+    _seed_last_accepted(OLD_PAGE)
+    ev, el, candidate, quarantined, heal = _run(NEW_PAGE, [Fails()])
+    _settle(ev, el, candidate, quarantined, heal, FakeCache())
+    _, _, _, validated, _ = _run_again_passing(NEW_PAGE)
+    monkeypatch.setattr("selector_drift.orchestrate.quarantine_actions.element_from_heal",
+                        lambda s, h: el)
+    accept_promoted(RUN_KEY, validated, cache=FakeCache())
+    assert (last_accepted_dir("testbench") / PAGE_HTML).read_bytes() == \
+        (heal_bundle_dir(heal.id) / AFTER_HTML).read_bytes()
+    assert lands == [validated]
+
+
+def _run_again_passing(html: str):
+    """The gate re-run that Task 25's promote() performs, with human_confirmed=True.
+    Builds no Run or HealEvent row: the quarantined run's rows are the ones promoted."""
+    ev = Evidence.from_static(html, run_key=RUN_KEY, sensitivity=Sensitivity.SYNTHETIC)
+    el, trace = resolve_cascade(StaticPageSource(html), CLAIM_NUMBER, HealTimeCache(None),
+                                record=False)
+    claim = Claim(value="AB12345678", method=Method.DETERMINISTIC,
+                  source=DomSource(snapshot_id=ev.sha256, selector=el.selector, rung=el.rung_id),
+                  observed_at=datetime.now(UTC))
+    candidate = CandidateExtraction(rows=[{"claim_number": claim}], trace=trace,
+                                    spec_version=1, run_key=RUN_KEY)
+    ctx = HealContext(healed=True, winning_rung=el.rung_id, page=None, target=CLAIM_NUMBER,
+                      cache=FakeCache(), human_confirmed=True)
+    return ev, el, candidate, gate(candidate, None, ctx, [Passes()]), None
+
+
+@pytest.mark.unit
+def test_the_three_acceptance_writes_have_one_call_site():
+    """C2 + API spec 7.2. land.write, cache.put and the last-accepted replacement
+    appear together, in one function, and nowhere else in the product."""
+    calls: dict[str, list[str]] = {"land_writer.write": [], ".put": [],
+                                   "commit_last_accepted": []}
+    for path in Path("selector_drift").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            src = ast.unparse(node.func)
+            if src == "land_writer.write":
+                calls["land_writer.write"].append(str(path))
+            elif src.endswith("cache.put"):
+                calls[".put"].append(str(path))
+            elif src == "commit_last_accepted":
+                calls["commit_last_accepted"].append(str(path))
+    accept_py = str(Path("selector_drift/orchestrate/accept.py"))
+    assert all(v == [accept_py] for v in calls.values()), calls
+
+
+@pytest.mark.integration
+def test_every_fire_writes_exactly_one_heartbeat_including_refusals(expired_spec):
+    key = extraction_flow(expired_spec)
+    with Session() as s:
+        assert s.query(Heartbeat).filter_by(run_key=key).count() == 1
+```
+
+- [ ] **Step 7: Run them and watch them fail**
+
+Run: `uv run pytest tests/orchestrate/test_evidence_ordering.py -v`
+Expected: FAIL — `ModuleNotFoundError: selector_drift.orchestrate.accept`.
+
+- [ ] **Step 8: Implement `accept.py`**
+
+```python
+# selector_drift/orchestrate/accept.py
+"""What happens after the gate. The ordering in this file is the C2 argument applied to
+data, to the selector cache, and to evidence (API spec 7.2)."""
+from __future__ import annotations
+
+import os
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Literal
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pydantic import TypeAdapter
+
+from bok_core.boundary.egress import Plane
+from selector_drift.config import get_settings
+from selector_drift.db.models import HealEvent, Quarantine
+from selector_drift.db.session import Session
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.heallog.capture import Evidence
+from selector_drift.heallog.evidence import (RedactedEvidence, RedactionFailed,
+                                             redact_evidence, write_heal_bundle,
+                                             write_last_accepted)
+from selector_drift.heallog.replay import (ExpectedHeal, HealTimeCache, NotReproducible,
+                                           replay_bundle)
+from selector_drift.land import writer as land_writer
+from selector_drift.orchestrate.cache_writer import CacheWriter
+from selector_drift.resolve.cache import CachedSelector
+from selector_drift.resolve.trace import ResolvedElement
+from selector_drift.scope.record import AuthorisedTarget
+from selector_drift.spec.schema import FieldTarget, TaskSpec
+from selector_drift.validate.gate import ValidatedExtraction
+from selector_drift.validate.quarantine import QuarantinedRun
+from selector_drift.validate.verdict import Outcome, Verdict
+
+RunState = Literal["completed", "healed", "quarantined"]
+_VERDICTS = TypeAdapter(list[Verdict])
+
+
+def accept(validated: ValidatedExtraction, elements: Mapping[str, ResolvedElement], *,
+           cache: CacheWriter, commit_last_accepted: Callable[[], object]) -> Path:
+    """The ONLY call site of the three acceptance writes, in this order. Each runs only
+    after the previous one returned; an exception stops the rest (C2, API spec 7.2)."""
+    path = land_writer.write(validated)
+    for field_name, element in elements.items():
+        cache.put(validated, element, field=field_name)
+    commit_last_accepted()
+    return path
+
+
+def hold(run_key: str, reason: str, verdicts: Sequence[Verdict],
+         candidate: CandidateExtraction) -> str:
+    """Quarantine: keep the data, the verdicts and the reason. Never the lake."""
+    root = get_settings().lake_root / "quarantine"
+    root.mkdir(parents=True, exist_ok=True)
+    final = root / f"{run_key.replace(':', '_')}.parquet"
+    tmp = final.with_suffix(".parquet.tmp")
+    rows = [{name: str(claim.value) for name, claim in row.items()} for row in candidate.rows]
+    pq.write_table(pa.Table.from_pylist(rows), tmp)
+    os.replace(tmp, final)
+    with Session() as s:
+        s.merge(Quarantine(run_key=run_key, reason=reason,
+                           verdicts=_VERDICTS.dump_python(list(verdicts), mode="json"),
+                           data_uri=str(final), resolved_as=None, actor=None,
+                           resolved_at=None))
+        s.commit()
+    return str(final)
+
+
+def redaction_verdict(exc: RedactionFailed) -> Verdict:
+    return Verdict(check="EvidenceRedaction", outcome=Outcome.FAIL,
+                   threshold="verification re-runs every detector and finds nothing",
+                   observed="a detector still fired", reason=str(exc))
+
+
+def bundle_and_replay(heal: HealEvent, target: str, after: RedactedEvidence,
+                      field_target: FieldTarget, cached_before: CachedSelector | None,
+                      node_id: str) -> None:
+    """Write the heal bundle (its 'before' is last-accepted AS IT IS NOW), then prove the
+    heal reproduces from what was stored. EvidenceCorrupted propagates: a bundle that fails
+    its own hash seconds after being written is a disk fault, and the run fails loudly."""
+    uri = write_heal_bundle(heal.id, target, after, Plane.CLIENT)
+    try:
+        replay_bundle(Path(uri), field_target, HealTimeCache(cached_before),
+                      ExpectedHeal(heal.winning_rung, node_id))
+        reproduced = True
+    except NotReproducible:
+        reproduced = False
+    with Session() as s:
+        row = s.get(HealEvent, heal.id)
+        assert row is not None
+        row.evidence_uri = uri
+        row.replayed_ok = reproduced
+        s.commit()
+
+
+def settle(*, target: AuthorisedTarget, spec: TaskSpec, candidate: CandidateExtraction,
+           result: ValidatedExtraction | QuarantinedRun, evidence: Evidence,
+           elements: Mapping[str, ResolvedElement], heals: Sequence[HealEvent],
+           cache: CacheWriter, cache_before: Mapping[str, CachedSelector | None],
+           redaction_key: bytes) -> RunState:
+    try:
+        redacted = redact_evidence(evidence, key=redaction_key)       # before ANY write
+    except RedactionFailed as exc:
+        hold(candidate.run_key, "evidence redaction failed", [redaction_verdict(exc)], candidate)
+        return "quarantined"
+
+    fields = {t.name: t for t in spec.targets}
+    for heal in heals:                                  # before last-accepted can move
+        bundle_and_replay(heal, target.target, redacted, fields[heal.field],
+                          cache_before.get(heal.field), elements[heal.field].node_id)
+
+    if isinstance(result, ValidatedExtraction):
+        accept(result, elements, cache=cache,
+               commit_last_accepted=lambda: write_last_accepted(redacted, target.target,
+                                                                Plane.CLIENT))
+        return "healed" if heals else "completed"
+
+    hold(result.run_key, result.reason, result.verdicts, candidate)
+    return "quarantined"
+```
+
+In `pipeline.py`, everything from the gate onward becomes one call. The excerpt below is the whole
+change; `live` is the `LiveCapture(session.page.raw, page_source.dom())` built right after the page
+is snapshotted, and `evidence` is the `capture(live, run_key=key, sensitivity=target.sensitivity,
+masker=PiiMasker(settings.redaction_key, target.sensitivity))` taken before resolution:
+
+```python
+    evidence = await record_boxes(evidence, live,
+                                  {name: el.node_id for name, el in elements.items()})
+    # ... extract.read, quality.evaluate, gate -- unchanged from Part 1 ...
+    heals = record_heals(key, traces, elements, result.verdicts, target=target.target,
+                         cache_before=cache_before)
+    state = settle(target=target, spec=spec, candidate=candidate, result=result,
+                   evidence=evidence, elements=elements, heals=heals,
+                   cache=CacheWriter(target=target.target, spec_version=spec.version),
+                   cache_before=cache_before, redaction_key=settings.redaction_key)
+    if state == "quarantined":
+        notify(findings, run_for(key))                                  # Task 29A
+    return state
+```
+
+`cache_before` is `{name: cache.get(target.target, name, spec.version) for name in fields}`, read
+**before** resolution, so a heal's replay runs against the cache entry rung 1 actually declined.
+`verdicts_of(result)` is `result.verdicts` on a `QuarantinedRun` and the gate's recorded verdict
+list on a `ValidatedExtraction` (Task 20).
+
+- [ ] **Step 9: Implement `quarantine_actions.py`**
+
+```python
+# selector_drift/orchestrate/quarantine_actions.py
+"""The two decisions a human can take on a quarantined run, built where the product may
+write, and handed to the API -- which may not (Task 34, api-is-read-side)."""
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session as OrmSession
+
+from bok_core.boundary.egress import Plane
+from selector_drift.db.models import HealEvent, Resolution
+from selector_drift.db.session import Session
+from selector_drift.heallog.evidence import promote_heal_bundle_to_last_accepted
+from selector_drift.orchestrate.accept import accept
+from selector_drift.orchestrate.cache_writer import CacheWriter
+from selector_drift.resolve.trace import AnchorEvidence, ResolvedElement
+from selector_drift.validate import quarantine
+from selector_drift.validate.gate import ValidatedExtraction
+
+
+@dataclass(frozen=True)
+class QuarantineActions:
+    promote: Callable[[str, str, str], None]     # (run_key, actor, reason)
+    discard: Callable[[str, str, str], None]
+
+
+def element_from_heal(session: OrmSession, heal: HealEvent) -> ResolvedElement:
+    resolution = session.get(Resolution, heal.resolution_id)
+    if resolution is None or resolution.node_id is None:
+        raise LookupError(f"heal {heal.id} has no resolution to rebuild its element from")
+    return ResolvedElement(selector=heal.selector_after, node_id=resolution.node_id,
+                           anchor=AnchorEvidence(**heal.anchor_after),
+                           rung_id=heal.winning_rung)
+
+
+def accept_promoted(run_key: str, validated: ValidatedExtraction, *,
+                    cache: CacheWriter) -> Path:
+    with Session() as s:
+        heals = list(s.scalars(select(HealEvent).where(HealEvent.run_key == run_key)
+                               .order_by(HealEvent.id)))
+        elements = {h.field: element_from_heal(s, h) for h in heals}
+    target = run_key.split(":", 1)[0]            # target names cannot contain ':' (Task 34)
+    latest = next((h for h in reversed(heals) if h.evidence_uri is not None), None)
+
+    def commit() -> None:
+        # A promoted run's accepted page is its heal bundle's 'after' half. A quarantine
+        # with no stored evidence (redaction failure) leaves last-accepted where it was.
+        if latest is not None:
+            promote_heal_bundle_to_last_accepted(latest.id, target, Plane.CLIENT)
+
+    return accept(validated, elements, cache=cache, commit_last_accepted=commit)
+
+
+def build_quarantine_actions() -> QuarantineActions:
+    def _promote(run_key: str, actor: str, reason: str) -> None:
+        validated = quarantine.promote(run_key, actor=actor, reason=reason)  # re-runs the gate
+        accept_promoted(run_key, validated, cache=CacheWriter.for_run_key(run_key))
+
+    def _discard(run_key: str, actor: str, reason: str) -> None:
+        quarantine.discard(run_key, actor=actor, reason=reason)
+
+    return QuarantineActions(promote=_promote, discard=_discard)
+```
+
+- [ ] **Step 10: Run the full check**
+
+Run: `uv run pytest tests/orchestrate -v -m "unit or integration" && uv run lint-imports`
+Expected: PASS — 6 Part 1 tests, 9 Part 2 tests, the 6 Task 6 tests. `resolver-cannot-write` and
+`judged-cannot-call-judge` still kept (`orchestrate/` is the one package allowed to hold both halves).
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add selector_drift/orchestrate tests/orchestrate
+git commit -m "feat(orchestrate): evidence bundle and last-accepted move only on acceptance, redaction proven before any write"
+```
+
+**The bench fixtures Part 1's tests use — defined (found 2026-09-26: `bench`, `bench_mutated`,
+`bench_decoy` and `flaky_bench` were used and never created).** They run the real portal in-process on
+a free port with a **fixed clock**, never the signed override: the product never sends one (bench spec
+§3). A test scope record, identical to the real one except for its origin, names the local server, so
+the scope gate is exercised rather than bypassed.
+
+```python
+# tests/orchestrate/conftest.py
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Callable, Iterator
+from pathlib import Path
+
+import pytest
+import yaml
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse, Response
+
+from testbench.mutations.catalogue import CATALOGUE
+from testbench.portal.app import create_app
+from tests.testbench.conftest import _serve                 # Task 7's in-thread uvicorn helper
+from tests.testbench.helpers import first_day_scheduling    # Task 8
+
+START = dt.date(2026, 1, 1)
+
+
+def _clock(day: dt.date) -> Callable[[], dt.datetime]:
+    return lambda: dt.datetime.combine(day, dt.time(4, 12), tzinfo=dt.UTC)
+
+
+def _point_product_at(url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rec = yaml.safe_load(Path("scopes/testbench.yaml").read_text(encoding="utf-8"))
+    rec["origins"] = [url]
+    scopes = tmp_path / "scopes"
+    scopes.mkdir(exist_ok=True)
+    (scopes / "testbench.yaml").write_text(yaml.safe_dump(rec), encoding="utf-8")
+    monkeypatch.setenv("SD_SCOPE_DIR", str(scopes))
+    monkeypatch.setattr("selector_drift.browser.registry.url_for", lambda target: url)
+
+
+def _bench(day: dt.date, catalogue: tuple, tmp_path: Path,
+           monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    for url in _serve(create_app(clock=_clock(day), catalogue=catalogue)):
+        _point_product_at(url, tmp_path, monkeypatch)
+        yield url
+
+
+@pytest.fixture
+def bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    yield from _bench(START, (), tmp_path, monkeypatch)             # no mutations at all
+
+
+@pytest.fixture
+def bench_mutated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    only = tuple(e for e in CATALOGUE if e.name == "LabelReword")
+    yield from _bench(first_day_scheduling("LabelReword", START), only, tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def bench_decoy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    yield from _bench(first_day_scheduling("DecoyColumn", START), CATALOGUE, tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def flaky_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """503 for the first two requests, then normal service -- a retry must succeed and the
+    failed attempts must survive in run_attempts (M13)."""
+    app = create_app(clock=_clock(START), catalogue=())
+    calls = {"n": 0}
+
+    @app.middleware("http")
+    async def flake(request: Request, call_next: Callable[..., object]) -> Response:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return PlainTextResponse("unavailable", status_code=503)
+        return await call_next(request)  # type: ignore[misc,no-any-return]
+
+    for url in _serve(app):
+        _point_product_at(url, tmp_path, monkeypatch)
+        yield url
+```
+
+`SD_SCOPE_DIR` is honoured by the scope loader (Task 5 reads `scopes/` by default; the variable exists
+for tests and is documented in `.env.example` as test-only).
+
+---
+
+### Task 26B: The third suite — every benign heal is *accepted* — R14 (C3, M3)
+
+**Files:**
+- Create: `tests/suite/test_benign_heals_are_accepted.py`
+- Create: `tests/suite/test_degraded_mode.py`
+
+**Interfaces:**
+- Consumes: the pipeline (Task 26A), all seven checks, all fifteen mutation classes.
+- Produces: the false-positive half of the gate's measurement, and the degraded-mode floor.
+
+**Why this task exists.** Task 26 asserts two things: benign mutations **resolve**
+(`trace.winner in (2,3,4)`) and adversarial mutations are **refused**. Neither asserts that a benign
+mutation is *accepted by the gate*. **A resolver that quarantines 100% of legitimate heals passes
+every test in this plan** — and then the headline *"zero manual selector fixes"* is only true because
+a human cleared the queue by hand every night, which is the opposite of the product.
+
+Worse, per C3 the design **does** quarantine every label rewording until R14 lands. That defect was
+invisible precisely because this suite did not exist.
+
+**Amended 2026-09-26 — this suite's helpers, defined; and it now runs after Task 26A.** The first text
+called `run_pipeline_on`, `heal_event_for`, `verdicts_of`, `heals_under_blackout` and
+`ALL_BENIGN_MUTATION_CLASSES`, none defined anywhere, and compared against `heal.healed_family`, a
+column that does not exist. `run_pipeline_on` is **the pipeline's decision core without its I/O** —
+resolve against the warm cache, extract, `gate_run` — which is exactly what a benign heal's acceptance
+depends on; the I/O half is covered by Task 26A's end-to-end tests.
+
+- [ ] **Step 0: Add the helpers to `tests/suite/conftest.py`**
+
+```python
+# tests/suite/conftest.py  (additions)
+from selector_drift.validate.gate import HealContext, ValidatedExtraction, gate_run
+from selector_drift.validate.quarantine import QuarantinedRun
+from selector_drift.validate.verdict import Confirmation, Verdict
+
+ALL_BENIGN_MUTATION_CLASSES = [e for e in CATALOGUE if not e.adversarial]
+
+
+def run_pipeline_on(ev: Evidence, *, history: History | None,
+                    cache: _DictCache) -> ValidatedExtraction | QuarantinedRun:
+    page = StaticPageSource(ev.dom.value)
+    resolved, contexts = {}, {}
+    for t in SPEC.targets:
+        el, trace = resolve_cascade(page, t, cache, record=False)
+        resolved[t.name] = el
+        contexts[t.name] = HealContext(healed=trace.winner != 1, winning_rung=trace.winner,
+                                       page=None, target=t, cache=cache)
+    candidate = read(ev.dom.value, resolved, SPEC, run_key=ev.run_key, snapshot_id=ev.sha256,
+                     traces={}, observed_at=AT)
+    return gate_run(candidate, history, contexts, {t.name: all_checks(t) for t in SPEC.targets})
+
+
+def verdicts_of(result: ValidatedExtraction | QuarantinedRun) -> list[Verdict]:
+    return list(result.verdicts) if isinstance(result, QuarantinedRun) else []
+
+
+def confirmer_of(result: ValidatedExtraction | QuarantinedRun, field: str) -> Confirmation | None:
+    """What record_heals (Task 26A) would write to confirmer_rung / confirmer_family."""
+    passing = [v.confirmed_by for v in result.verdicts
+               if v.field == field and v.confirmed_by is not None]
+    dom = [c for c in passing if c.rung is not None]
+    return (dom or passing or [None])[0]
+
+
+def healed_fields(ev: Evidence, cache: _DictCache) -> list[tuple[str, int]]:
+    page = StaticPageSource(ev.dom.value)
+    out = []
+    for t in SPEC.targets:
+        _, trace = resolve_cascade(page, t, cache, record=False)
+        if trace.winner != 1:
+            out.append((t.name, trace.winner))
+    return out
+```
+
+`ValidatedExtraction` gains a read-only `verdicts: tuple[Verdict, ...]` (minted by `gate_run` with the
+verdicts it judged), so an acceptance can name the confirmer that carried it — the same data
+`record_heals` writes.
+
+In `tests/suite/test_benign_heals_are_accepted.py`, every test takes `warm_cache` and calls
+`run_pipeline_on(bench_evidence[m.name], history=history, cache=warm_cache())`, iterating
+`ALL_BENIGN_MUTATION_CLASSES` by `m.name`. The confirmer test becomes:
+
+```python
+@pytest.mark.unit
+@pytest.mark.parametrize("m", ALL_BENIGN_MUTATION_CLASSES, ids=lambda m: m.name)
+def test_each_acceptance_names_the_confirmer_that_carried_it(m, bench_evidence, history, warm_cache):
+    # An acceptance with no named confirmer is a check that silently passed.
+    cache = warm_cache()
+    result = run_pipeline_on(bench_evidence[m.name], history=history, cache=cache)
+    for field, winner in healed_fields(bench_evidence[m.name], cache):
+        c = confirmer_of(result, field)
+        assert c is not None, f"{m.name}: {field} healed by rung {winner} with no confirmer"
+        assert c.family is not family_of(winner)          # cross-family, always
+```
+
+and the label-reword test asserts `confirmer_of(result, "claim_number").family is Family.VALUE`.
+`family_of(rung) -> Family` is `{2: TEXT_SEMANTIC, 3: TEXT_SEMANTIC, 4: STRUCTURAL}[rung]`, defined in
+the same conftest. `heals_under_blackout(m)` is
+`isinstance(run_pipeline_on(bench_evidence[m.name], history=history, cache=warm_cache()),
+ValidatedExtraction)` evaluated inside `blackout()`; the degraded-mode test takes the same fixtures.
+
+- [ ] **Step 1: Write the failing acceptance suite**
+
+```python
+# tests/suite/test_benign_heals_are_accepted.py
+@pytest.mark.parametrize("mutation", ALL_BENIGN_MUTATION_CLASSES, ids=lambda m: m.name)
+def test_every_benign_mutation_is_healed_AND_accepted(mutation, bench_evidence, history):
+    # The complement of test_adversarial_refused. Refusing everything is safe
+    # and worthless; this is the suite that says the product works.
+    result = run_pipeline_on(bench_evidence[mutation.name], history=history)
+    assert isinstance(result, ValidatedExtraction), verdicts_of(result)
+
+@pytest.mark.parametrize("mutation", ALL_BENIGN_MUTATION_CLASSES, ids=lambda m: m.name)
+def test_each_acceptance_names_the_confirmer_that_carried_it(mutation, bench_evidence, history):
+    # An acceptance with no named confirmer is a check that silently passed.
+    heal = heal_event_for(run_pipeline_on(bench_evidence[mutation.name], history=history))
+    assert heal.confirmer_rung and heal.confirmer_family != heal.healed_family
+
+def test_the_label_reword_case_specifically(bench_evidence, history):
+    # C3. Before R14 this quarantines, forever, on the most common real UI change.
+    result = run_pipeline_on(bench_evidence["LabelReword"], history=history)
+    assert isinstance(result, ValidatedExtraction)
+    assert heal_event_for(result).confirmer_family == "VALUE"
+
+def test_the_quarantine_rate_on_benign_mutations_is_zero(bench_evidence, history):
+    # The number that goes in the methodology next to the heal count.
+    q = [m for m in ALL_BENIGN_MUTATION_CLASSES
+         if not isinstance(run_pipeline_on(bench_evidence[m.name], history=history),
+                           ValidatedExtraction)]
+    assert q == [], f"benign mutations quarantined: {[m.name for m in q]}"
+```
+
+- [ ] **Step 2: Write the failing degraded-mode test**
+
+```python
+# tests/suite/test_degraded_mode.py
+from bok_core.testing.degraded import blackout, assert_blackout_complete
+
+def test_degraded_mode_still_produces_findings():
+    # 00 R3 names this test by exactly this name; INTERFACE-CONTRACT.md section 5
+    # sets this repo's floor and unit: "majority of mutation classes healed by
+    # rungs 1-4". v1 makes zero model calls so it should be trivially green --
+    # which is the point. It is a regression guard against a model dependency
+    # creeping in, and design section 12 said to keep it. The plan had no such
+    # test at all (M3).
+    with blackout():
+        healed = [m for m in ALL_BENIGN_MUTATION_CLASSES if heals_under_blackout(m)]
+        assert len(healed) > len(ALL_BENIGN_MUTATION_CLASSES) / 2
+        assert_blackout_complete()
+```
+
+- [ ] **Step 3: Run both and watch them fail.** Run: `uv run pytest tests/suite -v`
+
+- [ ] **Step 4: Fix the gate until the acceptance suite passes.** If a benign mutation quarantines,
+  that is a **gate defect**, exactly as a mutation that will not heal is a resolver defect. Read the
+  named verdict before changing a threshold; the answer is usually a missing confirmer family, not a
+  looser check.
+
+- [ ] **Step 5: Record both rates in `docs/methodology.md`** — benign acceptance rate, adversarial
+  refusal rate, and the degraded-mode floor with its unit. Three numbers, and they only mean something
+  together: refusing everything scores 100% on the second and 0% on the first.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add tests/suite docs/methodology.md
+git commit -m "test: benign-heal acceptance suite and degraded-mode floor"
+```
+
+---
+
+### Task 26C: The bench scorer — ground truth for every bench heal
+
+**Files:**
+- Create: `testbench/score.py`
+- Modify: `selector_drift/orchestrate/deployments.py` — register `bench-scorer` by entrypoint string
+- Test: `tests/testbench/test_score.py`, `tests/testbench/conftest.py`
+
+**Interfaces:**
+- Consumes: `testbench.answers.key.expected_xpaths(day, field, page=1) -> list[str]` (Task 8); the seed rule `sha256(f"{day}:{target}")` (Task 8); tables `heal_events`, `resolutions`, `quarantine`, `audit_log` (Task 3) — **`testbench.score` is the only bench module the `only-the-scorer-reads-the-product` contract lets read them** (Task 8); the heal bundle layout (API spec §7.2, Task 33); `bok_core.boundary.redact.redact(payload: Labelled[str], *, key: bytes) -> RedactionResult` (contract §1.3).
+- Produces:
+  - `Judgement` — `StrEnum`: `TRUE_ACCEPT`, `CORRECT_REFUSAL`, `FALSE_ACCEPT`, `FALSE_REFUSAL`
+  - `seed_day(meta_seed: str, captured_at: datetime, target: str = "testbench") -> date`
+  - `truth_path(after_html: str, node_id: str) -> str`
+  - `judge(*, correct: bool, accepted: bool) -> Judgement`
+  - `score_pending(session: Session) -> list[int]` — scores every bench heal with no `audit_log` row `action="scored"`; returns the heal ids scored
+  - `score_pending_flow() -> int` — the Prefect flow wrapping it
+  - `UnscorableHeal(Exception)`
+
+**Why this task exists (found 2026-09-26).** The bench spec (§2) names `score.py`, the API's
+`StatsView.quarantines_refused_correctly` counts its output (API spec §4.3), and the headline
+*"2 quarantined runs correctly refused"* depends on it. **No task created it.** Without a scorer the
+treatment arm's ground truth (Task 8's answer key) exists and is never compared with anything.
+
+It also produces the number the headline leaves out and a buyer should ask for: **`FALSE_ACCEPT`** —
+a wrong heal the gate let through. That is the failure this product exists to prevent (design §1).
+Its count is published next to the correct refusals, and any new one fires the Task 29A alert.
+
+**Three details that are easy to get wrong:**
+
+1. **The day is recovered from the seed, not from the clock.** The `sd-mutation-seed` tag carries
+   `sha256(f"{day}:testbench")`, which cannot be inverted, and a run at 23:59 UTC can capture a page
+   served for the previous day. `seed_day` tries `captured_at`'s UTC date and the day before and keeps
+   the one whose hash matches. Neither matching means the bench served a page its own schedule cannot
+   explain: `UnscorableHeal`, recorded as such, never guessed.
+2. **Node identity, never selector text (C5).** A `StaticPageSource` `node_id` is already lxml's
+   `getpath()` (Task 13). A `LivePageSource` `node_id` is the injected `data-sd-node` attribute, which
+   survives into the captured DOM; `truth_path` finds that element in `after.html` and takes its
+   `getpath()`. Either way it is XPath against XPath — the same call the answer key uses.
+3. **Redaction must not move nodes.** It replaces text, never structure, so XPaths on the redacted
+   `after.html` equal those on the page the answer key renders. A test pins this, because if it ever
+   stops being true every judgement silently becomes wrong.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/testbench/test_score.py
+import datetime as dt
+import hashlib
+
+import pytest
+from lxml import html as lh
+from sqlalchemy import text
+
+from testbench.score import Judgement, UnscorableHeal, judge, seed_day, truth_path
+
+
+def _seed(day: dt.date) -> str:
+    return hashlib.sha256(f"{day.isoformat()}:testbench".encode()).hexdigest()
+
+
+@pytest.mark.unit
+def test_seed_day_prefers_the_capture_date() -> None:
+    day = dt.date(2026, 10, 3)
+    at = dt.datetime(2026, 10, 3, 4, 12, tzinfo=dt.UTC)
+    assert seed_day(_seed(day), at) == day
+
+
+@pytest.mark.unit
+def test_seed_day_recovers_a_page_served_before_midnight() -> None:
+    served = dt.date(2026, 10, 2)
+    at = dt.datetime(2026, 10, 3, 0, 0, 5, tzinfo=dt.UTC)
+    assert seed_day(_seed(served), at) == served
+
+
+@pytest.mark.unit
+def test_an_unexplained_seed_is_unscorable_not_guessed() -> None:
+    at = dt.datetime(2026, 10, 3, 4, 12, tzinfo=dt.UTC)
+    with pytest.raises(UnscorableHeal):
+        seed_day(_seed(dt.date(2026, 9, 1)), at)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("correct", "accepted", "expected"), [
+    (True, True, Judgement.TRUE_ACCEPT),
+    (False, False, Judgement.CORRECT_REFUSAL),
+    (False, True, Judgement.FALSE_ACCEPT),
+    (True, False, Judgement.FALSE_REFUSAL),
+])
+def test_judge_covers_all_four_cells(correct: bool, accepted: bool, expected: Judgement) -> None:
+    assert judge(correct=correct, accepted=accepted) is expected
+
+
+@pytest.mark.unit
+def test_truth_path_passes_a_static_node_id_through() -> None:
+    html = "<html><body><table><tr><td>AB12345678</td></tr></table></body></html>"
+    assert truth_path(html, "/html/body/table/tr/td") == "/html/body/table/tr/td"
+
+
+@pytest.mark.unit
+def test_truth_path_finds_a_live_node_id_by_its_attribute() -> None:
+    html = '<html><body><table><tr><td data-sd-node="n-7">AB12345678</td></tr></table></body></html>'
+    assert truth_path(html, "n-7") == "/html/body/table/tr/td"
+
+
+@pytest.mark.unit
+def test_truth_path_refuses_a_live_node_it_cannot_find_exactly_once() -> None:
+    html = '<html><body><p data-sd-node="n-1">a</p><p data-sd-node="n-1">b</p></body></html>'
+    with pytest.raises(UnscorableHeal):
+        truth_path(html, "n-1")
+
+
+@pytest.mark.unit
+def test_redaction_does_not_move_nodes(redaction_key: bytes) -> None:
+    # If this ever fails, every judgement the scorer makes is silently wrong.
+    from bok_core.boundary.redact import redact
+    from bok_core.boundary.sensitivity import Labelled, Sensitivity
+    from testbench.portal.data import render_results
+
+    raw = render_results(dt.date(2026, 10, 3))
+    red = redact(Labelled(value=raw, sensitivity=Sensitivity.SYNTHETIC), key=redaction_key).text
+
+    def paths(s: str) -> list[str]:
+        root = lh.fromstring(s)
+        return [root.getroottree().getpath(e) for e in root.iter()]
+
+    assert paths(raw) == paths(red)
+
+
+@pytest.mark.integration
+def test_score_pending_scores_each_heal_once(db, seeded_bench_heals) -> None:
+    from testbench.score import score_pending
+    first = score_pending(db)
+    assert sorted(first) == sorted(h.id for h in seeded_bench_heals)
+    assert score_pending(db) == []
+    details = db.execute(text("select detail from audit_log where action = 'scored'")).scalars().all()
+    assert {d["judgement"] for d in details} <= {j.value for j in Judgement} | {"unscorable"}
+
+
+@pytest.mark.integration
+def test_a_quarantined_decoy_heal_scores_as_a_correct_refusal(db, decoy_heal_quarantined) -> None:
+    from testbench.score import score_pending
+    score_pending(db)
+    detail = db.execute(
+        text("select detail from audit_log where action = 'scored' and subject = :s"),
+        {"s": str(decoy_heal_quarantined.id)},
+    ).scalar_one()
+    assert detail["judgement"] == Judgement.CORRECT_REFUSAL.value
+```
+
+`tests/testbench/conftest.py` provides:
+- `redaction_key` — `os.urandom(32)`, never a literal (no secrets in the repo, including fixtures);
+- `db` — the integration Postgres session with the Task 3 schema;
+- `seeded_bench_heals` — three `heal_events` + `resolutions` rows whose heal bundles are written from
+  `mutate_html(day, render_results(day))` (Task 8) with static XPath `node_id`s;
+- `decoy_heal_quarantined` — the same for a day whose schedule includes `DecoyColumn`, resolved to the
+  decoy column's XPath, with an unresolved `quarantine` row for its run.
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `uv run pytest tests/testbench/test_score.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'testbench.score'`.
+
+- [ ] **Step 3: Implement the scorer**
+
+```python
+# testbench/score.py
+"""Judges every bench heal against the answer key.
+
+The ONLY bench module allowed to read the product's tables (import contract
+only-the-scorer-reads-the-product, Task 8). Read-only against the product, except for the
+audit_log rows it writes about its own judgements."""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+from enum import StrEnum
+from pathlib import Path
+
+from lxml import html as lh
+from prefect import flow
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from testbench.answers.key import expected_xpaths
+
+TARGET = "testbench"
+
+
+class Judgement(StrEnum):
+    TRUE_ACCEPT = "true_accept"
+    CORRECT_REFUSAL = "correct_refusal"
+    FALSE_ACCEPT = "false_accept"      # a wrong heal the gate let through -- the one that matters
+    FALSE_REFUSAL = "false_refusal"
+
+
+class UnscorableHeal(Exception):
+    """The stored page cannot be tied to a bench day, or its node cannot be found."""
+
+
+def _seed(day: dt.date, target: str) -> str:
+    return hashlib.sha256(f"{day.isoformat()}:{target}".encode()).hexdigest()
+
+
+def seed_day(meta_seed: str, captured_at: dt.datetime, target: str = TARGET) -> dt.date:
+    today = captured_at.astimezone(dt.UTC).date()
+    for day in (today, today - dt.timedelta(days=1)):
+        if _seed(day, target) == meta_seed:
+            return day
+    raise UnscorableHeal(f"seed {meta_seed[:12]}... matches neither {today} nor the day before")
+
+
+def truth_path(after_html: str, node_id: str) -> str:
+    if node_id.startswith("/"):
+        return node_id                          # StaticPageSource node_id is already getpath()
+    root = lh.fromstring(after_html)
+    hits = root.xpath("//*[@data-sd-node=$n]", n=node_id)
+    if len(hits) != 1:
+        raise UnscorableHeal(f"live node {node_id!r} found {len(hits)} times in the stored page")
+    return str(root.getroottree().getpath(hits[0]))
+
+
+def judge(*, correct: bool, accepted: bool) -> Judgement:
+    if accepted:
+        return Judgement.TRUE_ACCEPT if correct else Judgement.FALSE_ACCEPT
+    return Judgement.FALSE_REFUSAL if correct else Judgement.CORRECT_REFUSAL
+
+
+def _meta_seed(after_html: str) -> str:
+    content = lh.fromstring(after_html).xpath("string(//meta[@name='sd-mutation-seed']/@content)")
+    if not content:
+        raise UnscorableHeal("stored page carries no sd-mutation-seed tag")
+    return str(content).split(";", 1)[0]
+
+
+_PENDING = text("""
+    select h.id, h.field, h.evidence_uri, r.node_id,
+           (q.run_key is null or q.resolved_as = 'promoted') as accepted
+      from heal_events h
+      join resolutions r on r.id = h.resolution_id
+      left join quarantine q on q.run_key = h.run_key
+     where h.target = :target
+       and not exists (select 1 from audit_log a
+                        where a.action = 'scored' and a.subject = h.id::text)
+""")
+
+
+def score_pending(session: Session) -> list[int]:
+    scored: list[int] = []
+    for row in session.execute(_PENDING, {"target": TARGET}).mappings():
+        bundle = Path(row["evidence_uri"])
+        detail: dict[str, object]
+        try:
+            manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+            after_html = (bundle / "after.html").read_text(encoding="utf-8")
+            captured_at = dt.datetime.fromisoformat(manifest["after"]["captured_at"])
+            day = seed_day(_meta_seed(after_html), captured_at)
+            resolved = truth_path(after_html, row["node_id"])
+            expected = expected_xpaths(day, row["field"])
+            # Any row's cell in the right column is the right column: row 3's Amount is a correct
+            # heal, row 1's Reserve is not.
+            correct = resolved in expected
+            detail = {
+                "day": day.isoformat(), "field": row["field"], "resolved": resolved,
+                "expected_first": expected[0] if expected else None,
+                "judgement": judge(correct=correct, accepted=bool(row["accepted"])).value,
+            }
+        except (UnscorableHeal, FileNotFoundError, KeyError) as exc:
+            detail = {"field": row["field"], "judgement": "unscorable", "reason": str(exc)}
+        session.execute(
+            text("insert into audit_log (at, actor, action, subject, detail) "
+                 "values (now(), 'testbench.score', 'scored', :s, cast(:d as jsonb))"),
+            {"s": str(row["id"]), "d": json.dumps(detail)},
+        )
+        scored.append(int(row["id"]))
+    session.commit()
+    return scored
+
+
+@flow(name="bench-scorer")
+def score_pending_flow() -> int:
+    from selector_drift.db.session import SessionLocal  # permitted: only-the-scorer-reads-the-product
+    with SessionLocal() as s:
+        return len(score_pending(s))
+```
+
+An `unscorable` heal is written, not skipped. Skipping would leave it pending forever and hide it;
+a published count of unscorable heals is honest, and a non-zero count is itself a finding about the
+bench.
+
+- [ ] **Step 4: Schedule it after each bench run**
+
+In `selector_drift/orchestrate/deployments.py`, register `bench-scorer` 30 minutes after the bench's
+cron (`42 4 * * *` against `12 4 * * *`). **`orchestrate/` must not import `testbench`** (bench spec
+§2), so the deployment names its flow by entrypoint string, never by import:
+
+```python
+# selector_drift/orchestrate/deployments.py  (addition)
+BENCH_SCORER = {
+    "name": "bench-scorer",
+    "entrypoint": "testbench/score.py:score_pending_flow",   # a string: no import of testbench
+    "cron": "42 4 * * *",
+    "timezone": "UTC",
+}
+```
+
+- [ ] **Step 5: Leave the `false_accepts` figure to Task 34B**
+
+`derive.py` does not exist yet — Task 34B creates it, after this task in execution order. The
+`false_accepts` count and its two tests are therefore written in Task 34B (see *"Carried from Task
+26C"* there). What this task guarantees is the data they read: one `audit_log` row per bench heal with
+`detail.judgement`. Task 29A's `notify()` rule for `false_accept` rows (amended 2026-09-26) is already
+in place and starts firing as soon as this scorer writes one.
+
+- [ ] **Step 6: Run the tests and the contracts**
+
+Run: `uv run pytest tests/testbench/test_score.py -v && uv run lint-imports`
+Expected: PASS. `only-the-scorer-reads-the-product` is kept, and its
+`unmatched_ignore_imports_alerting = none` line (Task 8) is deleted in this step, because
+`testbench.score` now exists and an unmatched ignore should alert again.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add testbench/score.py tests/testbench/test_score.py tests/testbench/conftest.py selector_drift/orchestrate/deployments.py .importlinter
+git commit -m "feat(testbench): scorer judges every bench heal against the answer key"
 ```
 
 ---
@@ -3330,472 +10525,11062 @@ git commit -m "feat(heallog): capture-redact-verify-store with word-level DOM di
 
 ---
 
-### Task 34: The API
+### Task 34A-1: The minimal `bok-ui` slice, part 1: tokens, CSS, fonts, contrast, `Claim` and the rail, the four states
 
-**Files:**
-- Create: `selector_drift/api/main.py`, `targets.py`, `runs.py`, `heals.py`, `quarantine.py`, `quality.py`, `specs.py`
-- Test: `tests/api/test_endpoints.py`
+**Where:** the sibling repo, **not this one.** `backoffice-kit`, branch `bok-ui-minimal`, worktree
+`backoffice-kit/.worktrees/bok-ui-minimal` (`.worktrees/` is already gitignored there), package
+`packages/bok-ui`. Every command in this task runs from
+`D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-ui-minimal/packages/bok-ui`
+unless it says otherwise. Commits happen in that worktree, signed off (`-s`) as the rest of
+`backoffice-kit`'s history is.
+
+**Why this task exists (slice spec §1).** `INTERFACE-CONTRACT.md` §8 schedules `bok-ui` v0.1 for
+programme week 3 and `RunTimeline`/`DiffView`/the DOM `EvidencePane` adapter for week 13. Selector Drift
+runs first (audit OQ1), so none of it exists when the UI phase starts. The ruling is the same as for
+`bok-core`: hand-build only what this project renders, in `backoffice-kit`, with the contract's props,
+so `ledger-sense` and `ground-truth` later inherit real components rather than a re-extraction from
+`web/`. The slice is split in two so each half is reviewable: this half is everything the other
+screens stand on; 34A-2 is the three early components plus `SeverityBadge`.
+
+**What this slice deliberately changes from the unexecuted week-3 plan (`2026-08-27-bok-ui-week3.md`),
+found 2026-09-26.** Each is carried into the contract proposal at the end of 34A-2.
+
+- **`tsup`, two entries: `bok-ui` and `bok-ui/client`.** The consumer is Next.js App Router. A server
+  component cannot pass a function prop to a client component, and `RunTimeline.hrefFor`,
+  `ProvenanceRailProvider.hrefForSnapshot`, `EvidencePane.adapter` and `ErrorState.retry` are all
+  functions. Components with hooks or event handlers (`Claim`, `ProvenanceRailProvider`,
+  `ProvenanceRail`, `RunTimeline`) ship from `bok-ui/client` with a `"use client"` banner. Everything
+  else ships from `bok-ui` and renders on the server. One bundle marked `"use client"` would have made
+  every badge a client component and still not solved the function-prop problem.
+- **Reduced motion sets `0s`, not `0.01ms`.** The week-3 sheet's `animation-duration: 0.01ms !important`
+  serialises as `1e-05s`, so the heal-log E2E assertion `toHaveCSS('animation-duration', '0s')` could
+  never pass. Spec §4 says the motion goes "to `0s`", so the sheet does exactly that.
+- **`SeverityBadge` text uses the `-ink` token.** The week-3 draft coloured badge text with the base
+  token, which is the half contract §6.1 reserves for fills ("a consumer that sets `color:` from a base
+  token is using the wrong half").
+- **Prop shapes follow the slice spec §4**, where it differs from the week-3 draft: `ErrorState` takes
+  `title`/`detail`/`retry`; `PartialFailureState` takes `succeeded: string[]` and
+  `failed: {what, why}[]`; `Skeleton` takes a `shape`; `EmptyState` gains two optional scope fields,
+  `headline` and `measuredVerb`, because spec §4.2 requires the output *"Nothing quarantined. 41 runs
+  passed validation."* and no arrangement of `noun`/`measuredNoun`/`measured` produces that sentence.
+- **The stylesheet is `tokens.css`** (slice spec §2), not the week-3 `theme.css`.
+
+**Files** (all under `backoffice-kit/.worktrees/bok-ui-minimal/`):
+- Create: `packages/bok-ui/package.json`, `tsconfig.json`, `tsup.config.ts`, `vitest.config.ts`, `vitest.setup.ts`
+- Create: `packages/bok-ui/scripts/vendor-fonts.mjs`, `scripts/build-css.mjs`, `scripts/check-contrast.mjs`
+- Create: `packages/bok-ui/src/css/fonts.css`, `src/css/tokens.css`, `src/css/density.css`, `src/css/components.css`, `src/css/print.css`
+- Create (generated by `vendor-fonts.mjs`, committed): `packages/bok-ui/src/css/fonts/newsreader.woff2`, `geist-sans.woff2`, `plex-mono-400.woff2`, `plex-mono-600.woff2`, `OFL-newsreader.txt`, `OFL-geist.txt`, `OFL-plex-mono.txt`
+- Create: `packages/bok-ui/src/semantics.ts`, `src/types.ts`, `src/rail-context.ts`, `src/Claim.tsx`, `src/ProvenanceRail.tsx`, `src/EmptyState.tsx`, `src/ErrorState.tsx`, `src/PartialFailureState.tsx`, `src/Skeleton.tsx`, `src/fixtures/dom-claim.json`, `src/test/axe.ts`
+- Test: `packages/bok-ui/src/css/tokens.test.ts`, `src/css/fonts.test.ts`, `src/css/print.test.ts`, `scripts/check-contrast.test.mjs`, `src/ProvenanceRail.test.tsx`, `src/states.test.tsx`, `src/a11y.test.tsx`
 
 **Interfaces:**
-- Consumes: everything above.
-- Produces: `GET /targets`, `GET /runs`, `GET /heals/{id}`, `POST /quarantine/{run_key}/promote`, `POST /quarantine/{run_key}/discard`, `GET /quality/{run_key}`, `GET /specs/{target}`.
+- Consumes: `INTERFACE-CONTRACT.md` §2.4 `to_rail()` → `RailPayload` JSON (`root: RailNode`, `depth`, `inherited_caveats`), §6.1 token list, §6.2 component list; slice spec §4.1–§4.2 props.
+- Produces:
+  - CSS: `bok-ui/tokens.css` (fonts + tokens + density + component rules, one file), `bok-ui/print.css` (standalone, React-free). Custom properties used downstream: `--bok-neutral-1..12`, `--bok-paper`, `--bok-ink`, `--bok-{critical,high,medium,low,info,verified,modelled,unverified}` and their `-ink` siblings, `--bok-accent-{agent-perimeter,ledger-sense,selector-drift,ground-truth}` and `-ink` siblings, `--bok-accent`, `--bok-accent-ink`, `--bok-font-{display,ui,mono}`, `--bok-space`, `--bok-radius-{control,cell,rule}`, `--bok-density-{row,pad-x,pad-y,font}`, `--bok-evidence-outline-duration`, `--bok-rail-width`. Class `bok-visually-hidden`. Data attributes `data-density`, `data-theme`, `data-bok-numeric`, `data-bok-chrome`, `data-bok-rail`.
+  - `semantics.ts`: `SemanticEntry {token, ink, glyph, label}`, `SEVERITY`, `PROVENANCE_STATE`, `RUN_STATE`, types `SeverityKey`, `ProvenanceStateKey`, `RunState = "completed" | "healed" | "quarantined" | "failed" | "refused"`.
+  - `types.ts`: `Method`, `Derivation`, `CalibrationState`, `RailNode`, `RailPayload`, `provenanceStateOf(node) -> "verified" | "modelled" | "unverified"`, `DomSourceFields {snapshot_id, selector, rung}`, `domSourceOf(node) -> DomSourceFields | null`.
+  - client components: `<ProvenanceRailProvider hrefForSnapshot={(id: string) => string}>`, `<Claim payload={RailPayload}>{display?}</Claim>`, `<ProvenanceRail id payload onClose hrefForSnapshot />` (rendered by the provider; exported for completeness).
+  - server-safe components: `<EmptyState scope={EmptyScope} />` with `EmptyScope {noun; measuredNoun; measured; skipped?; skippedReason?; headline?; measuredVerb?}`, `<ErrorState title detail? retry? />`, `<PartialFailureState succeeded={string[]} failed={{what, why}[]} />`, `<Skeleton shape={"table" | "cards" | "text" | "figure"} rows? />`.
+  - `npm run contrast` (exit 1 on any ratio under its floor).
 
-**Every route authenticates, and `actor` is never read from a request body (R16/H3).** The first
-draft had no authentication of any kind — `GET /heals/{id}` serves redacted evidence and DOM
-snapshots, `GET /quality/{run_key}` serves extracted rows — and `promote` took its `actor` from the
-caller. DoD item 4 is *"quarantine with promote/discard and **full audit**"*, and the whole sales
-argument is that a named human confirmed a heal: **an audit log whose `actor` is supplied by the party
-being audited is not an audit log.**
+- [ ] **Step 1: Create the worktree and the package skeleton**
 
-v1 is single-tenant and local, so the cheapest thing that is actually a control:
+From `D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit`:
 
-- session cookie auth, one operator account, `HttpOnly` + `SameSite=Strict`, argon2id password hash;
-- `actor` comes from `Depends(current_user)`, and the request models **do not declare an `actor`
-  field**, so anyone sending one gets a `422`;
-- path parameters (`run_key`, `id`, `target`) validated against a pattern before use, since they index
-  `evidence_uri` and `data_uri` on disk;
-- CORS locked to the web origin; the API is not published outside the compose network by default.
+```bash
+git check-ignore -q .worktrees/probe && echo "worktrees ignored"   # must print: worktrees ignored
+git worktree add .worktrees/bok-ui-minimal -b bok-ui-minimal main
+mkdir -p .worktrees/bok-ui-minimal/packages/bok-ui/{scripts,src/css/fonts,src/fixtures,src/test,src/adapters}
+```
 
-- [ ] **Step 1: Write the failing tests**
+`packages/bok-ui/package.json`:
+
+```json
+{
+  "name": "bok-ui",
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": ["*.css"],
+  "files": ["dist"],
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./client": { "types": "./dist/client.d.ts", "import": "./dist/client.js" },
+    "./tokens.css": "./dist/tokens.css",
+    "./print.css": "./dist/print.css",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsup && node scripts/build-css.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "contrast": "node scripts/check-contrast.mjs",
+    "fonts": "node scripts/vendor-fonts.mjs",
+    "check": "npm run typecheck && npm run contrast && npm run test && npm run build && node scripts/smoke-dist.mjs"
+  },
+  "peerDependencies": { "react": "^19.0.0", "react-dom": "^19.0.0" },
+  "devDependencies": {
+    "@fontsource-variable/newsreader": "^5.1.0",
+    "@fontsource/ibm-plex-mono": "^5.1.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "axe-core": "^4.10.2",
+    "geist": "^1.3.1",
+    "jsdom": "^25.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
+```
+
+The three font packages are **dev** dependencies: they are only the source `vendor-fonts.mjs` copies
+from. The package ships the copied `woff2` files, never a runtime font dependency and never a CDN call
+(`00` §5.2).
+
+`packages/bok-ui/tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src", "tsup.config.ts", "vitest.config.ts", "vitest.setup.ts"]
+}
+```
+
+`packages/bok-ui/tsup.config.ts`:
+
+```ts
+import { defineConfig } from "tsup";
+
+const shared = {
+  format: ["esm"] as const,
+  dts: true,
+  sourcemap: true,
+  target: "es2022",
+  external: ["react", "react-dom", "react/jsx-runtime"],
+};
+
+// Two entries, found 2026-09-26: a Next.js server component cannot hand a function prop to a
+// client component, and four of this slice's props are functions. Hooks and event handlers
+// live behind "bok-ui/client"; everything else stays renderable on the server.
+export default defineConfig([
+  { ...shared, entry: { index: "src/index.ts" } },
+  { ...shared, entry: { client: "src/client.ts" }, banner: { js: '"use client";' } },
+]);
+```
+
+`packages/bok-ui/vitest.config.ts`:
+
+```ts
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./vitest.setup.ts"],
+    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.mjs"],
+  },
+});
+```
+
+`packages/bok-ui/vitest.setup.ts`:
+
+```ts
+import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
+import { afterEach } from "vitest";
+
+// No vitest globals, so Testing Library cannot register its own cleanup.
+afterEach(() => cleanup());
+```
+
+Run: `npm install`
+Expected: exits 0 and writes `package-lock.json`; `npm ls react` shows one `react@19.x`.
+
+- [ ] **Step 2: Write the failing token, font and print tests**
+
+```ts
+// packages/bok-ui/src/css/tokens.test.ts
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { PROVENANCE_STATE, RUN_STATE, SEVERITY } from "../semantics";
+
+const tokens = readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
+const density = readFileSync(new URL("./density.css", import.meta.url), "utf8");
+const dark = tokens.slice(tokens.indexOf('[data-theme="dark"]'));
+const SEMANTIC = ["critical", "high", "medium", "low", "info", "verified", "modelled", "unverified"];
+const ACCENTS = ["agent-perimeter", "ledger-sense", "selector-drift", "ground-truth"];
+
+describe("token layer", () => {
+  it("defines the twelve-step warm-graphite ramp in OKLCH", () => {
+    for (let i = 1; i <= 12; i++) expect(tokens).toContain(`--bok-neutral-${i}:`);
+    expect(tokens).toContain("oklch(0.985 0.004 85)"); // paper
+    expect(tokens).toContain("oklch(0.22 0.012 85)"); // ink
+  });
+
+  it("defines four product accents, each with an -ink sibling, drift indigo exactly", () => {
+    for (const a of ACCENTS) {
+      expect(tokens).toContain(`--bok-accent-${a}:`);
+      expect(tokens).toContain(`--bok-accent-${a}-ink:`);
+    }
+    expect(tokens).toContain("--bok-accent-selector-drift:  oklch(0.55 0.14 268)");
+  });
+
+  it("splits every semantic colour into a base and an -ink role, in light and in dark", () => {
+    for (const t of SEMANTIC) {
+      expect(tokens).toContain(`--bok-${t}:`);
+      expect(tokens).toContain(`--bok-${t}-ink:`);
+      expect(dark).toContain(`--bok-${t}:`);
+      expect(dark).toContain(`--bok-${t}-ink:`);
+    }
+  });
+
+  it("ships comfortable and compact density, defaulting to compact, and no dense mode", () => {
+    expect(density).toMatch(/:root, \[data-density="compact"\]\s*\{[^}]*--bok-density-row/);
+    expect(density).toContain('[data-density="comfortable"]');
+    expect(density).not.toContain('[data-density="dense"]');
+  });
+
+  it("sets tabular numerals on every figure", () => {
+    expect(tokens).toMatch(/\[data-bok-numeric\][^{]*\{[^}]*font-variant-numeric:\s*tabular-nums/);
+  });
+
+  it("draws the focus ring in --bok-accent-ink, never in a product accent", () => {
+    expect(tokens).toMatch(/:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--bok-accent-ink\)/);
+  });
+
+  it("turns all motion to 0s under reduced motion, the evidence outline included", () => {
+    const block = tokens.slice(tokens.indexOf("@media (prefers-reduced-motion: reduce)"));
+    expect(block).toMatch(/--bok-evidence-outline-duration:\s*0s;/);
+    expect(block).toMatch(/animation-duration:\s*0s !important/);
+    expect(block).toMatch(/transition-duration:\s*0s !important/);
+    expect(tokens).not.toContain("0.01ms");
+  });
+
+  it("never encodes a semantic state in colour alone", () => {
+    const entries = [
+      ...Object.values(SEVERITY),
+      ...Object.values(PROVENANCE_STATE),
+      ...Object.values(RUN_STATE),
+    ];
+    for (const e of entries) {
+      expect(e.glyph.length).toBeGreaterThan(0);
+      expect(e.label.length).toBeGreaterThan(0);
+      expect(e.token).toMatch(/^--bok-/);
+      expect(e.ink).toMatch(/-ink$/);
+    }
+    // Drift indigo is the heal state and nothing else (web UI spec section 2).
+    const users = Object.entries(RUN_STATE).filter(([, e]) => e.ink.includes("selector-drift"));
+    expect(users.map(([k]) => k)).toEqual(["healed"]);
+  });
+});
+```
+
+```ts
+// packages/bok-ui/src/css/fonts.test.ts
+import { existsSync, readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+
+const fonts = readFileSync(new URL("./fonts.css", import.meta.url), "utf8");
+
+describe("fonts", () => {
+  it("ships every woff2 its @font-face rules reference, each with its OFL licence", () => {
+    const refs = [...fonts.matchAll(/url\("\.\/fonts\/([^"]+)"\)/g)].map((m) => m[1]);
+    expect(refs).toHaveLength(4);
+    for (const f of refs) expect(existsSync(new URL(`./fonts/${f}`, import.meta.url)), f).toBe(true);
+    for (const l of ["OFL-newsreader.txt", "OFL-geist.txt", "OFL-plex-mono.txt"]) {
+      const text = readFileSync(new URL(`./fonts/${l}`, import.meta.url), "utf8");
+      expect(text.toUpperCase()).toContain("SIL OPEN FONT LICENSE");
+    }
+  });
+
+  it("never calls a font CDN", () => {
+    expect(fonts).not.toMatch(/googleapis|gstatic|https?:\/\//);
+  });
+});
+```
+
+```ts
+// packages/bok-ui/src/css/print.test.ts
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+
+const print = readFileSync(new URL("./print.css", import.meta.url), "utf8");
+
+describe("print stylesheet", () => {
+  it("is usable without React: keyed on data attributes, no component classes", () => {
+    expect(print).toMatch(/@media print/);
+    expect(print).not.toMatch(/\.bok-[a-z]/);
+  });
+
+  it("survives greyscale: severity glyphs print, colours are kept exact", () => {
+    expect(print).toContain("print-color-adjust: exact");
+    expect(print).toContain("[data-severity]::before");
+  });
+
+  it("expands the provenance rail inline rather than hiding it", () => {
+    expect(print).toMatch(/\[data-bok-rail\]\s*\{[^}]*display:\s*block/);
+  });
+
+  it("hides interactive chrome that means nothing on paper", () => {
+    expect(print).toMatch(/\[data-bok-chrome\][^{]*\{[^}]*display:\s*none/);
+  });
+});
+```
+
+- [ ] **Step 3: Run them and watch them fail**
+
+Run: `npx vitest run src/css`
+Expected: FAIL — `ENOENT: no such file or directory, open '.../src/css/tokens.css'` (and the same for `fonts.css`, `print.css`); `tokens.test.ts` also fails to import `../semantics`.
+
+- [ ] **Step 4: Vendor the fonts**
+
+`packages/bok-ui/scripts/vendor-fonts.mjs`:
+
+```js
+#!/usr/bin/env node
+// Copies the three OFL families out of their npm packages into src/css/fonts/, with their
+// licences. Run once; the copies are committed. The packages are devDependencies only:
+// a consumer never downloads a font at runtime and never calls a CDN (00 section 5.2).
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const OUT = join(ROOT, "src", "css", "fonts");
+const JOBS = [
+  { pkg: "@fontsource-variable/newsreader", match: /^newsreader-latin-(wght|full)-normal\.woff2$/, out: "newsreader.woff2", licence: "OFL-newsreader.txt" },
+  { pkg: "geist", match: /^Geist-?Variable\.woff2$/i, out: "geist-sans.woff2", licence: "OFL-geist.txt" },
+  { pkg: "@fontsource/ibm-plex-mono", match: /^ibm-plex-mono-latin-400-normal\.woff2$/, out: "plex-mono-400.woff2", licence: "OFL-plex-mono.txt" },
+  { pkg: "@fontsource/ibm-plex-mono", match: /^ibm-plex-mono-latin-600-normal\.woff2$/, out: "plex-mono-600.woff2", licence: "OFL-plex-mono.txt" },
+];
+
+function walk(dir) {
+  return readdirSync(dir).flatMap((name) => {
+    const p = join(dir, name);
+    return statSync(p).isDirectory() ? walk(p) : [p];
+  });
+}
+
+function fail(message) {
+  console.error(`vendor-fonts: ${message}`);
+  process.exit(1);
+}
+
+mkdirSync(OUT, { recursive: true });
+for (const job of JOBS) {
+  const dir = join(ROOT, "node_modules", ...job.pkg.split("/"));
+  if (!existsSync(dir)) fail(`${job.pkg} is not installed -- run npm install`);
+  const files = walk(dir);
+  const font = files.find((f) => job.match.test(f.split(/[\\/]/).pop() ?? ""));
+  if (!font) fail(`${job.pkg}: no file matching ${job.match}`);
+  copyFileSync(font, join(OUT, job.out));
+  const licence = readdirSync(dir).find((n) => /^(LICENSE|OFL)(\.(txt|md))?$/i.test(n));
+  if (!licence) fail(`${job.pkg}: no licence file at the package root`);
+  const text = readFileSync(join(dir, licence), "utf8");
+  if (!/SIL OPEN FONT LICENSE/i.test(text)) fail(`${job.pkg}: licence is not the SIL OFL -- refusing to redistribute`);
+  writeFileSync(join(OUT, job.licence), text);
+  console.log(`vendor-fonts: ${job.out} <- ${font}`);
+}
+```
+
+Run: `npm run fonts`
+Expected: four `vendor-fonts: ... <- ...` lines; `src/css/fonts/` holds four `.woff2` files and three `OFL-*.txt` files.
+
+- [ ] **Step 5: Write the stylesheets and `semantics.ts`**
+
+`packages/bok-ui/src/css/fonts.css`:
+
+```css
+/* Self-hosted, OFL. Paths are relative to this file in src/ and to dist/tokens.css after the
+   build, which concatenates this file first and copies fonts/ beside it. */
+@font-face { font-family: "Newsreader"; src: url("./fonts/newsreader.woff2") format("woff2");
+             font-weight: 200 800; font-style: normal; font-display: swap; }
+@font-face { font-family: "Geist Sans"; src: url("./fonts/geist-sans.woff2") format("woff2");
+             font-weight: 100 900; font-style: normal; font-display: swap; }
+@font-face { font-family: "IBM Plex Mono"; src: url("./fonts/plex-mono-400.woff2") format("woff2");
+             font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "IBM Plex Mono"; src: url("./fonts/plex-mono-600.woff2") format("woff2");
+             font-weight: 600; font-style: normal; font-display: swap; }
+```
+
+`packages/bok-ui/src/css/tokens.css` (values are the week-3 plan's measured R1a set, unchanged, so
+the later full v0.1 is a superset of this slice rather than a re-tint; `check-contrast.mjs` re-measures
+them in Step 8):
+
+```css
+/* bok-ui tokens (selector-drift slice). Editorial instrument; light is primary.
+   Two roles per colour: the base token is a fill or border (3:1 floor), the -ink sibling is
+   anything a reader has to read, including the focus ring (4.5:1 floor). */
+:root {
+  --bok-neutral-1:  oklch(0.985 0.004 85);
+  --bok-neutral-2:  oklch(0.965 0.005 85);
+  --bok-neutral-3:  oklch(0.930 0.006 85);
+  --bok-neutral-4:  oklch(0.885 0.007 85);
+  --bok-neutral-5:  oklch(0.825 0.008 85);
+  --bok-neutral-6:  oklch(0.750 0.009 85);
+  --bok-neutral-7:  oklch(0.660 0.010 85);
+  --bok-neutral-8:  oklch(0.565 0.011 85);
+  --bok-neutral-9:  oklch(0.470 0.012 85);
+  --bok-neutral-10: oklch(0.380 0.012 85);
+  --bok-neutral-11: oklch(0.295 0.012 85);
+  --bok-neutral-12: oklch(0.22 0.012 85);
+
+  --bok-accent-agent-perimeter: oklch(0.72 0.16 68);
+  --bok-accent-ledger-sense:    oklch(0.58 0.11 158);
+  --bok-accent-selector-drift:  oklch(0.55 0.14 268);
+  --bok-accent-ground-truth:    oklch(0.52 0.10 232);
+  --bok-accent-agent-perimeter-ink: oklch(0.52 0.11 68);
+  --bok-accent-ledger-sense-ink:    oklch(0.50 0.11 158);
+  --bok-accent-selector-drift-ink:  oklch(0.52 0.14 268);
+  --bok-accent-ground-truth-ink:    oklch(0.50 0.10 232);
+  --bok-accent: var(--bok-accent-agent-perimeter);
+  --bok-accent-ink: var(--bok-accent-agent-perimeter-ink);
+
+  --bok-critical:      oklch(0.52 0.19 25);
+  --bok-critical-ink:  oklch(0.44 0.17 25);
+  --bok-high:          oklch(0.62 0.17 42);
+  --bok-high-ink:      oklch(0.45 0.135 42);
+  --bok-medium:        oklch(0.64 0.12 78);
+  --bok-medium-ink:    oklch(0.46 0.095 78);
+  --bok-low:           oklch(0.62 0.07 210);
+  --bok-low-ink:       oklch(0.45 0.07 210);
+  --bok-info:          oklch(0.60 0.02 85);
+  --bok-info-ink:      oklch(0.44 0.02 85);
+
+  --bok-verified:       oklch(0.52 0.11 158);
+  --bok-verified-ink:   oklch(0.43 0.10 158);
+  --bok-modelled:       oklch(0.60 0.12 268);
+  --bok-modelled-ink:   oklch(0.45 0.13 268);
+  --bok-unverified:     oklch(0.62 0.01 85);
+  --bok-unverified-ink: oklch(0.44 0.01 85);
+
+  --bok-font-display: "Newsreader", Georgia, serif;
+  --bok-font-ui: "Geist Sans", system-ui, sans-serif;
+  --bok-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --bok-space: 4px;
+  --bok-radius-control: 6px;
+  --bok-radius-cell: 2px;
+  --bok-radius-rule: 0;
+
+  --bok-evidence-outline-duration: 220ms;
+  --bok-rail-width: 380px;
+
+  --bok-paper: var(--bok-neutral-1);
+  --bok-ink: var(--bok-neutral-12);
+}
+
+[data-theme="dark"] {
+  --bok-paper: var(--bok-neutral-12);
+  --bok-ink: var(--bok-neutral-1);
+
+  --bok-critical: oklch(0.72 0.17 25);   --bok-critical-ink: oklch(0.80 0.11 25);
+  --bok-high:     oklch(0.78 0.13 42);   --bok-high-ink:     oklch(0.84 0.09 42);
+  --bok-medium:   oklch(0.84 0.12 78);   --bok-medium-ink:   oklch(0.88 0.10 78);
+  --bok-low:      oklch(0.78 0.08 210);  --bok-low-ink:      oklch(0.84 0.07 210);
+  --bok-info:     oklch(0.76 0.02 85);   --bok-info-ink:     oklch(0.82 0.02 85);
+
+  --bok-verified:   oklch(0.76 0.11 158); --bok-verified-ink:   oklch(0.82 0.10 158);
+  --bok-modelled:   oklch(0.78 0.11 268); --bok-modelled-ink:   oklch(0.84 0.075 268);
+  --bok-unverified: oklch(0.72 0.01 85);  --bok-unverified-ink: oklch(0.80 0.01 85);
+
+  --bok-accent-agent-perimeter: oklch(0.80 0.15 68);
+  --bok-accent-ledger-sense:    oklch(0.76 0.11 158);
+  --bok-accent-selector-drift:  oklch(0.74 0.13 268);
+  --bok-accent-ground-truth:    oklch(0.74 0.10 232);
+  --bok-accent-agent-perimeter-ink: var(--bok-accent-agent-perimeter);
+  --bok-accent-ledger-sense-ink:    var(--bok-accent-ledger-sense);
+  --bok-accent-selector-drift-ink:  var(--bok-accent-selector-drift);
+  --bok-accent-ground-truth-ink:    var(--bok-accent-ground-truth);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { color-scheme: dark; }
+}
+
+body { background: var(--bok-paper); color: var(--bok-ink); font-family: var(--bok-font-ui); }
+
+[data-bok-numeric], .bok-num {
+  font-family: var(--bok-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+:is(a, button, input, select, textarea, summary, [tabindex], [contenteditable]):focus-visible {
+  outline: 2px solid var(--bok-accent-ink);
+  outline-offset: 2px;
+}
+
+.bok-visually-hidden {
+  position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* Disables, not reduces: exactly 0s, because the E2E suite asserts a computed 0s. */
+@media (prefers-reduced-motion: reduce) {
+  :root { --bok-evidence-outline-duration: 0s; }
+  *, *::before, *::after {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0s !important;
+  }
+}
+```
+
+`packages/bok-ui/src/css/density.css`:
+
+```css
+/* The mechanism ships with two modes; `dense` lands with ledger-sense (contract 6.3). */
+:root, [data-density="compact"] {
+  --bok-density-row: calc(var(--bok-space) * 7);
+  --bok-density-pad-x: calc(var(--bok-space) * 2.5);
+  --bok-density-pad-y: calc(var(--bok-space) * 1.5);
+  --bok-density-font: 0.875rem;
+}
+
+[data-density="comfortable"] {
+  --bok-density-row: calc(var(--bok-space) * 10);
+  --bok-density-pad-x: calc(var(--bok-space) * 4);
+  --bok-density-pad-y: calc(var(--bok-space) * 3);
+  --bok-density-font: 0.9375rem;
+}
+```
+
+`packages/bok-ui/src/css/components.css` (the rules for this task's components; 34A-2 appends its own):
+
+```css
+/* Component rules, keyed on bok- classes and data attributes. No consumer class names. */
+
+/* Claim: a figure with a dotted underline in its provenance -ink colour, plus glyph + label. */
+.bok-claim {
+  display: inline-flex; align-items: baseline; gap: 0.25em;
+  background: none; border: 0; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer;
+  text-decoration-line: underline; text-decoration-style: dotted;
+  text-decoration-thickness: 1px; text-underline-offset: 3px;
+}
+.bok-claim[data-provenance-state="verified"]   { text-decoration-color: var(--bok-verified-ink); }
+.bok-claim[data-provenance-state="modelled"]   { text-decoration-color: var(--bok-modelled-ink); }
+.bok-claim[data-provenance-state="unverified"] { text-decoration-color: var(--bok-unverified-ink); }
+.bok-claim-glyph { font-size: 0.75em; color: var(--bok-neutral-9); }
+
+/* The rail: one 380px panel per app, owned by the provider. */
+.bok-rail {
+  position: fixed; inset-block: 0; inset-inline-end: 0; z-index: 40;
+  width: var(--bok-rail-width); max-width: 100vw; overflow-y: auto;
+  background: var(--bok-paper); color: var(--bok-ink);
+  border-inline-start: 1px solid var(--bok-neutral-4);
+  padding: calc(var(--bok-space) * 5);
+  animation: bok-rail-slide 180ms ease-out both;
+}
+.bok-rail-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--bok-space); }
+.bok-rail-head h2 { margin: 0; font-family: var(--bok-font-display); font-size: 1.25rem; }
+.bok-rail-close {
+  font: inherit; background: none; color: var(--bok-ink); cursor: pointer;
+  border: 1px solid var(--bok-neutral-6); border-radius: var(--bok-radius-control);
+  padding: var(--bok-density-pad-y) var(--bok-density-pad-x);
+}
+.bok-rail-chain { list-style: none; margin: calc(var(--bok-space) * 4) 0 0; padding: 0; }
+.bok-rail-chain .bok-rail-chain { margin-top: calc(var(--bok-space) * 2); padding-inline-start: calc(var(--bok-space) * 3); }
+.bok-rail-item {
+  border-inline-start: 2px solid var(--bok-neutral-5);
+  padding-inline-start: var(--bok-density-pad-x);
+  margin-block-end: calc(var(--bok-space) * 3);
+  animation: bok-rail-in 180ms ease-out both;
+  animation-delay: calc(var(--bok-rail-index, 0) * 30ms);
+}
+.bok-rail-item[data-provenance-state="verified"]   { border-inline-start-color: var(--bok-verified-ink); }
+.bok-rail-item[data-provenance-state="modelled"]   { border-inline-start-color: var(--bok-modelled-ink); }
+.bok-rail-item[data-provenance-state="unverified"] { border-inline-start-color: var(--bok-unverified-ink); }
+.bok-rail-value { font-size: 1.125rem; }
+.bok-rail-source { font-family: var(--bok-font-mono); font-size: 0.8125rem; overflow-wrap: anywhere; }
+.bok-rail-caveat { font-style: italic; }
+@media (max-width: 419.98px) {
+  [data-bok-rail] { width: 100%; border-inline-start: 0; }
+}
+@keyframes bok-rail-slide { from { transform: translateX(12px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes bok-rail-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* The four designed states. */
+.bok-empty { padding: calc(var(--bok-space) * 6); }
+.bok-empty-line { font-family: var(--bok-font-display); font-size: 1.125rem; margin: 0; }
+.bok-empty-skipped { color: var(--bok-neutral-9); }
+.bok-error { padding: calc(var(--bok-space) * 6); border-inline-start: 3px solid var(--bok-critical-ink); }
+.bok-error-title { font-family: var(--bok-font-display); font-size: 1.125rem; margin: 0; }
+.bok-partial { padding: calc(var(--bok-space) * 4); border: 1px dashed var(--bok-medium-ink); border-radius: var(--bok-radius-cell); }
+.bok-partial-label { color: var(--bok-medium-ink); font-weight: 600; margin: 0; }
+.bok-skeleton-head, .bok-skeleton-row {
+  height: var(--bok-density-row); margin-bottom: var(--bok-space);
+  background: var(--bok-neutral-3); border-radius: var(--bok-radius-cell);
+  animation: bok-pulse 1.6s ease-in-out infinite;
+}
+.bok-skeleton-head { background: var(--bok-neutral-4); }
+.bok-skeleton[data-shape="cards"] .bok-skeleton-row { height: calc(var(--bok-density-row) * 4); }
+.bok-skeleton[data-shape="figure"] .bok-skeleton-row { height: auto; aspect-ratio: 1280 / 900; }
+@keyframes bok-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+```
+
+`packages/bok-ui/src/css/print.css`:
+
+```css
+/* Standalone print sheet. Keyed on data attributes only, because its first consumer in the
+   programme is server-rendered HTML that never loads React. */
+@media print {
+  :root { --bok-paper: #fff; --bok-ink: #000; }
+  body {
+    background: #fff; color: #000; font-family: var(--bok-font-display);
+    print-color-adjust: exact; -webkit-print-color-adjust: exact;
+  }
+  [data-severity]::before { content: attr(data-severity-glyph) " "; font-family: var(--bok-font-ui); }
+  [data-bok-rail] {
+    display: block; position: static; width: auto; max-width: none; animation: none;
+    border-left: 1px solid #000; padding-left: 8pt; page-break-inside: avoid;
+  }
+  [data-bok-chrome] { display: none; }
+  table { border-collapse: collapse; }
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+  a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 8pt; }
+}
+```
+
+`packages/bok-ui/src/semantics.ts`:
+
+```ts
+// Severity, provenance state and run state are NEVER colour alone: every entry carries a glyph
+// and a text label, and two tokens -- the base (fill, border) and the -ink (text, glyph).
+
+export interface SemanticEntry {
+  readonly token: `--bok-${string}`;
+  readonly ink: `--bok-${string}-ink`;
+  readonly glyph: string;
+  readonly label: string;
+}
+
+export const SEVERITY = {
+  CRITICAL: { token: "--bok-critical", ink: "--bok-critical-ink", glyph: "◆", label: "Critical" },
+  HIGH: { token: "--bok-high", ink: "--bok-high-ink", glyph: "▲", label: "High" },
+  MEDIUM: { token: "--bok-medium", ink: "--bok-medium-ink", glyph: "■", label: "Medium" },
+  LOW: { token: "--bok-low", ink: "--bok-low-ink", glyph: "●", label: "Low" },
+  INFO: { token: "--bok-info", ink: "--bok-info-ink", glyph: "○", label: "Info" },
+} as const satisfies Record<string, SemanticEntry>;
+
+export const PROVENANCE_STATE = {
+  verified: { token: "--bok-verified", ink: "--bok-verified-ink", glyph: "✓", label: "Verified" },
+  modelled: { token: "--bok-modelled", ink: "--bok-modelled-ink", glyph: "~", label: "Modelled" },
+  unverified: { token: "--bok-unverified", ink: "--bok-unverified-ink", glyph: "?", label: "Unverified" },
+} as const satisfies Record<string, SemanticEntry>;
+
+export type RunState = "completed" | "healed" | "quarantined" | "failed" | "refused";
+
+/** The frozen five run states (selector-drift plan Task 3). Labels are lowercase because they
+ *  are read inline ("3 Sep · healed"). `healed` is the only user of drift indigo. */
+export const RUN_STATE = {
+  completed: { token: "--bok-verified", ink: "--bok-verified-ink", glyph: "✓", label: "completed" },
+  healed: { token: "--bok-accent-selector-drift", ink: "--bok-accent-selector-drift-ink", glyph: "↻", label: "healed" },
+  quarantined: { token: "--bok-medium", ink: "--bok-medium-ink", glyph: "⏸", label: "quarantined" },
+  failed: { token: "--bok-critical", ink: "--bok-critical-ink", glyph: "✕", label: "failed" },
+  refused: { token: "--bok-unverified", ink: "--bok-unverified-ink", glyph: "⊘", label: "refused" },
+} as const satisfies Record<RunState, SemanticEntry>;
+
+export type SeverityKey = keyof typeof SEVERITY;
+export type ProvenanceStateKey = keyof typeof PROVENANCE_STATE;
+```
+
+- [ ] **Step 6: Run them and make sure they pass**
+
+Run: `npx vitest run src/css`
+Expected: PASS, 14 tests (tokens 8, fonts 2, print 4).
+
+- [ ] **Step 7: Write the failing contrast-script test**
+
+```js
+// packages/bok-ui/scripts/check-contrast.test.mjs
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { audit, ratio } from "./check-contrast.mjs";
+
+const tokens = readFileSync(new URL("../src/css/tokens.css", import.meta.url), "utf8");
+
+describe("check-contrast", () => {
+  it("measures black on white as 21:1", () => {
+    expect(ratio([0, 0, 0], [1, 0, 0])).toBeCloseTo(21, 1);
+  });
+
+  it("passes every token in tokens.css, light and dark", () => {
+    const { failures, rows } = audit(tokens);
+    expect(failures).toEqual([]);
+    expect(rows.filter((r) => r.theme === "dark").length).toBeGreaterThan(20);
+  });
+
+  it("fails an -ink token that is too light to read", () => {
+    const bad = tokens.replace("--bok-critical-ink:  oklch(0.44 0.17 25)", "--bok-critical-ink:  oklch(0.80 0.05 25)");
+    const { failures } = audit(bad);
+    expect(failures.map((f) => f.name)).toContain("--bok-critical-ink");
+  });
+
+  it("exempts only the recorded fill-only accent, and only in light", () => {
+    const { rows } = audit(tokens);
+    const exempt = rows.filter((r) => r.exempt).map((r) => `${r.theme}:${r.name}`);
+    expect(exempt).toEqual(["light:--bok-accent-agent-perimeter"]);
+  });
+});
+```
+
+Run: `npx vitest run scripts`
+Expected: FAIL — `Failed to load url ./check-contrast.mjs`.
+
+- [ ] **Step 8: Write `scripts/check-contrast.mjs`, then run it**
+
+```js
+#!/usr/bin/env node
+// Measures every semantic and accent colour in src/css/tokens.css against the ground it is read
+// on (contract 6.1): -ink tokens >= 4.5:1, base tokens >= 3:1, --bok-neutral-9 (muted text) >= 4.5:1
+// in light. jsdom axe cannot see colour, so this runs BEFORE the axe tests, in CI and in `check`.
+// OKLCH -> OKLab -> linear sRGB (clipped to gamut) -> WCAG relative luminance.
+import { readFileSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+export const FILL_ONLY = new Map([
+  ["--bok-accent-agent-perimeter", "fixed by 00 section 8; a fill only, never text (design 8.5)"],
+]);
+const CHECKED = /^--bok-(critical|high|medium|low|info|verified|modelled|unverified|accent-(agent-perimeter|ledger-sense|selector-drift|ground-truth))(-ink)?$/;
+const TEXT_STEPS = new Set(["--bok-neutral-9"]);
+const OKLCH = /^oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\)$/;
+const VAR = /^var\((--[a-z0-9-]+)\)$/;
+
+function linearSrgb([L, C, H]) {
+  const h = (H * Math.PI) / 180;
+  const a = C * Math.cos(h);
+  const b = C * Math.sin(h);
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  const clip = (x) => Math.min(1, Math.max(0, x));
+  return [
+    clip(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+    clip(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+    clip(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s),
+  ];
+}
+
+function luminance(lch) {
+  const [r, g, b] = linearSrgb(lch);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** WCAG contrast ratio between two [L, C, H] colours. */
+export function ratio(fg, bg) {
+  const a = luminance(fg);
+  const b = luminance(bg);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+function declarations(css, selector) {
+  const start = css.indexOf(`${selector} {`);
+  if (start < 0) throw new Error(`tokens.css has no "${selector} {" block`);
+  const open = css.indexOf("{", start);
+  const body = css.slice(open + 1, css.indexOf("}", open));
+  const out = new Map();
+  for (const m of body.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) out.set(m[1], m[2].trim());
+  return out;
+}
+
+function resolve(name, map, depth = 0) {
+  if (depth > 8) throw new Error(`var() cycle at ${name}`);
+  const raw = map.get(name);
+  if (raw === undefined) throw new Error(`${name} is not defined`);
+  const v = VAR.exec(raw);
+  if (v) return resolve(v[1], map, depth + 1);
+  const o = OKLCH.exec(raw);
+  if (!o) throw new Error(`${name}: "${raw}" is not oklch(L C H)`);
+  return [Number(o[1]), Number(o[2]), Number(o[3])];
+}
+
+export function audit(css) {
+  const light = declarations(css, ":root");
+  const dark = new Map([...light, ...declarations(css, '[data-theme="dark"]')]);
+  const rows = [];
+  const failures = [];
+  for (const [theme, map] of [["light", light], ["dark", dark]]) {
+    const ground = resolve("--bok-paper", map);
+    for (const name of map.keys()) {
+      const textStep = theme === "light" && TEXT_STEPS.has(name);
+      if (!CHECKED.test(name) && !textStep) continue;
+      const r = ratio(resolve(name, map), ground);
+      const floor = name.endsWith("-ink") || textStep ? 4.5 : 3;
+      const exempt = theme === "light" && FILL_ONLY.has(name);
+      rows.push({ theme, name, ratio: r, floor, exempt });
+      if (r < floor && !exempt) failures.push({ theme, name, ratio: r, floor });
+    }
+  }
+  return { rows, failures };
+}
+
+function main() {
+  const css = readFileSync(fileURLToPath(new URL("../src/css/tokens.css", import.meta.url)), "utf8");
+  const { rows, failures } = audit(css);
+  for (const r of rows) {
+    const flag = r.exempt ? `exempt: ${FILL_ONLY.get(r.name)}` : r.ratio >= r.floor ? "ok" : "FAIL";
+    console.log(`${r.theme.padEnd(5)} ${r.name.padEnd(36)} ${r.ratio.toFixed(2).padStart(6)} >= ${r.floor}  ${flag}`);
+  }
+  if (failures.length > 0) {
+    console.error(`check-contrast: ${failures.length} token(s) under their floor`);
+    process.exit(1);
+  }
+  console.log(`check-contrast: ${rows.length} measurements, all at or above their floor`);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+```
+
+Run: `npx vitest run scripts && npm run contrast`
+Expected: PASS, 4 tests; then one line per measurement and `check-contrast: N measurements, all at or above their floor`, exit 0.
+
+- [ ] **Step 9: Commit the token layer**
+
+```bash
+cd "D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-ui-minimal"
+git add packages/bok-ui/package.json packages/bok-ui/package-lock.json packages/bok-ui/tsconfig.json \
+        packages/bok-ui/tsup.config.ts packages/bok-ui/vitest.config.ts packages/bok-ui/vitest.setup.ts \
+        packages/bok-ui/scripts packages/bok-ui/src/css packages/bok-ui/src/semantics.ts
+git commit -s -m "feat(ui): bok-ui-minimal token layer, self-hosted fonts, print sheet and contrast gate"
+```
+
+- [ ] **Step 10: Write the failing `Claim` + rail tests**
+
+The fixture mirrors `bok_core.provenance.render.RailPayload` for a `DETERMINISTIC` claim with a
+`DomSource` — exactly what plan Task 27 produces for every extracted value. `confidence` is `null`
+by invariant I3.
+
+```json
+// packages/bok-ui/src/fixtures/dom-claim.json
+{
+  "root": {
+    "value": "AB12345678",
+    "method": "DETERMINISTIC",
+    "derivation": null,
+    "source_kind": "dom",
+    "source": {
+      "kind": "dom",
+      "snapshot_id": "3f9a1c2e7b4d5a6f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1f",
+      "selector": "table#results tbody tr:nth-child(1) td.claim",
+      "rung": 3
+    },
+    "confidence": null,
+    "calibration_state": null,
+    "calibration_basis": null,
+    "renders_as_fact": true,
+    "observed_at": "2026-09-26T04:12:00Z",
+    "caveat": null,
+    "parents": []
+  },
+  "depth": 1,
+  "inherited_caveats": []
+}
+```
+
+```tsx
+// packages/bok-ui/src/ProvenanceRail.test.tsx
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { Component, type ReactNode } from "react";
+import { describe, expect, it, vi } from "vitest";
+import { Claim } from "./Claim";
+import domFixture from "./fixtures/dom-claim.json";
+import { ProvenanceRailProvider } from "./ProvenanceRail";
+import type { RailPayload } from "./types";
+
+const dom = domFixture as RailPayload;
+const SNAP = dom.root.source.snapshot_id as string;
+const second: RailPayload = { ...dom, root: { ...dom.root, value: "CD87654321" } };
+const modelled: RailPayload = {
+  depth: 1,
+  inherited_caveats: [],
+  root: {
+    ...dom.root,
+    value: "0.94",
+    method: "MODEL",
+    source_kind: "model",
+    source: { kind: "model", ledger_call_id: "call-1" },
+    confidence: 0.94,
+    calibration_state: "UNCALIBRATED",
+    calibration_basis: "no reliability curve yet",
+    renders_as_fact: false,
+  },
+};
+const components = readFileSync(new URL("./css/components.css", import.meta.url), "utf8");
+const tokens = readFileSync(new URL("./css/tokens.css", import.meta.url), "utf8");
+
+const withRail = (ui: ReactNode) =>
+  render(<ProvenanceRailProvider hrefForSnapshot={(id) => `/evidence/${id}`}>{ui}</ProvenanceRailProvider>);
+const rails = () => screen.queryAllByRole("complementary", { name: /provenance/i });
+const trigger = (value: string) => screen.getByRole("button", { name: new RegExp(value) });
+
+class Catch extends Component<{ children: ReactNode }, { message: string | null }> {
+  override state: { message: string | null } = { message: null };
+  static getDerivedStateFromError(e: Error) {
+    return { message: e.message };
+  }
+  override render() {
+    return this.state.message ?? this.props.children;
+  }
+}
+
+describe("Claim + ProvenanceRail", () => {
+  it("one rail: opening a second Claim replaces the payload, never adds a panel", async () => {
+    withRail(<><Claim payload={dom} /><Claim payload={second} /></>);
+    await userEvent.click(trigger("AB12345678"));
+    expect(rails()).toHaveLength(1);
+    await userEvent.click(trigger("CD87654321"));
+    expect(rails()).toHaveLength(1);
+    expect(rails()[0]).toHaveTextContent("CD87654321");
+    expect(rails()[0]).not.toHaveTextContent("AB12345678");
+  });
+
+  it("focus returns to the originating Claim on Escape", async () => {
+    withRail(<><Claim payload={dom} /><Claim payload={second} /></>);
+    const origin = trigger("CD87654321");
+    await userEvent.click(origin);
+    expect(screen.getByRole("heading", { name: "Provenance" })).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+    expect(rails()).toHaveLength(0);
+    expect(origin).toHaveFocus();
+  });
+
+  it("the trigger announces the rail it controls", async () => {
+    withRail(<Claim payload={dom} />);
+    const t = trigger("AB12345678");
+    expect(t).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(t);
+    expect(t).toHaveAttribute("aria-expanded", "true");
+    expect(document.getElementById(t.getAttribute("aria-controls") ?? "")).toBe(rails()[0]);
+  });
+
+  it("opens on Ctrl+. (or Cmd+.) while the figure is focused", async () => {
+    withRail(<Claim payload={dom} />);
+    trigger("AB12345678").focus();
+    await userEvent.keyboard("{Control>}.{/Control}");
+    expect(rails()).toHaveLength(1);
+  });
+
+  it("a DETERMINISTIC claim renders no confidence row", async () => {
+    withRail(<Claim payload={dom} />);
+    await userEvent.click(trigger("AB12345678"));
+    const rail = rails()[0]!;
+    expect(within(rail).getByTestId("provenance-marker")).toHaveTextContent("DETERMINISTIC");
+    expect(within(rail).queryByTestId("confidence")).toBeNull();
+    expect(rail).not.toHaveTextContent(/confidence|n\/a/i);
+  });
+
+  it("a MODEL claim that carries a confidence renders it, labelled uncalibrated", async () => {
+    withRail(<Claim payload={modelled} />);
+    await userEvent.click(trigger("0.94"));
+    expect(within(rails()[0]!).getByTestId("confidence")).toHaveTextContent(
+      "confidence 0.94 · uncalibrated — no reliability curve yet",
+    );
+  });
+
+  it("a DomSource reads rung · snapshot · selector and links the snapshot through the provider", async () => {
+    withRail(<Claim payload={dom} />);
+    await userEvent.click(trigger("AB12345678"));
+    const src = within(rails()[0]!).getByTestId("source");
+    expect(src).toHaveTextContent(
+      `rung 3 · snapshot ${SNAP.slice(0, 12)} · table#results tbody tr:nth-child(1) td.claim`,
+    );
+    expect(within(src).getByRole("link")).toHaveAttribute("href", `/evidence/${SNAP}`);
+  });
+
+  it("the rail is full width below 420px, with a visible close button", async () => {
+    expect(components).toMatch(/@media \(max-width: 419\.98px\)\s*\{\s*\[data-bok-rail\]\s*\{[^}]*width:\s*100%/);
+    withRail(<Claim payload={dom} />);
+    await userEvent.click(trigger("AB12345678"));
+    expect(within(rails()[0]!).getByRole("button", { name: "Close provenance" })).toBeVisible();
+  });
+
+  it("never encodes provenance state in colour alone", async () => {
+    withRail(<Claim payload={dom} />);
+    const t = trigger("AB12345678");
+    expect(t).toHaveAttribute("data-provenance-state", "verified");
+    expect(t).toHaveTextContent("✓");
+    expect(t).toHaveTextContent("verified");
+    await userEvent.click(t);
+    const marker = within(rails()[0]!).getByTestId("provenance-marker");
+    expect(marker).toHaveAttribute("data-glyph", "✓");
+    expect(marker).toHaveTextContent("Verified");
+  });
+
+  it("a Claim outside the provider fails loudly instead of rendering its own rail", () => {
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    render(<Catch><Claim payload={dom} /></Catch>);
+    expect(screen.getByText(/inside <ProvenanceRailProvider>/)).toBeInTheDocument();
+    quiet.mockRestore();
+  });
+
+  it("slides in 180ms, staggers 30ms, and all of it is off under reduced motion", () => {
+    expect(components).toMatch(/\.bok-rail\s*\{[^}]*animation:\s*bok-rail-slide 180ms/);
+    expect(components).toMatch(/animation-delay:\s*calc\(var\(--bok-rail-index, 0\) \* 30ms\)/);
+    expect(tokens).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*animation-duration:\s*0s !important/);
+  });
+});
+```
+
+Run: `npx vitest run src/ProvenanceRail.test.tsx`
+Expected: FAIL — `Failed to resolve import "./Claim"`.
+
+- [ ] **Step 11: Write `types.ts`, the rail context, `ProvenanceRail.tsx` and `Claim.tsx`**
+
+```ts
+// packages/bok-ui/src/types.ts
+// Mirrors bok_core.provenance.render.RailPayload (contract 2.4). snake_case on purpose: it
+// crosses a Python boundary, and renaming here would hide a drift instead of surfacing it.
+
+export type Method = "DETERMINISTIC" | "MODEL" | "HUMAN" | "DERIVED";
+export type Derivation = "SCHEMA" | "DESCRIPTION" | "PROBE" | "ARTIFACT";
+export type CalibrationState = "UNCALIBRATED" | "CALIBRATED";
+
+export interface RailNode {
+  /** A Decimal arrives as a string (invariant I5). Never coerce it to a number. */
+  readonly value: string | number | boolean | null;
+  readonly method: Method;
+  readonly derivation: Derivation | null;
+  readonly source_kind: string;
+  readonly source: Readonly<Record<string, unknown>>;
+  readonly confidence: number | null;
+  readonly calibration_state: CalibrationState | null;
+  readonly calibration_basis: string | null;
+  readonly renders_as_fact: boolean;
+  readonly observed_at: string;
+  readonly caveat: string | null;
+  readonly parents: readonly RailNode[];
+}
+
+export interface RailPayload {
+  readonly root: RailNode;
+  readonly depth: number;
+  readonly inherited_caveats: readonly string[];
+}
+
+/** verified: DETERMINISTIC/HUMAN, or DERIVED only from such claims. modelled: a calibrated MODEL
+ *  claim is involved. unverified: renders_as_fact is false (invariants I2, I7). */
+export function provenanceStateOf(node: RailNode): "verified" | "modelled" | "unverified" {
+  if (!node.renders_as_fact) return "unverified";
+  return involvesModel(node, new Set()) ? "modelled" : "verified";
+}
+
+function involvesModel(node: RailNode, seen: Set<RailNode>): boolean {
+  if (seen.has(node)) return false;
+  seen.add(node);
+  if (node.method === "MODEL") return true;
+  return node.parents.some((p) => involvesModel(p, seen));
+}
+
+export interface DomSourceFields {
+  readonly snapshot_id: string;
+  readonly selector: string;
+  readonly rung: number;
+}
+
+/** DomSource(snapshot_id, selector, rung), contract 2.2 -- selector-drift's source variant. */
+export function domSourceOf(node: RailNode): DomSourceFields | null {
+  if (node.source_kind !== "dom") return null;
+  const { snapshot_id, selector, rung } = node.source;
+  if (typeof snapshot_id !== "string" || typeof selector !== "string" || typeof rung !== "number") return null;
+  return { snapshot_id, selector, rung };
+}
+```
+
+```ts
+// packages/bok-ui/src/rail-context.ts
+import { createContext, useContext } from "react";
+import type { RailPayload } from "./types";
+
+export interface RailApi {
+  readonly railId: string;
+  readonly openClaimId: string | null;
+  open(payload: RailPayload, trigger: HTMLElement, claimId: string): void;
+}
+
+export const RailContext = createContext<RailApi | null>(null);
+
+export function useRail(): RailApi {
+  const api = useContext(RailContext);
+  if (api === null) {
+    throw new Error(
+      "<Claim> must be rendered inside <ProvenanceRailProvider>: there is one rail per app, never one per claim (contract 6.2).",
+    );
+  }
+  return api;
+}
+```
+
+```tsx
+// packages/bok-ui/src/ProvenanceRail.tsx
+import {
+  useCallback, useEffect, useId, useMemo, useRef, useState,
+  type CSSProperties, type ReactNode,
+} from "react";
+import { RailContext, type RailApi } from "./rail-context";
+import { PROVENANCE_STATE } from "./semantics";
+import { domSourceOf, provenanceStateOf, type RailNode, type RailPayload } from "./types";
+
+export interface ProvenanceRailProviderProps {
+  /** bok-ui knows nothing about the consumer's routes; the consumer maps a snapshot id to a URL. */
+  hrefForSnapshot: (snapshotId: string) => string;
+  children: ReactNode;
+}
+
+/** Exactly one per app. Owns the single rail; every <Claim> asks it to open. */
+export function ProvenanceRailProvider({ hrefForSnapshot, children }: ProvenanceRailProviderProps) {
+  const railId = useId();
+  const [current, setCurrent] = useState<{ payload: RailPayload; claimId: string } | null>(null);
+  const trigger = useRef<HTMLElement | null>(null);
+
+  const open = useCallback((payload: RailPayload, el: HTMLElement, claimId: string) => {
+    trigger.current = el;
+    setCurrent({ payload, claimId });
+  }, []);
+
+  const close = useCallback(() => {
+    setCurrent(null);
+    const el = trigger.current;
+    trigger.current = null;
+    if (el?.isConnected) el.focus();
+  }, []);
+
+  const api = useMemo<RailApi>(
+    () => ({ railId, openClaimId: current?.claimId ?? null, open }),
+    [railId, current, open],
+  );
+
+  return (
+    <RailContext.Provider value={api}>
+      {children}
+      {current !== null && (
+        <ProvenanceRail id={railId} payload={current.payload} onClose={close} hrefForSnapshot={hrefForSnapshot} />
+      )}
+    </RailContext.Provider>
+  );
+}
+
+export interface ProvenanceRailProps {
+  id: string;
+  payload: RailPayload;
+  onClose: () => void;
+  hrefForSnapshot: (snapshotId: string) => string;
+}
+
+function instant(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : `${d.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+function sourceText(node: RailNode): string {
+  const f = (k: string): string => String(node.source[k] ?? "");
+  switch (node.source_kind) {
+    case "file": return `${f("path")}:${f("line")}`;
+    case "document": return `${f("path")} · page ${f("page")}`;
+    case "url": return `${f("url")} · retrieved ${f("retrieved_at").slice(0, 10)}`;
+    case "model": return `model call ${f("ledger_call_id")}`;
+    case "human": return `${f("who")} · ${f("at").slice(0, 10)}`;
+    case "rule": return `${f("authority")} ${f("citation")} · confirmed by ${f("confirmed_by")}`;
+    default: return node.source_kind;
+  }
+}
+
+function RailItem({ node, index, hrefForSnapshot }: {
+  node: RailNode; index: number; hrefForSnapshot: (id: string) => string;
+}) {
+  const state = provenanceStateOf(node);
+  const entry = PROVENANCE_STATE[state];
+  const dom = domSourceOf(node);
+  return (
+    <li className="bok-rail-item" data-provenance-state={state} style={{ "--bok-rail-index": index } as CSSProperties}>
+      <div className="bok-rail-value" data-bok-numeric>{String(node.value)}</div>
+      <div className="bok-rail-method" data-testid="provenance-marker" data-glyph={entry.glyph}>
+        <span aria-hidden="true">{entry.glyph}</span> {entry.label} · {node.method}
+        {node.derivation !== null ? ` (${node.derivation})` : ""}
+      </div>
+      <div className="bok-rail-source" data-testid="source">
+        {dom !== null ? (
+          <>
+            rung {dom.rung} · snapshot{" "}
+            <a href={hrefForSnapshot(dom.snapshot_id)}>{dom.snapshot_id.slice(0, 12)}</a>
+            {" · "}
+            <code>{dom.selector}</code>
+          </>
+        ) : (
+          sourceText(node)
+        )}
+      </div>
+      {node.confidence !== null && (
+        <div className="bok-rail-confidence" data-testid="confidence">
+          confidence {node.confidence.toFixed(2)}
+          {node.calibration_state === "UNCALIBRATED"
+            ? ` · uncalibrated — ${node.calibration_basis ?? "no reliability curve exists"}`
+            : ""}
+        </div>
+      )}
+      <div className="bok-rail-time"><time dateTime={node.observed_at}>{instant(node.observed_at)}</time></div>
+      {node.caveat !== null && <div className="bok-rail-caveat">{node.caveat}</div>}
+      {node.parents.length > 0 && (
+        <ol className="bok-rail-chain">
+          {node.parents.map((p, i) => (
+            <RailItem key={i} node={p} index={index + i + 1} hrefForSnapshot={hrefForSnapshot} />
+          ))}
+        </ol>
+      )}
+    </li>
+  );
+}
+
+/** The chain, top to bottom. Confidence renders ONLY when present: for DETERMINISTIC it is
+ *  absent, not "n/a" (invariant I3). */
+export function ProvenanceRail({ id, payload, onClose, hrefForSnapshot }: ProvenanceRailProps) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  const headingId = `${id}-heading`;
+
+  useEffect(() => {
+    heading.current?.focus();
+  }, [payload]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <aside id={id} role="complementary" aria-labelledby={headingId} className="bok-rail" data-bok-rail data-testid="provenance-rail">
+      <header className="bok-rail-head">
+        <h2 id={headingId} ref={heading} tabIndex={-1}>Provenance</h2>
+        <button type="button" className="bok-rail-close" data-bok-chrome onClick={onClose}>
+          Close<span className="bok-visually-hidden"> provenance</span>
+        </button>
+      </header>
+      <ol className="bok-rail-chain">
+        <RailItem node={payload.root} index={0} hrefForSnapshot={hrefForSnapshot} />
+      </ol>
+      {payload.inherited_caveats.length > 0 && (
+        <section aria-label="Inherited caveats" className="bok-rail-caveats">
+          <h3>Caveats</h3>
+          <ul>{payload.inherited_caveats.map((c) => <li key={c}>{c}</li>)}</ul>
+        </section>
+      )}
+    </aside>
+  );
+}
+```
+
+```tsx
+// packages/bok-ui/src/Claim.tsx
+import { useId, type ReactNode } from "react";
+import { useRail } from "./rail-context";
+import { PROVENANCE_STATE } from "./semantics";
+import { provenanceStateOf, type RailPayload } from "./types";
+
+export interface ClaimProps {
+  payload: RailPayload;
+  /** What to show; defaults to the raw value. Formatting belongs to the consumer. */
+  children?: ReactNode;
+}
+
+/** A figure that carries its evidence. It never renders a rail; it asks the provider for one. */
+export function Claim({ payload, children }: ClaimProps) {
+  const rail = useRail();
+  const claimId = useId();
+  const state = provenanceStateOf(payload.root);
+  const entry = PROVENANCE_STATE[state];
+  return (
+    <button
+      type="button"
+      className="bok-claim"
+      data-provenance-state={state}
+      aria-expanded={rail.openClaimId === claimId}
+      aria-controls={rail.railId}
+      onClick={(e) => rail.open(payload, e.currentTarget, claimId)}
+      onKeyDown={(e) => {
+        if (e.key === "." && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          rail.open(payload, e.currentTarget, claimId);
+        }
+      }}
+    >
+      <span className="bok-claim-value" data-bok-numeric>{children ?? String(payload.root.value)}</span>
+      <span className="bok-claim-glyph" aria-hidden="true">{entry.glyph}</span>
+      <span className="bok-visually-hidden">, {entry.label.toLowerCase()}</span>
+    </button>
+  );
+}
+```
+
+Run: `npx vitest run src/ProvenanceRail.test.tsx`
+Expected: PASS, 11 tests.
+
+- [ ] **Step 12: Write the failing state tests**
+
+```tsx
+// packages/bok-ui/src/states.test.tsx
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { EmptyState, type EmptyScope } from "./EmptyState";
+import { ErrorState } from "./ErrorState";
+import { PartialFailureState } from "./PartialFailureState";
+import { Skeleton } from "./Skeleton";
+
+describe("designed states", () => {
+  it("EmptyState renders a denominator, never a celebration", () => {
+    render(<EmptyState scope={{ noun: "findings", measuredNoun: "checks", measured: 26, skipped: 3, skippedReason: "no scope file attached" }} />);
+    expect(screen.getByText(/No findings\./)).toHaveTextContent("No findings. 26 checks ran.");
+    expect(screen.getByText(/skipped/)).toHaveTextContent("3 skipped — no scope file attached.");
+    expect(document.body).not.toHaveTextContent(/secure|all clear|congrat|great job/i);
+  });
+
+  it("EmptyState words selector-drift's quarantine exactly as the spec requires", () => {
+    render(<EmptyState scope={{ noun: "quarantined runs", measuredNoun: "runs", measured: 41, skipped: 0, headline: "Nothing quarantined.", measuredVerb: "passed validation" }} />);
+    expect(screen.getByText(/Nothing quarantined/)).toHaveTextContent("Nothing quarantined. 41 runs passed validation.");
+    expect(screen.queryByText(/skipped/)).toBeNull();
+  });
+
+  it("EmptyState refuses to render without measuredNoun -- a type error and a runtime assertion", () => {
+    // @ts-expect-error measuredNoun is required: a shared component must not carry one consumer's noun
+    const missing: EmptyScope = { noun: "runs", measured: 3 };
+    expect(() => EmptyState({ scope: missing })).toThrow(/measuredNoun is required/);
+    expect(() => EmptyState({ scope: { noun: "runs", measuredNoun: "  ", measured: 3 } })).toThrow(/measuredNoun/);
+  });
+
+  it("ErrorState states what happened and offers a retry, without apologising", async () => {
+    const retry = vi.fn();
+    render(<ErrorState title="The run list could not load" detail="The API returned 503." retry={retry} />);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("The run list could not load");
+    expect(alert).toHaveTextContent("The API returned 503.");
+    expect(alert.textContent).not.toMatch(/sorry|apolog|oops/i);
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("PartialFailureState says what loaded, what did not, and why", () => {
+    render(<PartialFailureState succeeded={["after capture", "verdicts"]} failed={[{ what: "before capture", why: "evidence corrupted (hash mismatch)" }]} />);
+    const region = screen.getByRole("region", { name: "Partially available" });
+    expect(region).toHaveTextContent("◐ Partially available");
+    expect(region).toHaveTextContent("Loaded: after capture, verdicts.");
+    expect(region).toHaveTextContent("before capture did not load — evidence corrupted (hash mismatch)");
+  });
+
+  it("Skeleton is a shaped placeholder, never a spinner", () => {
+    render(<Skeleton shape="table" rows={3} />);
+    const status = screen.getByRole("status", { name: "Loading" });
+    expect(status).toHaveAttribute("aria-busy", "true");
+    expect(status).toHaveAttribute("data-shape", "table");
+    expect(screen.getAllByTestId("skeleton-row")).toHaveLength(3);
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+});
+```
+
+Run: `npx vitest run src/states.test.tsx`
+Expected: FAIL — `Failed to resolve import "./EmptyState"`.
+
+- [ ] **Step 13: Write the four states**
+
+```tsx
+// packages/bok-ui/src/EmptyState.tsx
+export interface EmptyScope {
+  /** What is absent: "findings", "quarantined runs". */
+  noun: string;
+  /** What was examined: "checks", "runs". REQUIRED -- the denominator is the point. */
+  measuredNoun: string;
+  measured: number;
+  skipped?: number;
+  skippedReason?: string;
+  /** Replaces "No {noun}." -- e.g. "Nothing quarantined." Proposed contract addition (34A-2). */
+  headline?: string;
+  /** Replaces "ran" -- e.g. "passed validation". Proposed contract addition (34A-2). */
+  measuredVerb?: string;
+}
+
+export interface EmptyStateProps {
+  scope: EmptyScope;
+}
+
+/** A denominator, never a celebration, never an illustration. */
+export function EmptyState({ scope }: EmptyStateProps) {
+  if (typeof scope.measuredNoun !== "string" || scope.measuredNoun.trim() === "") {
+    throw new Error("EmptyState: scope.measuredNoun is required -- an empty state states what was measured (contract 6.2).");
+  }
+  const { noun, measuredNoun, measured, skipped = 0, skippedReason, headline, measuredVerb = "ran" } = scope;
+  return (
+    <div className="bok-empty" data-bok-empty>
+      <p className="bok-empty-line">
+        {headline ?? `No ${noun}.`} <span data-bok-numeric>{measured}</span> {measuredNoun} {measuredVerb}.
+      </p>
+      {skipped > 0 && (
+        <p className="bok-empty-skipped">
+          <span data-bok-numeric>{skipped}</span> skipped{skippedReason ? ` — ${skippedReason}` : ""}.
+        </p>
+      )}
+    </div>
+  );
+}
+```
+
+```tsx
+// packages/bok-ui/src/ErrorState.tsx
+export interface ErrorStateProps {
+  /** What happened, in the product's voice. For an API failure, the problem+json `title`. */
+  title: string;
+  /** The problem+json `detail`, when there is one. */
+  detail?: string;
+  /** A function prop: render ErrorState from a client component when you pass one. */
+  retry?: () => void;
+}
+
+export function ErrorState({ title, detail, retry }: ErrorStateProps) {
+  return (
+    <div role="alert" className="bok-error" data-bok-error>
+      <p className="bok-error-title">{title}</p>
+      {detail !== undefined && <p className="bok-error-detail">{detail}</p>}
+      {retry !== undefined && (
+        <button type="button" className="bok-error-retry" data-bok-chrome onClick={retry}>Try again</button>
+      )}
+    </div>
+  );
+}
+```
+
+```tsx
+// packages/bok-ui/src/PartialFailureState.tsx
+export interface PartialFailure {
+  what: string;
+  why: string;
+}
+
+export interface PartialFailureStateProps {
+  succeeded: readonly string[];
+  failed: readonly PartialFailure[];
+}
+
+/** The state a degraded product lives in most: what loaded, what did not, and why. */
+export function PartialFailureState({ succeeded, failed }: PartialFailureStateProps) {
+  return (
+    <section className="bok-partial" data-bok-partial aria-label="Partially available">
+      <p className="bok-partial-label"><span aria-hidden="true">◐</span> Partially available</p>
+      {succeeded.length > 0 ? <p>Loaded: {succeeded.join(", ")}.</p> : <p>Nothing else in this panel loaded.</p>}
+      <ul>
+        {failed.map((f) => (
+          <li key={f.what}><strong>{f.what}</strong> did not load — {f.why}</li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+```
+
+```tsx
+// packages/bok-ui/src/Skeleton.tsx
+export type SkeletonShape = "table" | "cards" | "text" | "figure";
+
+export interface SkeletonProps {
+  shape: SkeletonShape;
+  rows?: number;
+}
+
+/** The shape of what is arriving. Never a spinner. */
+export function Skeleton({ shape, rows = 4 }: SkeletonProps) {
+  const n = shape === "figure" ? 1 : Math.max(1, rows);
+  return (
+    <div className="bok-skeleton" data-shape={shape} role="status" aria-busy="true" aria-live="polite" aria-label="Loading">
+      {shape === "table" && <div className="bok-skeleton-head" aria-hidden="true" />}
+      {Array.from({ length: n }, (_, i) => (
+        <div key={i} className="bok-skeleton-row" data-testid="skeleton-row" aria-hidden="true" />
+      ))}
+    </div>
+  );
+}
+```
+
+Run: `npx vitest run src/states.test.tsx`
+Expected: PASS, 6 tests.
+
+- [ ] **Step 14: Write the failing axe test for this half, light and dark, both densities**
+
+```ts
+// packages/bok-ui/src/test/axe.ts
+import axe from "axe-core";
+
+export const MODES = [
+  { theme: "light", density: "compact" },
+  { theme: "light", density: "comfortable" },
+  { theme: "dark", density: "compact" },
+  { theme: "dark", density: "comfortable" },
+] as const;
+
+/** jsdom computes no colour, so axe's color-contrast rule cannot run here; it is disabled
+ *  explicitly rather than silently "incomplete". scripts/check-contrast.mjs measures every token. */
+export async function seriousOrCritical(root: Element): Promise<string[]> {
+  const result = await axe.run(root, {
+    resultTypes: ["violations"],
+    rules: { "color-contrast": { enabled: false } },
+  });
+  return result.violations
+    .filter((v) => v.impact === "serious" || v.impact === "critical")
+    .map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`);
+}
+```
+
+```tsx
+// packages/bok-ui/src/a11y.test.tsx
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { ReactElement } from "react";
+import { describe, expect, it } from "vitest";
+import { Claim } from "./Claim";
+import { EmptyState } from "./EmptyState";
+import { ErrorState } from "./ErrorState";
+import domFixture from "./fixtures/dom-claim.json";
+import { PartialFailureState } from "./PartialFailureState";
+import { ProvenanceRailProvider } from "./ProvenanceRail";
+import { Skeleton } from "./Skeleton";
+import { MODES, seriousOrCritical } from "./test/axe";
+import type { RailPayload } from "./types";
+
+const dom = domFixture as RailPayload;
+
+type Case = [name: string, ui: () => ReactElement, interact?: () => Promise<void>];
+
+const CASES: Case[] = [
+  [
+    "Claim with the rail open",
+    () => (
+      <ProvenanceRailProvider hrefForSnapshot={(id) => `/e/${id}`}>
+        <p>Claim number <Claim payload={dom} /></p>
+      </ProvenanceRailProvider>
+    ),
+    async () => { await userEvent.click(screen.getByRole("button", { name: /AB12345678/ })); },
+  ],
+  ["EmptyState", () => <EmptyState scope={{ noun: "quarantined runs", measuredNoun: "runs", measured: 41, headline: "Nothing quarantined.", measuredVerb: "passed validation" }} />],
+  ["ErrorState", () => <ErrorState title="The run list could not load" detail="The API returned 503." retry={() => undefined} />],
+  ["PartialFailureState", () => <PartialFailureState succeeded={["verdicts"]} failed={[{ what: "before capture", why: "not captured" }]} />],
+  ["Skeleton", () => <Skeleton shape="table" rows={3} />],
+];
+
+describe.each(MODES)("axe, $theme theme, $density density", ({ theme, density }) => {
+  it.each(CASES)("%s: zero serious or critical violations", async (_name, ui, interact) => {
+    render(<div data-theme={theme} data-density={density}>{ui()}</div>);
+    if (interact) await interact();
+    expect(await seriousOrCritical(document.body)).toEqual([]);
+  });
+});
+```
+
+Run: `npx vitest run src/a11y.test.tsx`
+Expected: PASS, 20 tests (5 cases × 4 modes). This is the one test in the task that is written
+after its components: it guards the components against a11y regressions rather than driving their
+shape, and a failure here names the rule and the node.
+
+- [ ] **Step 15: Run the whole half, then commit**
+
+Run: `npm run typecheck && npm run contrast && npx vitest run`
+Expected: `tsc` exits 0; contrast exits 0; PASS, 55 tests (14 css + 4 contrast + 11 rail + 6 states + 20 axe).
+
+```bash
+cd "D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-ui-minimal"
+git add packages/bok-ui/src
+git commit -s -m "feat(ui): Claim, single-rail provider and the four designed states (bok-ui-minimal)"
+```
+
+---
+
+### Task 34A-2: The minimal `bok-ui` slice, part 2: `SeverityBadge`, `RunTimeline`, `DiffView`, `EvidencePane` + adapters, build, and the contract proposal
+
+**Where:** the same worktree and package as 34A-1. Commands run from
+`D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-ui-minimal/packages/bok-ui`.
+
+**Why these four (slice spec §3).** `RunTimeline`, word-level `DiffView` and the DOM `EvidencePane`
+adapter are contract §6.3 components scheduled for programme week 13; this project needs them at its
+build week 7, so they ship **early**, with the props pinned in slice spec §4.3–§4.5 so they cannot
+drift before the contract is amended. `SeverityBadge` is §6.2 and renders the quality findings.
+`TextAdapter` ships beside `DomAdapter` so the adapter seam is proven by two implementations, not one.
+
+**Three rules the components enforce structurally, not by review.**
+- Every run state is token colour + glyph + text label (`✓ completed`, `↻ healed`, `⏸ quarantined`,
+  `✕ failed`, `⊘ refused`). **`healed` is the only rule in the package that paints drift indigo**
+  besides the evidence outline, and a test walks `components.css` to keep it that way.
+- A day in the range with no run renders an **empty tick**, so a missed run is a visible gap (design
+  §9.2: missed runs are published, not hidden).
+- `DomAdapter` renders captured HTML **as escaped text only**. The HTML is a third-party page's markup;
+  the adapter has no code path that parses it, and a test greps its own source to keep it so.
+
+**Files** (under `backoffice-kit/.worktrees/bok-ui-minimal/`):
+- Create: `packages/bok-ui/src/SeverityBadge.tsx`, `src/RunTimeline.tsx`, `src/DiffView.tsx`, `src/EvidencePane.tsx`, `src/adapters/types.ts`, `src/adapters/text.tsx`, `src/adapters/dom.tsx`, `src/index.ts`, `src/client.ts`
+- Create: `packages/bok-ui/scripts/build-css.mjs`, `scripts/smoke-dist.mjs`
+- Modify: `packages/bok-ui/src/css/components.css` (append), `src/a11y.test.tsx` (replace)
+- Test: `packages/bok-ui/src/SeverityBadge.test.tsx`, `src/RunTimeline.test.tsx`, `src/DiffView.test.tsx`, `src/EvidencePane.test.tsx`
+- Create **in selector-drift** (draft only): `docs/proposals/interface-contract-bok-ui-early.md`
+
+**Interfaces:**
+- Consumes: `SEVERITY`, `RUN_STATE`, `RunState` (34A-1 `semantics.ts`); tokens from 34A-1.
+- Produces:
+  - `<SeverityBadge severity={SeverityKey} />` — renders `data-severity`, `data-severity-glyph`, glyph and label.
+  - `RunTimelineRun {id: string; at: string /* ISO date or instant */; state: RunState; label: string}`; `<RunTimeline runs={RunTimelineRun[]} range={{from: string; to: string}} hrefFor={(id: string) => string} />` from `bok-ui/client`. Chips are `a[data-run-state]`; empty days are `li[data-empty-day="YYYY-MM-DD"]`; the track is `ol[data-bok-timeline]` named `Runs, {from} to {to}`.
+  - `DiffSpan {kind: "add" | "remove" | "same"; text: string}`; `<DiffView spans={DiffSpan[]} />`.
+  - `OutlineState = "idle" | "drawing" | "drawn"`; `ContentAdapter<TSource, TRange> {kind; render(source, ranges, {outlineState})}`; `<EvidencePane adapter source ranges outlineState? />`; `DomEvidenceSource {screenshotUrl; alt; viewport: readonly [number, number]; html?}`; `DomRange {id; label; bbox: {x; y; width; height}}`; `DomAdapter`; `TextRange {id?; label?; start; end}`; `TextAdapter`. Outline rects carry `data-bok-outline`; the figure carries `data-outline-state`.
+  - Package entries: `bok-ui` (server-safe: `EmptyState`, `ErrorState`, `PartialFailureState`, `Skeleton`, `SeverityBadge`, `DiffView`, `EvidencePane`, `DomAdapter`, `TextAdapter`, `SEVERITY`, `PROVENANCE_STATE`, `RUN_STATE`, `provenanceStateOf`, `domSourceOf`, and every type) and `bok-ui/client` (`Claim`, `ProvenanceRailProvider`, `ProvenanceRail`, `RunTimeline`); `bok-ui/tokens.css`; `bok-ui/print.css`.
+
+- [ ] **Step 1: Write the failing `SeverityBadge` test**
+
+```tsx
+// packages/bok-ui/src/SeverityBadge.test.tsx
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { SEVERITY, type SeverityKey } from "./semantics";
+import { SeverityBadge } from "./SeverityBadge";
+
+describe("SeverityBadge", () => {
+  it.each(Object.keys(SEVERITY) as SeverityKey[])("renders %s with glyph AND text label", (key) => {
+    render(<SeverityBadge severity={key} />);
+    const badge = screen.getByText(SEVERITY[key].label).closest("[data-severity]");
+    expect(badge).toHaveAttribute("data-severity", key);
+    expect(badge).toHaveAttribute("data-severity-glyph", SEVERITY[key].glyph);
+    expect(badge).toHaveTextContent(`${SEVERITY[key].glyph} ${SEVERITY[key].label}`);
+  });
+
+  it("reads its text colour from the -ink token, never the fill token", () => {
+    render(<SeverityBadge severity="MEDIUM" />);
+    const badge = screen.getByText("Medium").closest("[data-severity]") as HTMLElement;
+    expect(badge.style.getPropertyValue("--bok-badge-ink")).toBe("var(--bok-medium-ink)");
+  });
+});
+```
+
+Run: `npx vitest run src/SeverityBadge.test.tsx`
+Expected: FAIL — `Failed to resolve import "./SeverityBadge"`.
+
+- [ ] **Step 2: Write `SeverityBadge.tsx` and its CSS**
+
+```tsx
+// packages/bok-ui/src/SeverityBadge.tsx
+import type { CSSProperties } from "react";
+import { SEVERITY, type SeverityKey } from "./semantics";
+
+export interface SeverityBadgeProps {
+  severity: SeverityKey;
+}
+
+/** Glyph + label + colour. Text uses the -ink half of the two-role split (contract 6.1). */
+export function SeverityBadge({ severity }: SeverityBadgeProps) {
+  const e = SEVERITY[severity];
+  const style = { "--bok-badge-ink": `var(${e.ink})`, "--bok-badge-fill": `var(${e.token})` } as CSSProperties;
+  return (
+    <span className="bok-severity" data-severity={severity} data-severity-glyph={e.glyph} style={style}>
+      <span aria-hidden="true">{e.glyph}</span> {e.label}
+    </span>
+  );
+}
+```
+
+Append to `packages/bok-ui/src/css/components.css`:
+
+```css
+/* SeverityBadge: -ink for the label and the border that carries meaning; the fill is a tint. */
+.bok-severity {
+  display: inline-flex; align-items: center; gap: calc(var(--bok-space) * 1.5);
+  color: var(--bok-badge-ink); border: 1px solid var(--bok-badge-ink);
+  background: color-mix(in oklch, var(--bok-badge-fill) 12%, transparent);
+  border-radius: var(--bok-radius-cell);
+  padding: var(--bok-density-pad-y) var(--bok-density-pad-x);
+  font-size: var(--bok-density-font); line-height: 1.2; white-space: nowrap;
+}
+```
+
+Run: `npx vitest run src/SeverityBadge.test.tsx`
+Expected: PASS, 6 tests.
+
+- [ ] **Step 3: Write the failing `RunTimeline` test**
+
+```tsx
+// packages/bok-ui/src/RunTimeline.test.tsx
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { RunTimeline, type RunTimelineRun } from "./RunTimeline";
+import { RUN_STATE } from "./semantics";
+
+const RUNS = [
+  { id: "testbench:1:2026-09-01", at: "2026-09-01", state: "completed", label: "1 Sep · completed" },
+  { id: "testbench:1:2026-09-03", at: "2026-09-03", state: "healed", label: "3 Sep · healed" },
+  { id: "testbench:1:2026-09-04", at: "2026-09-04", state: "quarantined", label: "4 Sep · quarantined" },
+  { id: "testbench:1:2026-09-05", at: "2026-09-05", state: "failed", label: "5 Sep · failed" },
+  { id: "testbench:1:2026-09-06", at: "2026-09-06", state: "refused", label: "6 Sep · refused" },
+] satisfies RunTimelineRun[];
+const RANGE = { from: "2026-09-01", to: "2026-09-06" };
+const href = (id: string) => `/runs/${encodeURIComponent(id)}`;
+const css = readFileSync(new URL("./css/components.css", import.meta.url), "utf8");
+
+describe("RunTimeline", () => {
+  it("every RunTimeline chip carries a text label", () => {
+    render(<RunTimeline runs={RUNS} range={RANGE} hrefFor={href} />);
+    const chips = screen.getAllByRole("link");
+    expect(chips).toHaveLength(RUNS.length);
+    chips.forEach((chip, i) => {
+      const state = RUNS[i]!.state;
+      expect(chip).toHaveAttribute("data-run-state", state);
+      expect(chip).toHaveTextContent(`${RUN_STATE[state].glyph} ${RUN_STATE[state].label}`);
+    });
+  });
+
+  it("a missed day renders as a visible gap", () => {
+    const { container } = render(<RunTimeline runs={RUNS} range={RANGE} hrefFor={href} />);
+    const gap = container.querySelector('[data-empty-day="2026-09-02"]');
+    expect(gap).not.toBeNull();
+    expect(gap).toHaveTextContent("2026-09-02: no run");
+    expect(gap?.querySelector(".bok-tl-tick")).not.toBeNull();
+  });
+
+  it("is an ordered list named for its range; arrow keys, Home and End move between chips", async () => {
+    render(<RunTimeline runs={RUNS} range={RANGE} hrefFor={href} />);
+    const list = screen.getByRole("list", { name: "Runs, 2026-09-01 to 2026-09-06" });
+    const chips = within(list).getAllByRole("link");
+    chips[0]!.focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(chips[1]).toHaveFocus();
+    await userEvent.keyboard("{End}");
+    expect(chips[4]).toHaveFocus();
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(chips[3]).toHaveFocus();
+    await userEvent.keyboard("{Home}");
+    expect(chips[0]).toHaveFocus();
+  });
+
+  it("chips are links built by the consumer's hrefFor", () => {
+    render(<RunTimeline runs={RUNS} range={RANGE} hrefFor={href} />);
+    expect(screen.getAllByRole("link")[0]).toHaveAttribute("href", "/runs/testbench%3A1%3A2026-09-01");
+  });
+
+  it("wraps to a vertical list below 640px, and only healed and the outline paint drift indigo", () => {
+    expect(css).toMatch(/@media \(max-width: 639\.98px\)\s*\{\s*\.bok-timeline\s*\{[^}]*flex-direction:\s*column/);
+    for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (m[2]!.includes("--bok-accent-selector-drift")) {
+        expect(m[1]).toMatch(/data-run-state="healed"|data-bok-outline|bok-dom-label/);
+      }
+    }
+  });
+});
+```
+
+Run: `npx vitest run src/RunTimeline.test.tsx`
+Expected: FAIL — `Failed to resolve import "./RunTimeline"`.
+
+- [ ] **Step 4: Write `RunTimeline.tsx` and its CSS**
+
+```tsx
+// packages/bok-ui/src/RunTimeline.tsx
+import type { KeyboardEvent } from "react";
+import { RUN_STATE, type RunState } from "./semantics";
+
+export interface RunTimelineRun {
+  id: string;
+  /** ISO date or instant; the UTC calendar day is its first ten characters. */
+  at: string;
+  state: RunState;
+  label: string;
+}
+
+export interface RunTimelineProps {
+  runs: readonly RunTimelineRun[];
+  range: { from: string; to: string };
+  hrefFor: (id: string) => string;
+}
+
+const DAY = 86_400_000;
+const MAX_DAYS = 400;
+
+function dayMs(iso: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (m === null) throw new Error(`RunTimeline: "${iso}" is not an ISO date`);
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+
+function days(from: string, to: string): string[] {
+  const out: string[] = [];
+  for (let t = dayMs(from); t <= dayMs(to) && out.length < MAX_DAYS; t += DAY) {
+    out.push(new Date(t).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+const KEYS = new Set(["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"]);
+
+function moveFocus(e: KeyboardEvent<HTMLOListElement>): void {
+  if (!KEYS.has(e.key)) return;
+  const chips = Array.from(e.currentTarget.querySelectorAll<HTMLAnchorElement>("a[data-run-state]"));
+  const i = chips.findIndex((c) => c === document.activeElement);
+  if (i < 0) return;
+  e.preventDefault();
+  const last = chips.length - 1;
+  const next =
+    e.key === "Home" ? 0
+    : e.key === "End" ? last
+    : e.key === "ArrowRight" || e.key === "ArrowDown" ? Math.min(last, i + 1)
+    : Math.max(0, i - 1);
+  chips[next]?.focus();
+}
+
+/** One track per call, one chip per run, an empty tick per day without one. */
+export function RunTimeline({ runs, range, hrefFor }: RunTimelineProps) {
+  const byDay = new Map<string, RunTimelineRun[]>();
+  for (const r of [...runs].sort((a, b) => a.at.localeCompare(b.at))) {
+    const key = r.at.slice(0, 10);
+    byDay.set(key, [...(byDay.get(key) ?? []), r]);
+  }
+  return (
+    <ol className="bok-timeline" data-bok-timeline aria-label={`Runs, ${range.from} to ${range.to}`} onKeyDown={moveFocus}>
+      {days(range.from, range.to).map((day) => {
+        const dayRuns = byDay.get(day) ?? [];
+        if (dayRuns.length === 0) {
+          return (
+            <li key={day} className="bok-tl-day" data-empty-day={day}>
+              <span className="bok-tl-tick" aria-hidden="true" />
+              <span className="bok-visually-hidden">{day}: no run</span>
+            </li>
+          );
+        }
+        return (
+          <li key={day} className="bok-tl-day" data-day={day}>
+            {dayRuns.map((r) => {
+              const e = RUN_STATE[r.state];
+              return (
+                <a key={r.id} href={hrefFor(r.id)} className="bok-tl-chip" data-run-state={r.state} title={r.label}>
+                  <span className="bok-tl-glyph" aria-hidden="true">{e.glyph}</span>{" "}
+                  <span className="bok-tl-label">{e.label}</span>
+                  <span className="bok-visually-hidden"> — {r.label}</span>
+                </a>
+              );
+            })}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+```
+
+Chip text reads `✓ completed — 1 Sep · completed` to assistive technology; the glyph is
+`aria-hidden`, so the test's `toHaveTextContent("✓ completed")` checks the visual pairing while the
+accessible name carries the label. Append to `components.css`:
+
+```css
+/* RunTimeline */
+.bok-timeline { list-style: none; margin: 0; padding: 0; display: flex; align-items: flex-end; gap: 2px; }
+.bok-tl-day { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.bok-tl-tick {
+  display: block; height: calc(var(--bok-space) * 6);
+  border: 1px dashed var(--bok-neutral-6); border-radius: var(--bok-radius-cell);
+}
+.bok-tl-chip {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-height: calc(var(--bok-space) * 6); padding: 2px; overflow: hidden;
+  border: 1px solid currentColor; border-radius: var(--bok-radius-cell);
+  font-size: 0.6875rem; line-height: 1.1; text-decoration: none;
+}
+.bok-tl-chip[data-run-state="completed"]   { color: var(--bok-verified-ink); }
+.bok-tl-chip[data-run-state="healed"]      { color: var(--bok-accent-selector-drift-ink); }
+.bok-tl-chip[data-run-state="quarantined"] { color: var(--bok-medium-ink); }
+.bok-tl-chip[data-run-state="failed"]      { color: var(--bok-critical-ink); }
+.bok-tl-chip[data-run-state="refused"]     { color: var(--bok-unverified-ink); }
+.bok-tl-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 639.98px) {
+  .bok-timeline { flex-direction: column; align-items: stretch; }
+  .bok-tl-day { flex-direction: row; }
+  .bok-tl-chip { flex-direction: row; gap: 0.5em; padding-inline: var(--bok-density-pad-x); }
+}
+```
+
+Run: `npx vitest run src/RunTimeline.test.tsx`
+Expected: PASS, 5 tests.
+
+- [ ] **Step 5: Write the failing `DiffView` test**
+
+```tsx
+// packages/bok-ui/src/DiffView.test.tsx
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { DiffView, type DiffSpan } from "./DiffView";
+
+const SPANS: DiffSpan[] = [
+  { kind: "same", text: '<td class="' },
+  { kind: "remove", text: "claim" },
+  { kind: "add", text: "c-claim-v2" },
+  { kind: "same", text: '">AB12345678</td>' },
+];
+
+describe("DiffView", () => {
+  it("DiffView marks additions and removals without colour alone", () => {
+    const { container } = render(<DiffView spans={SPANS} />);
+    const ins = container.querySelector("ins");
+    const del = container.querySelector("del");
+    expect(ins?.textContent).toBe("+added: c-claim-v2");
+    expect(del?.textContent).toBe("−removed: claim");
+    expect(ins?.querySelector('[aria-hidden="true"]')?.textContent).toBe("+");
+  });
+
+  it("renders unchanged text plainly, in order", () => {
+    const { container } = render(<DiffView spans={SPANS} />);
+    expect(container.querySelector("[data-bok-diff]")?.textContent).toBe(
+      '<td class="−removed: claim+added: c-claim-v2">AB12345678</td>',
+    );
+  });
+
+  it("says so when the two captures do not differ", () => {
+    render(<DiffView spans={[]} />);
+    expect(screen.getByText("No differences between the two captures.")).toBeInTheDocument();
+  });
+});
+```
+
+Run: `npx vitest run src/DiffView.test.tsx`
+Expected: FAIL — `Failed to resolve import "./DiffView"`.
+
+- [ ] **Step 6: Write `DiffView.tsx` and its CSS**
+
+```tsx
+// packages/bok-ui/src/DiffView.tsx
+export interface DiffSpan {
+  kind: "add" | "remove" | "same";
+  text: string;
+}
+
+export interface DiffViewProps {
+  spans: readonly DiffSpan[];
+}
+
+/** Word-level. Tokenisation is the producer's job (selector-drift's dom_diff), which keeps this
+ *  component generic across the three consumers contract 6.3 names. */
+export function DiffView({ spans }: DiffViewProps) {
+  if (spans.length === 0) return <p className="bok-diff-none">No differences between the two captures.</p>;
+  return (
+    <p className="bok-diff" data-bok-diff>
+      {spans.map((s, i) => {
+        if (s.kind === "same") return <span key={i}>{s.text}</span>;
+        if (s.kind === "add") {
+          return (
+            <ins key={i} className="bok-diff-add">
+              <span className="bok-diff-glyph" aria-hidden="true">+</span>
+              <span className="bok-visually-hidden">added: </span>{s.text}
+            </ins>
+          );
+        }
+        return (
+          <del key={i} className="bok-diff-remove">
+            <span className="bok-diff-glyph" aria-hidden="true">−</span>
+            <span className="bok-visually-hidden">removed: </span>{s.text}
+          </del>
+        );
+      })}
+    </p>
+  );
+}
+```
+
+Append to `components.css`:
+
+```css
+/* DiffView: ins/del semantics AND a +/- glyph, never colour alone. */
+.bok-diff { font-family: var(--bok-font-mono); font-size: var(--bok-density-font); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.bok-diff-add { text-decoration: none; color: var(--bok-verified-ink); background: color-mix(in oklch, var(--bok-verified) 16%, transparent); }
+.bok-diff-remove { text-decoration: line-through; color: var(--bok-critical-ink); background: color-mix(in oklch, var(--bok-critical) 12%, transparent); }
+.bok-diff-glyph { font-weight: 600; padding-inline-end: 1px; }
+```
+
+Run: `npx vitest run src/DiffView.test.tsx`
+Expected: PASS, 3 tests.
+
+- [ ] **Step 7: Write the failing `EvidencePane` test**
+
+```tsx
+// packages/bok-ui/src/EvidencePane.test.tsx
+import { render, screen } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { DomAdapter } from "./adapters/dom";
+import { TextAdapter } from "./adapters/text";
+import { EvidencePane } from "./EvidencePane";
+
+const SHOT = {
+  screenshotUrl: "/api/v1/heals/7/evidence/after/png",
+  alt: "Results page after the heal, run testbench:1:2026-09-24",
+  viewport: [1280, 900] as const,
+};
+const RANGES = [{ id: "claim_number", label: "claim_number", bbox: { x: 420, y: 160, width: 220, height: 36 } }];
+const components = readFileSync(new URL("./css/components.css", import.meta.url), "utf8");
+const tokens = readFileSync(new URL("./css/tokens.css", import.meta.url), "utf8");
+
+describe("EvidencePane", () => {
+  it("DomAdapter never renders html as markup", () => {
+    const hostile = '<img src=x onerror="alert(1)"><b id="bold">bold</b><script>alert(2)</script>';
+    const { container } = render(<EvidencePane adapter={DomAdapter} source={{ ...SHOT, html: hostile }} ranges={RANGES} />);
+    expect(container.querySelector("#bold")).toBeNull();
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelectorAll("img")).toHaveLength(1);
+    expect(screen.getByTestId("dom-html").textContent).toBe(hostile);
+    const source = readFileSync(new URL("./adapters/dom.tsx", import.meta.url), "utf8");
+    expect(source).not.toMatch(/dangerouslySetInnerHTML|innerHTML|DOMParser/);
+  });
+
+  it("the outline duration is 0s under reduced motion, and the consumer drives the state", () => {
+    expect(components).toMatch(
+      /\[data-outline-state="drawing"\] \[data-bok-outline\]\s*\{[^}]*animation:\s*bok-outline-draw var\(--bok-evidence-outline-duration, 220ms\)/,
+    );
+    expect(tokens).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*:root\s*\{\s*--bok-evidence-outline-duration:\s*0s;/);
+    expect(components).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\[data-bok-outline\]\s*\{[^}]*animation:\s*none;[^}]*stroke-dashoffset:\s*0/);
+    const { container } = render(<EvidencePane adapter={DomAdapter} source={SHOT} ranges={RANGES} outlineState="drawing" />);
+    expect(container.querySelector("figure")).toHaveAttribute("data-outline-state", "drawing");
+  });
+
+  it("outlines each range in the screenshot's own coordinate space, with a text label", () => {
+    const { container } = render(<EvidencePane adapter={DomAdapter} source={SHOT} ranges={RANGES} />);
+    const svg = container.querySelector("svg");
+    expect(svg).toHaveAttribute("viewBox", "0 0 1280 900");
+    expect(svg).toHaveAttribute("aria-label", "Outlined: claim_number");
+    const rect = container.querySelector("[data-bok-outline]");
+    expect(rect).toHaveAttribute("x", "420");
+    expect(rect).toHaveAttribute("y", "160");
+    expect(rect).toHaveAttribute("width", "220");
+    expect(rect).toHaveAttribute("height", "36");
+    expect(container.querySelector(".bok-dom-label")?.textContent).toBe("claim_number");
+    expect(screen.getByRole("img", { name: SHOT.alt })).toHaveAttribute("src", SHOT.screenshotUrl);
+  });
+
+  it("requires alt text from the consumer", () => {
+    expect(() => DomAdapter.render({ ...SHOT, alt: "  " }, RANGES, { outlineState: "drawn" })).toThrow(/alt/);
+  });
+
+  it("truncates very large captured markup and says so", () => {
+    render(<EvidencePane adapter={DomAdapter} source={{ ...SHOT, html: "x".repeat(300_000) }} ranges={RANGES} />);
+    expect(screen.getByTestId("dom-html").textContent!.length).toBe(200_000);
+    expect(screen.getByText(/truncated/)).toBeInTheDocument();
+  });
+
+  it("TextAdapter marks each range with its label", () => {
+    const { container } = render(
+      <EvidencePane adapter={TextAdapter} source="claim AB12345678 held" ranges={[{ start: 6, end: 16, label: "claim number" }]} />,
+    );
+    const mark = container.querySelector("mark");
+    expect(mark).toHaveAttribute("data-range-label", "claim number");
+    expect(mark?.firstChild?.textContent).toBe("AB12345678");
+  });
+
+  it("TextAdapter does not duplicate text when ranges overlap", () => {
+    render(<EvidencePane adapter={TextAdapter} source="alpha beta gamma" ranges={[{ start: 0, end: 10 }, { start: 6, end: 16 }]} />);
+    expect(screen.getByTestId("evidence-content").textContent).toBe("alpha beta gamma");
+  });
+});
+```
+
+Run: `npx vitest run src/EvidencePane.test.tsx`
+Expected: FAIL — `Failed to resolve import "./adapters/dom"`.
+
+- [ ] **Step 8: Write the adapter seam, both adapters, `EvidencePane.tsx`, and the CSS**
+
+```ts
+// packages/bok-ui/src/adapters/types.ts
+import type { ReactNode } from "react";
+
+export type OutlineState = "idle" | "drawing" | "drawn";
+
+export interface RenderOptions {
+  outlineState: OutlineState;
+}
+
+/** One pane, several coordinate systems: character offsets (text), a screenshot box (DOM), and
+ *  later page + bbox (documents, ledger-sense). A new content type is a new adapter file. */
+export interface ContentAdapter<TSource, TRange> {
+  readonly kind: string;
+  render(source: TSource, ranges: readonly TRange[], options: RenderOptions): ReactNode;
+}
+```
+
+```tsx
+// packages/bok-ui/src/adapters/text.tsx
+import type { ReactNode } from "react";
+import type { ContentAdapter } from "./types";
+
+export interface TextRange {
+  id?: string;
+  label?: string;
+  start: number;
+  end: number;
+}
+
+export const TextAdapter: ContentAdapter<string, TextRange> = {
+  kind: "text",
+  render(content, ranges) {
+    const sorted = ranges
+      .map((r) => ({
+        ...r,
+        start: Math.max(0, Math.min(content.length, r.start)),
+        end: Math.max(0, Math.min(content.length, r.end)),
+      }))
+      .filter((r) => r.end > r.start)
+      .sort((a, b) => a.start - b.start);
+    const out: ReactNode[] = [];
+    let cursor = 0;
+    sorted.forEach((r, i) => {
+      // An overlap starts at the cursor, so shared evidence is never emitted twice.
+      const start = Math.max(r.start, cursor);
+      if (start >= r.end) return;
+      if (start > cursor) out.push(content.slice(cursor, start));
+      out.push(
+        <mark key={r.id ?? i} data-range-label={r.label}>
+          {content.slice(start, r.end)}
+          {r.label !== undefined && <span className="bok-visually-hidden"> ({r.label})</span>}
+        </mark>,
+      );
+      cursor = r.end;
+    });
+    if (cursor < content.length) out.push(content.slice(cursor));
+    return <pre className="bok-text-evidence" data-testid="evidence-content">{out}</pre>;
+  },
+};
+```
+
+```tsx
+// packages/bok-ui/src/adapters/dom.tsx
+import type { ContentAdapter } from "./types";
+
+export interface DomEvidenceSource {
+  screenshotUrl: string;
+  /** Required. Supplied by the consumer, who knows what the page is. */
+  alt: string;
+  /** The capture viewport in CSS px; every bbox is in this coordinate space. */
+  viewport: readonly [number, number];
+  /** Captured markup. Rendered as escaped text only: it is a third-party page. */
+  html?: string;
+}
+
+export interface DomRange {
+  id: string;
+  label: string;
+  bbox: { x: number; y: number; width: number; height: number };
+}
+
+const HTML_LIMIT = 200_000;
+
+export const DomAdapter: ContentAdapter<DomEvidenceSource, DomRange> = {
+  kind: "dom",
+  render(source, ranges) {
+    if (source.alt.trim() === "") throw new Error("DomAdapter: source.alt is required (describe the captured page)");
+    const [vw, vh] = source.viewport;
+    const html = source.html;
+    const shown = html === undefined ? "" : html.slice(0, HTML_LIMIT);
+    const truncated = html !== undefined && html.length > HTML_LIMIT;
+    const name = ranges.length > 0 ? `Outlined: ${ranges.map((r) => r.label).join(", ")}` : "No element outlined";
+    return (
+      <>
+        <div className="bok-dom-stage" style={{ aspectRatio: `${vw} / ${vh}` }}>
+          <img className="bok-dom-shot" src={source.screenshotUrl} alt={source.alt} width={vw} height={vh} />
+          <svg className="bok-dom-overlay" viewBox={`0 0 ${vw} ${vh}`} preserveAspectRatio="none" role="img" aria-label={name}>
+            {ranges.map((r) => (
+              <g key={r.id}>
+                <rect data-bok-outline data-range-id={r.id} x={r.bbox.x} y={r.bbox.y} width={r.bbox.width} height={r.bbox.height} pathLength={1} />
+                <text className="bok-dom-label" x={r.bbox.x} y={Math.max(16, r.bbox.y - 6)}>{r.label}</text>
+              </g>
+            ))}
+          </svg>
+        </div>
+        {html !== undefined && (
+          <details className="bok-dom-html">
+            <summary>
+              Captured markup, {html.length.toLocaleString("en-GB")} characters{truncated ? ", truncated to the first 200,000" : ""}
+            </summary>
+            <pre data-testid="dom-html">{shown}</pre>
+          </details>
+        )}
+      </>
+    );
+  },
+};
+```
+
+```tsx
+// packages/bok-ui/src/EvidencePane.tsx
+import type { ContentAdapter, OutlineState } from "./adapters/types";
+
+export interface EvidencePaneProps<TSource, TRange> {
+  adapter: ContentAdapter<TSource, TRange>;
+  source: TSource;
+  ranges: readonly TRange[];
+  /** The before-then-after sequence belongs to the consumer, which flips this on each pane. */
+  outlineState?: OutlineState;
+}
+
+export function EvidencePane<TSource, TRange>({ adapter, source, ranges, outlineState = "drawn" }: EvidencePaneProps<TSource, TRange>) {
+  return (
+    <figure className="bok-evidence" data-evidence-kind={adapter.kind} data-outline-state={outlineState}>
+      {adapter.render(source, ranges, { outlineState })}
+    </figure>
+  );
+}
+```
+
+Append to `components.css`:
+
+```css
+/* EvidencePane */
+.bok-evidence { margin: 0; border: 1px solid var(--bok-neutral-4); border-radius: var(--bok-radius-cell); overflow: hidden; }
+.bok-text-evidence { margin: 0; padding: var(--bok-density-pad-x); font-family: var(--bok-font-mono); font-size: var(--bok-density-font); white-space: pre-wrap; overflow-wrap: anywhere; }
+.bok-dom-stage { position: relative; width: 100%; }
+.bok-dom-shot { display: block; width: 100%; height: 100%; }
+.bok-dom-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+[data-bok-outline] {
+  fill: none; stroke: var(--bok-accent-selector-drift-ink); stroke-width: 3; vector-effect: non-scaling-stroke;
+  stroke-dasharray: 1; stroke-dashoffset: 0;
+}
+.bok-dom-label { fill: var(--bok-accent-selector-drift-ink); font-family: var(--bok-font-mono); font-size: 16px; font-weight: 600; }
+[data-outline-state="idle"] [data-bok-outline] { stroke-dashoffset: 1; }
+[data-outline-state="drawing"] [data-bok-outline] { animation: bok-outline-draw var(--bok-evidence-outline-duration, 220ms) ease-out both; }
+@keyframes bok-outline-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  [data-bok-outline] { animation: none; stroke-dashoffset: 0; }
+}
+.bok-dom-html { border-top: 1px solid var(--bok-neutral-4); }
+.bok-dom-html summary { cursor: pointer; padding: var(--bok-density-pad-y) var(--bok-density-pad-x); }
+.bok-dom-html pre { margin: 0; max-height: 24rem; overflow: auto; padding: var(--bok-density-pad-x); font-family: var(--bok-font-mono); font-size: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+```
+
+Under reduced motion `idle` also renders drawn: the `[data-bok-outline]` rule inside the media
+query sets `stroke-dashoffset: 0` with equal specificity **later** in the file than the `idle` rule,
+so no outline is ever left invisible for a reader who asked for no motion.
+
+Run: `npx vitest run src/EvidencePane.test.tsx`
+Expected: PASS, 7 tests.
+
+- [ ] **Step 9: Write the two entries, and replace the axe test to cover all ten components**
+
+```ts
+// packages/bok-ui/src/index.ts -- server-safe: no hooks, no event handlers
+export { EmptyState, type EmptyScope, type EmptyStateProps } from "./EmptyState";
+export { ErrorState, type ErrorStateProps } from "./ErrorState";
+export { PartialFailureState, type PartialFailure, type PartialFailureStateProps } from "./PartialFailureState";
+export { Skeleton, type SkeletonProps, type SkeletonShape } from "./Skeleton";
+export { SeverityBadge, type SeverityBadgeProps } from "./SeverityBadge";
+export { DiffView, type DiffSpan, type DiffViewProps } from "./DiffView";
+export { EvidencePane, type EvidencePaneProps } from "./EvidencePane";
+export { DomAdapter, type DomEvidenceSource, type DomRange } from "./adapters/dom";
+export { TextAdapter, type TextRange } from "./adapters/text";
+export type { ContentAdapter, OutlineState, RenderOptions } from "./adapters/types";
+export { PROVENANCE_STATE, RUN_STATE, SEVERITY } from "./semantics";
+export type { ProvenanceStateKey, RunState, SemanticEntry, SeverityKey } from "./semantics";
+export { domSourceOf, provenanceStateOf } from "./types";
+export type { CalibrationState, Derivation, DomSourceFields, Method, RailNode, RailPayload } from "./types";
+export type { RunTimelineRun, RunTimelineProps } from "./RunTimeline";
+export type { ClaimProps } from "./Claim";
+export type { ProvenanceRailProps, ProvenanceRailProviderProps } from "./ProvenanceRail";
+```
+
+```ts
+// packages/bok-ui/src/client.ts -- hooks and event handlers; tsup prepends "use client"
+export { Claim } from "./Claim";
+export { ProvenanceRail, ProvenanceRailProvider } from "./ProvenanceRail";
+export { RunTimeline } from "./RunTimeline";
+```
+
+`packages/bok-ui/src/a11y.test.tsx` (replaces 34A-1's file; the first five cases are unchanged):
+
+```tsx
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { ReactElement } from "react";
+import { describe, expect, it } from "vitest";
+import { DomAdapter } from "./adapters/dom";
+import { TextAdapter } from "./adapters/text";
+import { Claim } from "./Claim";
+import { DiffView } from "./DiffView";
+import { EmptyState } from "./EmptyState";
+import { ErrorState } from "./ErrorState";
+import { EvidencePane } from "./EvidencePane";
+import domFixture from "./fixtures/dom-claim.json";
+import { PartialFailureState } from "./PartialFailureState";
+import { ProvenanceRailProvider } from "./ProvenanceRail";
+import { RunTimeline } from "./RunTimeline";
+import { SeverityBadge } from "./SeverityBadge";
+import { Skeleton } from "./Skeleton";
+import { MODES, seriousOrCritical } from "./test/axe";
+import type { RailPayload } from "./types";
+
+const dom = domFixture as RailPayload;
+
+type Case = [name: string, ui: () => ReactElement, interact?: () => Promise<void>];
+
+const CASES: Case[] = [
+  [
+    "Claim with the rail open",
+    () => (
+      <ProvenanceRailProvider hrefForSnapshot={(id) => `/e/${id}`}>
+        <p>Claim number <Claim payload={dom} /></p>
+      </ProvenanceRailProvider>
+    ),
+    async () => { await userEvent.click(screen.getByRole("button", { name: /AB12345678/ })); },
+  ],
+  ["EmptyState", () => <EmptyState scope={{ noun: "quarantined runs", measuredNoun: "runs", measured: 41, headline: "Nothing quarantined.", measuredVerb: "passed validation" }} />],
+  ["ErrorState", () => <ErrorState title="The run list could not load" detail="The API returned 503." retry={() => undefined} />],
+  ["PartialFailureState", () => <PartialFailureState succeeded={["verdicts"]} failed={[{ what: "before capture", why: "not captured" }]} />],
+  ["Skeleton", () => <Skeleton shape="table" rows={3} />],
+  ["SeverityBadge", () => <p><SeverityBadge severity="HIGH" /> <SeverityBadge severity="INFO" /></p>],
+  [
+    "RunTimeline",
+    () => (
+      <RunTimeline
+        runs={[
+          { id: "a", at: "2026-09-01", state: "completed", label: "1 Sep" },
+          { id: "b", at: "2026-09-03", state: "healed", label: "3 Sep" },
+        ]}
+        range={{ from: "2026-09-01", to: "2026-09-03" }}
+        hrefFor={(id) => `/runs/${id}`}
+      />
+    ),
+  ],
+  ["DiffView", () => <DiffView spans={[{ kind: "same", text: "a " }, { kind: "remove", text: "b" }, { kind: "add", text: "c" }]} />],
+  [
+    "EvidencePane (DOM)",
+    () => (
+      <EvidencePane
+        adapter={DomAdapter}
+        source={{ screenshotUrl: "/shot.png", alt: "Results page", viewport: [1280, 900], html: "<td>x</td>" }}
+        ranges={[{ id: "f", label: "claim_number", bbox: { x: 1, y: 2, width: 3, height: 4 } }]}
+      />
+    ),
+  ],
+  ["EvidencePane (text)", () => <EvidencePane adapter={TextAdapter} source="alpha beta" ranges={[{ start: 0, end: 5, label: "first" }]} />],
+];
+
+describe.each(MODES)("axe, $theme theme, $density density", ({ theme, density }) => {
+  it.each(CASES)("%s: zero serious or critical violations", async (_name, ui, interact) => {
+    render(<div data-theme={theme} data-density={density}>{ui()}</div>);
+    if (interact) await interact();
+    expect(await seriousOrCritical(document.body)).toEqual([]);
+  });
+});
+```
+
+Run: `npm run typecheck && npx vitest run`
+Expected: `tsc` exits 0; PASS, 96 tests (14 css + 4 contrast + 11 rail + 6 states + 6 severity + 5 timeline + 3 diff + 7 evidence + 40 axe).
+
+- [ ] **Step 10: Build, and prove the built package is what a consumer needs**
+
+`packages/bok-ui/scripts/build-css.mjs`:
+
+```js
+#!/usr/bin/env node
+// dist/tokens.css = fonts + tokens + density + component rules, in that order, so one import
+// gives a consumer the whole visual layer. print.css ships alone: it must work without React.
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+
+const src = new URL("../src/css/", import.meta.url);
+const dist = new URL("../dist/", import.meta.url);
+mkdirSync(dist, { recursive: true });
+const parts = ["fonts.css", "tokens.css", "density.css", "components.css"].map(
+  (f) => `/* ---- ${f} ---- */\n${readFileSync(new URL(f, src), "utf8")}`,
+);
+writeFileSync(new URL("tokens.css", dist), parts.join("\n"));
+cpSync(new URL("print.css", src), new URL("print.css", dist));
+cpSync(new URL("fonts/", src), new URL("fonts/", dist), { recursive: true });
+console.log("build-css: dist/tokens.css, dist/print.css, dist/fonts/");
+```
+
+`packages/bok-ui/scripts/smoke-dist.mjs`:
+
+```js
+#!/usr/bin/env node
+// Asserts the built package has the shape selector-drift/web imports. Run after `npm run build`.
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+
+const dist = new URL("../dist/", import.meta.url);
+const read = (f) => readFileSync(new URL(f, dist), "utf8");
+const fail = (m) => {
+  console.error(`smoke-dist: ${m}`);
+  process.exit(1);
+};
+
+if (!read("client.js").startsWith('"use client"')) fail('dist/client.js must begin with "use client"');
+if (read("index.js").includes('"use client"')) fail("dist/index.js must stay server-safe");
+for (const f of ["index.d.ts", "client.d.ts", "tokens.css", "print.css"]) {
+  if (!existsSync(new URL(f, dist))) fail(`missing dist/${f}`);
+}
+const tokens = read("tokens.css");
+for (const needle of ["@font-face", "--bok-density-row", "--bok-accent-selector-drift-ink", ".bok-rail", "[data-bok-outline]"]) {
+  if (!tokens.includes(needle)) fail(`dist/tokens.css lacks ${needle}`);
+}
+const fonts = readdirSync(new URL("fonts/", dist)).filter((f) => f.endsWith(".woff2"));
+if (fonts.length !== 4) fail(`expected 4 woff2 files in dist/fonts, found ${fonts.length}`);
+
+const index = await import(new URL("index.js", dist).href);
+for (const n of ["EmptyState", "ErrorState", "PartialFailureState", "Skeleton", "SeverityBadge", "DiffView",
+  "EvidencePane", "DomAdapter", "TextAdapter", "SEVERITY", "PROVENANCE_STATE", "RUN_STATE", "provenanceStateOf", "domSourceOf"]) {
+  if (!(n in index)) fail(`bok-ui exports no ${n}`);
+}
+const client = await import(new URL("client.js", dist).href);
+for (const n of ["Claim", "ProvenanceRailProvider", "ProvenanceRail", "RunTimeline"]) {
+  if (!(n in client)) fail(`bok-ui/client exports no ${n}`);
+}
+console.log("smoke-dist: ok");
+```
+
+Run: `npm run check`
+Expected: typecheck, contrast and 96 tests pass; `tsup` builds `dist/index.js`, `dist/client.js` and both `.d.ts`; `build-css:` line; `smoke-dist: ok`.
+
+Then prove consumption through an **absolute** `file:` specifier — the exact form `selector-drift/web`
+uses (Task 35 Step 1 writes it; slice spec §2: a relative path breaks when the worktree merges, the
+same ruling as the `bok-core` path dependency). From a scratch directory outside both repos:
+
+```bash
+cd "$(mktemp -d)" && npm init -y >/dev/null
+npm install "bok-ui@file:D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-ui-minimal/packages/bok-ui" react@19 react-dom@19
+node --input-type=module -e "const s = await import('bok-ui'); const c = await import('bok-ui/client'); console.log(Object.keys(s).length, Object.keys(c).sort().join(','))"
+node -e "console.log(require.resolve('bok-ui/tokens.css'), require.resolve('bok-ui/print.css'))"
+```
+
+Expected: `14 Claim,ProvenanceRail,ProvenanceRailProvider,RunTimeline`, then two resolved paths ending
+`dist/tokens.css` and `dist/print.css`. (`require.resolve` of a CSS subpath works because the exports
+map lists it under a plain string target.)
+
+- [ ] **Step 11: Commit in the worktree**
+
+```bash
+cd "D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-ui-minimal"
+git add packages/bok-ui
+git commit -s -m "feat(ui): RunTimeline, word-level DiffView, EvidencePane DOM adapter and SeverityBadge, early for selector-drift"
+```
+
+`dist/` is not committed (`files` publishes it; the consumer builds it with `npm run build` in the
+worktree). Check with `git status --short packages/bok-ui/dist` — expected: no output.
+
+- [ ] **Step 12: Draft the contract change — in selector-drift, not applied — and STOP**
+
+`INTERFACE-CONTRACT.md` belongs to `backoffice-kit`. Three §6.3 components now land at this
+project's build week 7 instead of programme week 13, and their props become precedent for two later
+consumers (slice spec §6). This step **writes the proposal and stops**; it does not edit the contract.
+
+Create `selector-drift/docs/proposals/interface-contract-bok-ui-early.md` with exactly this content:
+
+````markdown
+# Proposal: `bok-ui` components delivered early for selector-drift
+
+**Status:** draft for sign-off — NOT applied to `backoffice-kit/docs/INTERFACE-CONTRACT.md`.
+**Raised by:** selector-drift plan Task 34A-2 · **Implemented on:** `backoffice-kit` branch `bok-ui-minimal`
+**Why:** the programme order changed (audit OQ1): selector-drift runs first, so the components it
+needs from contract §6.3 cannot wait for programme week 13. The slice shipped with the props below;
+signing this off makes them the contract for `ledger-sense` and `ground-truth` as well.
+
+## 1. §6.3 table — three rows change
+
+| Deferred | Available |
+|---|---|
+| `RunTimeline` | ~~Week 13~~ **Available: `bok-ui-minimal`, selector-drift build week 7** |
+| `DiffView` (**word-level**, not line-level — three consumers need it) | ~~Week 13~~ **Available: `bok-ui-minimal`, selector-drift build week 7** |
+| `EvidencePane` DOM adapter | ~~Week 13~~ **Available: `bok-ui-minimal`, selector-drift build week 7** |
+
+## 2. §6.2 — add these prop signatures
+
+```tsx
+type RunState = "completed" | "healed" | "quarantined" | "failed" | "refused";
+<RunTimeline
+  runs={Array<{ id: string; at: string /* ISO */; state: RunState; label: string }>}
+  range={{ from: string; to: string }}
+  hrefFor={(id: string) => string}
+/>
+// glyph + text label per state; `healed` is the only drift-indigo use; a day with no run renders
+// an empty tick; arrow keys/Home/End move between chips; vertical below 640px.
+
+<DiffView spans={Array<{ kind: "add" | "remove" | "same"; text: string }>} />
+// ins/del semantics AND a +/- glyph; tokenisation is the producer's job.
+
+<EvidencePane
+  adapter={DomAdapter}
+  source={{ screenshotUrl: string; alt: string; viewport: [number, number]; html?: string }}
+  ranges={Array<{ id: string; label: string; bbox: { x: number; y: number; width: number; height: number } }>}
+  outlineState={"idle" | "drawing" | "drawn"}
+/>
+// outline stroke --bok-accent-selector-drift-ink; duration var(--bok-evidence-outline-duration, 220ms);
+// the before-then-after sequence belongs to the consumer; html renders as escaped text only;
+// alt is required. TextAdapter ships alongside (`source: string`, ranges `{start, end, label?}`).
+```
+
+## 3. §6.2 — clarifications the slice had to make, proposed as contract text
+
+1. **Two entry points.** `bok-ui` is server-safe (no hooks, no handlers); `bok-ui/client` carries a
+   `"use client"` banner and exports `Claim`, `ProvenanceRailProvider`, `ProvenanceRail`,
+   `RunTimeline`. Reason: a React Server Component cannot pass a function prop (`hrefFor`,
+   `hrefForSnapshot`, `adapter`, `retry`) to a client component; consumers wrap those in their own
+   client components.
+2. **`ProvenanceRailProvider hrefForSnapshot={(snapshotId) => string}`.** `DomSource` renders as
+   `rung N · snapshot <first 12> · <selector>`, and `bok-ui` knows nothing about consumer routes.
+3. **`EmptyState.scope` gains two optional fields**, `headline?: string` (replaces `"No {noun}."`) and
+   `measuredVerb?: string` (replaces `"ran"`). `measuredNoun` stays required. Reason: selector-drift's
+   required sentence *"Nothing quarantined. 41 runs passed validation."* is not expressible otherwise.
+4. **`ErrorState {title, detail?, retry?}`**, **`PartialFailureState {succeeded: string[]; failed:
+   {what, why}[]}`**, **`Skeleton {shape: "table" | "cards" | "text" | "figure"; rows?}`** — the
+   shapes selector-drift's slice spec §4.2 fixed; the unexecuted week-3 plan used `what`/`action` and
+   counts, and should be aligned before it runs.
+5. **The stylesheet export is `bok-ui/tokens.css`** (fonts, tokens, density and component rules in
+   one file) plus standalone `bok-ui/print.css`. The week-3 plan's `theme.css`/`density.css` split
+   should be renamed to match before it runs.
+6. **`prefers-reduced-motion` sets durations to `0s`**, not `0.01ms`: consumers assert a computed
+   `0s`, and `0.01ms` serialises as `1e-05s`.
+7. **`SeverityBadge` text uses the `-ink` token**, per §6.1's own two-role rule.
+8. **`RUN_STATE`** joins `SEVERITY` and `PROVENANCE_STATE` in `semantics`: `{token, ink, glyph, label}`
+   per run state.
+
+## 4. §2.2 — alongside, from the selector-drift API contract §6.2
+
+Proposed `Source` variant: `QuerySource(query_id: str, sql_sha256: str, as_of: datetime)`. With it,
+selector-drift's aggregate figures become `Claim[float]` with `method=DERIVED` instead of plain numbers
+with a methodology link.
+
+## 5. §9 changelog entry
+
+| 0.3 | <date signed off> | **Early delivery for selector-drift (audit OQ1).** `RunTimeline`, word-level `DiffView` and the `EvidencePane` DOM adapter move from §6.3 to available on `bok-ui-minimal`, with the props in §6.2. Adds: `bok-ui/client` entry; `ProvenanceRailProvider.hrefForSnapshot`; `EmptyState.scope.headline` and `.measuredVerb`; `RUN_STATE`; the `ErrorState`/`PartialFailureState`/`Skeleton` prop shapes. Changes: stylesheet export named `tokens.css`; reduced motion is `0s`. Proposes: `QuerySource`. Removes: nothing. |
+````
+
+```bash
+cd "D:/Project/Portifolio Projects/Upwork_Projects/selector-drift"
+git add docs/proposals/interface-contract-bok-ui-early.md
+git commit -m "docs(proposals): draft INTERFACE-CONTRACT change for early bok-ui components"
+```
+
+**STOP here for the user's sign-off on the proposal.** Task 35 may start without it — the slice ships
+either way (slice spec §6: pinning the props in the slice spec is what keeps them from drifting in the
+meantime) — but the contract edit itself is the user's to approve and `backoffice-kit`'s to apply.
+
+---
+
+### Task 34: The API — contract, authentication, errors (API spec §2, §3, §4.1, §4.3, §5)
+
+**Split 2026-09-26.** The first revision's Task 34 was one task holding seven routers, auth and
+evidence serving, with one "implement the routers" step. It is now three, each with its own test
+cycle a reviewer could reject independently, and they run **in this order: 34 → 34B → 34C**
+(34C's routes serve 34B's figures):
+
+| Task | Holds | Rejectable on its own because |
+|---|---|---|
+| **34** | `views.py` (the whole read model), `errors.py`, `deps.py`, `auth.py`, `main.py`, the `api-is-read-side` contract, `create-operator` | it is the security boundary and the wire contract; no resource route exists yet |
+| **34B** | `derive.py`, the `QuerySource` proposal | every published number, checked against seeded tables |
+| **34C** | the resource routers, `evidence.py`, type generation | the read paths, over a boundary 34 already proved |
+
+**Files:**
+- Create: `selector_drift/api/__init__.py` (empty), `selector_drift/api/views.py`, `selector_drift/api/errors.py`, `selector_drift/api/deps.py`, `selector_drift/api/auth.py`, `selector_drift/api/main.py`, `selector_drift/api/routers/__init__.py` (empty)
+- Modify: `selector_drift/__main__.py` (argparse dispatcher: `run`, `create-operator`), `.importlinter` (`api-is-read-side`), `pyproject.toml` (deps)
+- Test: `tests/api/__init__.py` (empty), `tests/api/conftest.py`, `tests/api/test_auth.py`, `tests/api/test_contract.py`
+
+**Interfaces:**
+- Consumes: `Operator`, `OperatorSession`, `AuditLog` (Task 3 + schema additions); `Settings`, `get_settings`, `ConfigError` (Task 33); `Verdict` (Task 20); `Family`, `AnchorEvidence` (`resolve/trace.py`, Task 13); `Basis`, `FirstHealPolicy` (Task 2); `BBox` (Task 19); `DiffSpan` (Task 33); `Severity` (`bok_core.findings`); `RailPayload` (`bok_core.provenance.render`); `Sensitivity`; `extraction_flow` (Task 6, for `run`).
+- Produces:
+  - `views.py`: `RequestModel`, `ViewModel`, `LoginRequest`, `DecisionRequest`, `OperatorView`, `RateLimitView`, `TargetView`, `RunView`, `AttemptView`, `RungAttemptView`, `ResolutionView`, `RunDetailView`, `DecisionView`, `EvidenceSideView`, `ExtractedValueView`, `HealView`, `QuarantineView`, `FindingView`, `SpecView`, `StatsView`, `Page[T]`; re-exports `BBox`, `DiffSpan`
+  - `errors.py`: `PROBLEM_JSON`, `ProblemDetail`, `ApiProblem` and its subclasses `Unauthenticated` (401), `BadOrigin` (403), `NotFound` (404), `Invalid` (422), `StillInvalidProblem` (409), `AlreadyResolved` (409), `Throttled` (429), `EvidenceGone` (410); `problem_response(problem, base_url) -> JSONResponse`; `install_problem_handlers(app) -> None`
+  - `deps.py`: `TARGET_RE`, `RUN_KEY_RE`, `check_target(v: str) -> str`, `check_run_key(v: str) -> str`, `valid_target`, `valid_run_key` (path dependencies), `get_db() -> Iterator[OrmSession]`, `app_settings(request) -> Settings`, `token_sha256(raw: str) -> str`, `resolve_session(db, raw: str | None, now: datetime) -> Operator | None`, `current_operator(...) -> Operator`, aliases `Db`, `CurrentOperator`, `AppSettings`, `RunKey`, `TargetName`
+  - `deps.py` also holds `SESSION_COOKIE = "sd_session"` (auth imports it, so `deps` never imports `auth`)
+  - `auth.py`: `router`, `SESSION_LIFETIME = timedelta(hours=12)`, `THROTTLE_LIMIT = 5`, `THROTTLE_WINDOW = timedelta(minutes=15)`, `create_operator(db, username: str, password: str) -> Operator`, `authenticate(db, username, password, now) -> Operator`, `issue_session(db, operator, now) -> str`, `audit(db, *, actor, action, subject, detail) -> None`
+  - `main.py`: `create_app(*, settings: Settings | None = None) -> FastAPI` (Task 34C adds `quarantine_actions=`), `install_origin_guard(app) -> None`
+  - `__main__.py`: `main(argv: list[str] | None = None) -> int` with subcommands `run <spec>` and `create-operator <username>`
+
+**Why this task was rewritten.** The first revision stated the right rules — *"every route
+authenticates, and `actor` is never read from a request body (R16/H3)"* — and then implemented them
+as one unchecked step. Five controls had no mechanism behind them:
+
+| Control | First revision | Now |
+|---|---|---|
+| Who can log in | "one operator account" — created by nobody | `python -m selector_drift create-operator <username>`, password from a TTY only — never an argument, never an env var. No self-registration route exists |
+| What a database leak yields | unspecified | the cookie's **SHA-256**; the raw token exists only in the browser |
+| CSRF | "`SameSite=Strict`" | `SameSite=Strict` **plus** an `Origin` check on every non-GET — `403 bad-origin` |
+| Brute force | nothing | 5 failures per username per 15 min → `429` + `Retry-After`, counted in `audit_log` so **a restart does not reset it** |
+| Errors | FastAPI defaults, which **echo the request body — including the password — in a 422** | RFC 9457 `problem+json`; validation problems carry location and message, never input |
+
+**`api-is-read-side` (API spec §2).** The API reports on runs; it never starts one. It may import
+`db/`, `heallog/` (read side), `validate/quarantine.py` (for `StillInvalid`), `spec/`, `scope/`
+(loaders, never `authorise()`), `land/catalog.py` (read-only queries). The contract forbids every
+module that can start, resolve or write a run:
+
+```ini
+[importlinter:contract:api-is-read-side]
+name = The API reports on runs; it never starts one
+type = forbidden
+source_modules = selector_drift.api
+forbidden_modules =
+    selector_drift.browser
+    selector_drift.orchestrate
+    selector_drift.credentials
+    selector_drift.resolve.cascade
+    selector_drift.resolve.rungs
+    selector_drift.resolve.cache
+    selector_drift.land.writer
+    selector_drift.land.compact
+    selector_drift.heallog.replay
+    selector_drift.heallog.retention
+```
+
+The spec's wording is "must not import `resolve/`". The contract forbids `resolve.cascade`,
+`resolve.rungs` and `resolve.cache` rather than all of `resolve`, because `views.py` must import
+`Family` and `AnchorEvidence` from their owning module (spec §4.3) and those live in
+`resolve/trace.py` — nothing in `trace.py` can resolve an element. Promotion lands data, which the
+API may not do; Task 26A's `QuarantineActions` is built in `orchestrate/` and **handed** to the app
+by `__main__ serve-api` (Task 34C), so the dependency arrow never points from `api/` to a writer.
+If `lint-imports` reports an indirect chain through `validate.quarantine`, the fix is to move the
+offending import behind that seam — not `allow_indirect_imports`.
+
+- [ ] **Step 1: Add the dependencies**
+
+```bash
+uv add argon2-cffi uvicorn
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```python
+# tests/api/conftest.py
+from __future__ import annotations
+
+import dataclasses
+import secrets
+from collections.abc import Iterator
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import select, text
+
+from selector_drift.api.auth import create_operator
+from selector_drift.api.main import create_app
+from selector_drift.config import Settings
+from selector_drift.db.models import AuditLog
+from selector_drift.db.session import Session, engine
+
+WEB_ORIGIN = "https://sd.example.invalid"
+LOGIN = "/api/v1/auth/login"
+
+
+@pytest.fixture
+def settings(tmp_path) -> Settings:
+    return dataclasses.replace(Settings.for_typegen(), env="development", web_origin=WEB_ORIGIN,
+                               evidence_root=tmp_path / "evidence",
+                               fixture_evidence_root=tmp_path / "fixtures",
+                               lake_root=tmp_path / "lake")
+
+
+@pytest.fixture
+def clean_db() -> Iterator[None]:
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE operators, sessions, audit_log RESTART IDENTITY CASCADE"))
+    yield
+
+
+@pytest.fixture
+def app(settings, clean_db) -> FastAPI:
+    return create_app(settings=settings)
+
+
+@pytest.fixture
+def operator(clean_db) -> tuple[str, str]:
+    password = secrets.token_urlsafe(18)          # per-run, never committed
+    with Session() as s:
+        create_operator(s, "op1", password)
+        s.commit()
+    return "op1", password
+
+
+def make_client(app: FastAPI) -> TestClient:
+    # https: the session cookie is Secure, and an http:// client would never send it back.
+    return TestClient(app, base_url="https://testserver", headers={"Origin": WEB_ORIGIN})
+
+
+@pytest.fixture
+def anon_client(app) -> TestClient:
+    return make_client(app)
+
+
+@pytest.fixture
+def client(app, operator) -> TestClient:
+    c = make_client(app)
+    r = c.post(LOGIN, json={"username": operator[0], "password": operator[1]})
+    assert r.status_code == 200, r.text
+    c.session_user = operator[0]                  # type: ignore[attr-defined]
+    return c
+
+
+def latest_audit(action: str | None = None) -> AuditLog:
+    with Session() as s:
+        q = select(AuditLog).order_by(AuditLog.id.desc()).limit(1)
+        if action is not None:
+            q = q.where(AuditLog.action == action)
+        row = s.scalars(q).one()
+        s.expunge(row)
+        return row
+```
+
+```python
+# tests/api/test_auth.py
+import hashlib
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from argon2 import PasswordHasher
+from sqlalchemy import select
+
+from selector_drift.api.auth import create_operator
+from selector_drift.api.main import create_app
+from selector_drift.db.models import Operator, OperatorSession
+from selector_drift.db.session import Session
+from tests.api.conftest import LOGIN, latest_audit, make_client
+
+ME, LOGOUT = "/api/v1/auth/me", "/api/v1/auth/logout"
+
+
+@pytest.mark.integration
+def test_login_sets_an_httponly_strict_cookie_and_stores_only_its_hash(anon_client, operator):
+    r = anon_client.post(LOGIN, json={"username": operator[0], "password": operator[1]})
+    assert r.status_code == 200 and r.json() == {"username": "op1"}
+    cookie = r.headers["set-cookie"].lower()
+    for attr in ("sd_session=", "httponly", "secure", "samesite=strict", "path=/"):
+        assert attr in cookie
+    raw = anon_client.cookies["sd_session"]
+    with Session() as s:
+        row = s.scalars(select(OperatorSession)).one()
+        assert row.token_sha256 == hashlib.sha256(raw.encode()).hexdigest()
+        assert raw not in {str(getattr(row, c.key)) for c in OperatorSession.__table__.columns}
+        assert row.expires_at - row.created_at == timedelta(hours=12)
+    assert latest_audit().action == "login_success"
+
+
+@pytest.mark.integration
+def test_a_wrong_password_is_401_problem_json_and_audited(anon_client, operator):
+    r = anon_client.post(LOGIN, json={"username": "op1", "password": "not-it"})
+    assert r.status_code == 401
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["type"].endswith("unauthenticated")
+    audit = latest_audit()
+    assert audit.action == "login_failure" and audit.subject == "operator:op1"
+
+
+@pytest.mark.integration
+def test_me_is_401_without_a_session(anon_client):
+    r = anon_client.get(ME)
+    assert r.status_code == 401
+    assert set(r.json()) >= {"type", "title", "status", "detail"}
+
+
+@pytest.mark.integration
+def test_logout_revokes_the_session_row(client):
+    assert client.post(LOGOUT).status_code == 204
+    assert client.get(ME).status_code == 401
+    with Session() as s:
+        assert s.scalars(select(OperatorSession)).one().revoked_at is not None
+    assert latest_audit().action == "logout"
+
+
+@pytest.mark.integration
+def test_an_expired_session_is_401(client):
+    with Session() as s:
+        row = s.scalars(select(OperatorSession)).one()
+        row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        s.commit()
+    assert client.get(ME).status_code == 401
+
+
+@pytest.mark.integration
+def test_a_non_get_with_a_foreign_origin_is_refused(client, operator):
+    r = client.post(LOGOUT, headers={"Origin": "https://evil.example.invalid"})
+    assert r.status_code == 403 and r.json()["type"].endswith("bad-origin")
+    assert client.get(ME).status_code == 200               # nothing happened
+    r = client.post(LOGIN, json={"username": "op1", "password": operator[1]},
+                    headers={"Origin": "null"})
+    assert r.status_code == 403
+
+
+@pytest.mark.integration
+def test_a_non_get_with_no_origin_is_refused(app, operator):
+    from fastapi.testclient import TestClient
+    bare = TestClient(app, base_url="https://testserver")
+    r = bare.post(LOGIN, json={"username": "op1", "password": operator[1]})
+    assert r.status_code == 403
+
+
+@pytest.mark.integration
+def test_six_failed_logins_throttle_and_survive_a_restart(settings, operator):
+    c = make_client(create_app(settings=settings))
+    for _ in range(5):
+        assert c.post(LOGIN, json={"username": "op1", "password": "wrong"}).status_code == 401
+    right = {"username": "op1", "password": operator[1]}
+    r = c.post(LOGIN, json=right)                 # the sixth attempt, with the RIGHT password
+    assert r.status_code == 429 and r.json()["type"].endswith("throttled")
+    assert 0 < int(r.headers["Retry-After"]) <= 15 * 60
+    restarted = make_client(create_app(settings=settings))      # counted in the DB, not memory
+    assert restarted.post(LOGIN, json=right).status_code == 429
+
+
+@pytest.mark.integration
+def test_a_disabled_operator_cannot_log_in(anon_client, operator):
+    with Session() as s:
+        s.scalars(select(Operator)).one().disabled_at = datetime.now(UTC)
+        s.commit()
+    r = anon_client.post(LOGIN, json={"username": "op1", "password": operator[1]})
+    assert r.status_code == 401
+
+
+@pytest.mark.integration
+def test_validation_errors_never_echo_the_password(anon_client):
+    r = anon_client.post(LOGIN, json={"username": "NOT VALID!", "password": "p4ss-secret-xyz"})
+    assert r.status_code == 422 and r.json()["type"].endswith("invalid")
+    assert "p4ss-secret-xyz" not in r.text
+
+
+@pytest.mark.integration
+def test_create_operator_stores_an_argon2id_hash(clean_db):
+    with Session() as s:
+        op = create_operator(s, "op2", "correct horse battery staple")
+        s.commit()
+        assert op.password_hash.startswith("$argon2id$")
+        assert "correct horse" not in op.password_hash
+        assert PasswordHasher().verify(op.password_hash, "correct horse battery staple")
+
+
+@pytest.mark.unit
+def test_create_operator_refuses_to_read_a_password_without_a_tty(monkeypatch, capsys):
+    from selector_drift.__main__ import main
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert main(["create-operator", "op9"]) == 2
+    assert "terminal" in capsys.readouterr().err
+```
+
+```python
+# tests/api/test_contract.py
+import inspect
+import subprocess
+
+import pytest
+from fastapi.routing import APIRoute
+from pydantic import BaseModel
+
+from selector_drift.api import views
+from selector_drift.api.deps import check_run_key, check_target
+from selector_drift.api.errors import Invalid
+from selector_drift.api.main import create_app
+from selector_drift.config import ConfigError, Settings
+
+REQUEST_MODELS = [m for _, m in inspect.getmembers(views, inspect.isclass)
+                  if issubclass(m, views.RequestModel) and m is not views.RequestModel]
+
+
+@pytest.mark.unit
+def test_no_request_model_declares_actor():
+    """H3. The actor is the session operator. A body carrying `actor` is a 422."""
+    assert REQUEST_MODELS, "views.py declares no request models"
+    for model in REQUEST_MODELS:
+        assert "actor" not in model.model_fields, model.__name__
+
+
+@pytest.mark.unit
+def test_every_request_model_forbids_extra_fields():
+    for model in REQUEST_MODELS:
+        assert model.model_config.get("extra") == "forbid", model.__name__
+
+
+@pytest.mark.unit
+def test_every_route_body_is_a_request_model():
+    """A body model outside views.RequestModel would escape both tests above."""
+    for route in create_app(settings=Settings.for_typegen()).routes:
+        if isinstance(route, APIRoute) and route.body_field is not None:
+            body = route.body_field.type_
+            assert isinstance(body, type) and issubclass(body, views.RequestModel), route.path
+
+
+@pytest.mark.unit
+def test_no_view_has_a_boolean_that_means_passed():
+    """API spec 1, rule 3: a check result crosses the wire as a Verdict, never a bool."""
+    suspicious = {"passed", "ok", "valid", "is_valid", "success", "succeeded"}
+    for _, model in inspect.getmembers(views, inspect.isclass):
+        if issubclass(model, BaseModel):
+            assert not suspicious & set(model.model_fields), model.__name__
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("good", ["testbench:1:2026-09-07", "a-b:123456:2027-01-31"])
+def test_a_well_formed_run_key_passes(good):
+    assert check_run_key(good) == good
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", ["../../etc/passwd", "testbench:1:2026-9-7", "TB:1:2026-09-07",
+                                 "testbench:1:2026-09-07/..", "testbench:1234567:2026-09-07", ""])
+def test_a_malformed_run_key_is_422_before_any_lookup(bad):
+    with pytest.raises(Invalid):
+        check_run_key(bad)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", ["-lead", "UPPER", "a" * 64, "a/b", "a..b", ""])
+def test_a_malformed_target_is_422(bad):
+    with pytest.raises(Invalid):
+        check_target(bad)
+
+
+@pytest.mark.unit
+def test_api_imports_nothing_that_can_start_a_run():
+    r = subprocess.run(["uv", "run", "lint-imports", "--contract", "api-is-read-side"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.unit
+def test_fixture_mode_refuses_to_start_in_production():
+    import dataclasses
+    s = dataclasses.replace(Settings.for_typegen(), env="production", fixture_mode=True)
+    with pytest.raises(ConfigError, match="SD_FIXTURE_MODE"):
+        create_app(settings=s)
+
+
+@pytest.mark.unit
+def test_the_openapi_document_is_not_served_over_http():
+    app = create_app(settings=Settings.for_typegen())
+    assert app.openapi_url is None and app.docs_url is None and app.redoc_url is None
+```
+
+- [ ] **Step 3: Run them and watch them fail**
+
+Run: `uv run pytest tests/api -v`
+Expected: FAIL — `ModuleNotFoundError: selector_drift.api.views`.
+
+- [ ] **Step 4: Implement `views.py` — the whole read model, per API spec §4.3**
+
+```python
+# selector_drift/api/views.py
+"""Every request and response model of the API (API spec 4.3). The only module the type
+generator reads (scripts/gen-types.sh, Task 34C).
+
+Rule 1: no field without a column (or derive.py) behind it.
+Rule 2: every extracted value is a rendered Claim (`rail`), never a bare string.
+Rule 3: every check result is a Verdict; no boolean here means "passed".
+Verdict, Family, AnchorEvidence, Basis, FirstHealPolicy are imported from their owning
+packages, never redeclared, so a change to them is a change to this contract.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Generic, Literal, TypeVar
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from bok_core.boundary.sensitivity import Sensitivity
+from bok_core.findings import Severity
+from bok_core.provenance.render import RailPayload
+from selector_drift.heallog.capture import BBox
+from selector_drift.heallog.diff import DiffSpan
+from selector_drift.resolve.trace import AnchorEvidence, Family
+from selector_drift.scope.record import Basis, FirstHealPolicy
+from selector_drift.validate.verdict import Verdict
+
+__all__ = ["AttemptView", "BBox", "DecisionRequest", "DecisionView", "DiffSpan",
+           "EvidenceSideView", "ExtractedValueView", "FindingView", "HealView", "LoginRequest",
+           "OperatorView", "Page", "QuarantineView", "RateLimitView", "RequestModel",
+           "ResolutionView", "RunDetailView", "RunView", "RungAttemptView", "SpecView",
+           "StatsView", "TargetView", "ViewModel"]
+
+T = TypeVar("T")
+
+
+class RequestModel(BaseModel):
+    """Every request body. extra="forbid": a body carrying `actor` is a 422 (H3)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class ViewModel(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+
+# ---------------------------------------------------------------- requests
+
+class LoginRequest(RequestModel):
+    username: str = Field(pattern=r"^[a-z0-9_.-]{1,64}$")
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class DecisionRequest(RequestModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+# ---------------------------------------------------------------- responses
+
+class OperatorView(ViewModel):
+    username: str
+
+
+class RateLimitView(ViewModel):
+    requests: int
+    per_seconds: int
+
+
+class TargetView(ViewModel):
+    target: str
+    status: Literal["active", "expired", "unscoped"]
+    locked_reason: str | None              # set iff status != "active"; words, never a code
+    basis: Basis | None                    # None iff unscoped
+    sensitivity: Sensitivity | None        # DERIVED from basis (R4) -- displayed, never editable
+    authorising_party: str | None
+    authorised_on: date | None
+    expires_on: date | None
+    evidence_uri: str | None
+    evidence_sha256: str | None
+    origins: list[str]
+    rate_limit: RateLimitView | None
+    user_agent_contact: str | None
+    first_heal_policy: FirstHealPolicy | None
+    warmup_runs: int | None
+    evidence_retention_days: int | None    # None = kept for the life of the log (self-owned only)
+    legal_review: str | None
+    record_sha256: str | None
+    loaded_at: datetime | None
+
+
+class RunView(ViewModel):
+    run_key: str
+    target: str
+    spec_version: int
+    window: date
+    state: Literal["completed", "healed", "quarantined", "failed", "refused"]   # the frozen five
+    quarantine_resolution: Literal["promoted", "discarded"] | None
+    attempts: int
+    first_started_at: datetime
+    last_finished_at: datetime | None
+    rows_written: int | None
+    error: str | None
+
+
+class AttemptView(ViewModel):
+    attempt: int
+    started_at: datetime
+    finished_at: datetime | None
+    state: str
+    error: str | None
+    scope_record_sha256: str
+
+
+class RungAttemptView(ViewModel):
+    rung: int
+    family: Family
+    outcome: Literal["resolved", "no_match", "ambiguous", "not_visible", "anchor_mismatch",
+                     "escalated"]
+    ms: int
+
+
+class ResolutionView(ViewModel):
+    field: str
+    winning_rung: int | None               # None: no rung resolved
+    attempts: list[RungAttemptView]
+    node_id: str | None
+    heal_id: int | None
+
+
+class RunDetailView(RunView):
+    run_attempts: list[AttemptView]
+    resolutions: list[ResolutionView]
+    finding_count: int
+
+
+class DecisionView(ViewModel):
+    # Derived, not stored as one column:
+    #   "accepted"  -- the gate passed with no human (runs.state == healed, no quarantine
+    #                  row); includes a first heal passed by first_heal_policy: auto_promote
+    #   "promoted"  -- quarantine.resolved_as == promoted (heal_events.promoted_by is the actor)
+    #   "discarded" -- quarantine.resolved_as == discarded
+    #   None        -- still quarantined, awaiting a decision
+    resolved_as: Literal["accepted", "promoted", "discarded"] | None
+    actor: str | None                      # None for "accepted": no human decided
+    at: datetime | None
+    reason: str | None
+
+
+class EvidenceSideView(ViewModel):
+    available: bool
+    unavailable_reason: Literal["corrupted", "expired", "not_captured"] | None
+    captured_at: datetime | None
+    viewport: tuple[int, int] | None
+    boxes: dict[str, BBox]                 # field -> box recorded at capture (API spec 7.2)
+    dom_url: str | None                    # /api/v1/heals/{id}/evidence/{side}/dom
+    png_url: str | None
+
+
+class ExtractedValueView(ViewModel):
+    field: str
+    row_key: dict[str, str]                # natural-key values identifying the row
+    value: str
+    rail: RailPayload                      # bok_core.provenance.render.to_rail(claim) -- DomSource
+
+
+class HealView(ViewModel):
+    id: int
+    run_key: str
+    target: str
+    field: str
+    broke_at: datetime
+    winning_rung: int
+    confirmer_rung: int | None             # None when the confirmer was the VALUE family
+    confirmer_family: Family | None        # None: no cross-family confirmer resolved
+    selector_before: str | None
+    selector_after: str
+    anchor_before: AnchorEvidence | None
+    anchor_after: AnchorEvidence
+    trace: list[RungAttemptView]
+    verdicts: list[Verdict]
+    replay_status: Literal["reproduced", "not_reproducible", "not_yet_replayed", "corrupted"]
+    before: EvidenceSideView
+    after: EvidenceSideView
+    sample_values: list[ExtractedValueView]   # first 10 rows of the healed field
+    decision: DecisionView
+    summary: str                           # the design 5.4 sentence, built in derive.py
+
+
+class QuarantineView(ViewModel):
+    run_key: str
+    target: str
+    reason: str
+    verdicts: list[Verdict]
+    failing: list[Verdict]                 # outcome != PASS -- what a human must resolve
+    preview: list[dict[str, ExtractedValueView]]   # first 20 rows
+    heal_ids: list[int]
+    spec_excerpt: str                      # the FieldTarget YAML for each failing field (M11)
+    runbook_url: str                       # docs/runbook-spec-update.md
+    decision: DecisionView
+
+
+class FindingView(ViewModel):              # bok_core Finding, flattened for display
+    id: str
+    run_key: str
+    severity: Severity
+    title: str
+    check: str                             # properties["rule"]
+    observed: str
+    threshold: str
+    threshold_reason: str                  # required -- brief 8 screen 5
+    rail: RailPayload
+
+
+class SpecView(ViewModel):
+    target: str
+    version: int
+    yaml: str
+    validation: list[Verdict]
+
+
+class StatsView(ViewModel):                # API spec 6.2 -- plain figures with a method link
+    window: tuple[date, date]
+    elapsed_days: int
+    scheduled_runs: int
+    missed_runs: int
+    fired_without_attempt: int
+    run_success_rate: float                # completed+healed / attempted, from run_attempts
+    rung_shares: dict[str, float]          # rung1..rung5, from resolutions
+    heals: int
+    quarantines: int
+    quarantines_refused_correctly: int | None   # bench only; None without an answer key
+    manual_interventions: int
+    method_url: str                        # docs/methodology.md anchor for these figures
+
+
+class Page(ViewModel, Generic[T]):
+    items: list[T]
+    next_cursor: str | None                # opaque; base64 of (first_started_at, run_key)
+```
+
+- [ ] **Step 5: Implement `errors.py`**
+
+```python
+# selector_drift/api/errors.py
+"""RFC 9457 problem+json (API spec 5). Every error the API returns has this shape."""
+from __future__ import annotations
+
+from typing import ClassVar
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from selector_drift.validate.verdict import Verdict
+
+PROBLEM_JSON = "application/problem+json"
+
+
+class ProblemDetail(BaseModel):
+    type: str
+    title: str
+    status: int
+    detail: str
+    failing: list[Verdict] | None = None     # still-invalid only
+
+
+class ApiProblem(Exception):
+    slug: ClassVar[str] = "invalid"
+    status: ClassVar[int] = 400
+    title: ClassVar[str] = "Bad request"
+
+    def __init__(self, detail: str, *, failing: list[Verdict] | None = None,
+                 headers: dict[str, str] | None = None) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.failing = failing
+        self.headers = headers or {}
+
+
+class Unauthenticated(ApiProblem):
+    slug, status, title = "unauthenticated", 401, "Not signed in"
+
+
+class BadOrigin(ApiProblem):
+    slug, status, title = "bad-origin", 403, "Request origin refused"
+
+
+class NotFound(ApiProblem):
+    slug, status, title = "not-found", 404, "No such resource"
+
+
+class Invalid(ApiProblem):
+    slug, status, title = "invalid", 422, "The request is not valid"
+
+
+class StillInvalidProblem(ApiProblem):
+    slug, status, title = "still-invalid", 409, "Promotion refused: the gate still fails"
+
+
+class AlreadyResolved(ApiProblem):
+    slug, status, title = "already-resolved", 409, "This run has already been decided"
+
+
+class Throttled(ApiProblem):
+    slug, status, title = "throttled", 429, "Too many sign-in attempts"
+
+
+class EvidenceGone(ApiProblem):
+    """410. Corrupted (a manifest mismatch) or expired (deleted under retention). The file
+    is never served in either case (API spec 7.3)."""
+
+    status, title = 410, "Evidence is not available"
+
+    def __init__(self, detail: str, *, reason: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+
+    @property
+    def problem_slug(self) -> str:
+        return f"evidence-{self.reason}"
+
+
+def _slug(problem: ApiProblem) -> str:
+    return problem.problem_slug if isinstance(problem, EvidenceGone) else problem.slug
+
+
+def problem_response(problem: ApiProblem, base_url: str) -> JSONResponse:
+    body = ProblemDetail(type=f"{base_url.rstrip('/')}/problems/{_slug(problem)}",
+                         title=problem.title, status=problem.status, detail=problem.detail,
+                         failing=problem.failing)
+    return JSONResponse(body.model_dump(mode="json", exclude_none=True),
+                        status_code=problem.status, media_type=PROBLEM_JSON,
+                        headers=problem.headers)
+
+
+def _base(request: Request) -> str:
+    return str(request.app.state.settings.public_base_url)
+
+
+def install_problem_handlers(app: FastAPI) -> None:
+    @app.exception_handler(ApiProblem)
+    async def _problem(request: Request, exc: ApiProblem) -> JSONResponse:
+        return problem_response(exc, _base(request))
+
+    @app.exception_handler(RequestValidationError)
+    async def _invalid(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # Location and message only. FastAPI's default echoes `input` -- which, on
+        # /auth/login, is the password.
+        parts: list[str] = []
+        for err in exc.errors():
+            loc = ".".join(str(p) for p in err.get("loc", ()) if p != "body")
+            parts.append(f"{loc}: {err.get('msg', 'invalid')}")
+        return problem_response(Invalid("; ".join(parts) or "invalid request"), _base(request))
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        problem: ApiProblem = (NotFound("no route or resource at this path")
+                               if exc.status_code == 404 else Invalid(str(exc.detail)))
+        response = problem_response(problem, _base(request))
+        if exc.status_code not in (404, 422):
+            response.status_code = exc.status_code
+        return response
+
+```
+
+The `type` URIs are `<SD_PUBLIC_BASE_URL>/problems/<slug>`, per the spec's example; `docs/api.md`
+(Task 34C) carries one anchor per slug, and the published site maps `/problems/<slug>` to it.
+`evidence-expired` joins the spec's table beside `evidence-corrupted` — found 2026-09-26: the file
+route must also refuse a bundle deleted under retention, and "corrupted" would be a false statement.
+
+- [ ] **Step 6: Implement `deps.py`**
+
+```python
+# selector_drift/api/deps.py
+"""Path validators, the db session, and the authenticated operator (API spec 3, 4.1)."""
+from __future__ import annotations
+
+import hashlib
+import re
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from typing import Annotated
+
+from fastapi import Depends, Request
+from sqlalchemy import select
+from sqlalchemy.orm import Session as OrmSession
+
+from selector_drift.api.errors import Invalid, Unauthenticated
+from selector_drift.config import Settings
+from selector_drift.db.models import Operator, OperatorSession
+from selector_drift.db.session import Session
+
+TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+RUN_KEY_RE = re.compile(r"^[a-z0-9-]{1,63}:\d{1,6}:\d{4}-\d{2}-\d{2}$")   # Task 6 run_key()
+SESSION_COOKIE = "sd_session"
+
+
+def check_target(value: str) -> str:
+    if not TARGET_RE.fullmatch(value):
+        raise Invalid("target: not a target name")
+    return value
+
+
+def check_run_key(value: str) -> str:
+    if not RUN_KEY_RE.fullmatch(value):
+        raise Invalid("run_key: not a run key")
+    return value
+
+
+def valid_target(target: str) -> str:            # bound by name to the {target} path param
+    return check_target(target)
+
+
+def valid_run_key(run_key: str) -> str:          # bound by name to the {run_key} path param
+    return check_run_key(run_key)
+
+
+def get_db() -> Iterator[OrmSession]:
+    with Session() as s:
+        yield s
+
+
+def app_settings(request: Request) -> Settings:
+    settings: Settings = request.app.state.settings
+    return settings
+
+
+def token_sha256(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def resolve_session(db: OrmSession, raw: str | None, now: datetime) -> Operator | None:
+    if not raw or len(raw) > 128:
+        return None
+    row = db.get(OperatorSession, token_sha256(raw))
+    if row is None or row.revoked_at is not None or row.expires_at <= now:
+        return None
+    op = db.scalars(select(Operator).where(Operator.id == row.operator_id)).first()
+    if op is None or op.disabled_at is not None:
+        return None
+    return op
+
+
+Db = Annotated[OrmSession, Depends(get_db)]
+AppSettings = Annotated[Settings, Depends(app_settings)]
+RunKey = Annotated[str, Depends(valid_run_key)]
+TargetName = Annotated[str, Depends(valid_target)]
+
+
+def current_operator(request: Request, db: Db) -> Operator:
+    op = resolve_session(db, request.cookies.get(SESSION_COOKIE), datetime.now(UTC))
+    if op is None:
+        raise Unauthenticated("sign in to continue")
+    return op
+
+
+CurrentOperator = Annotated[Operator, Depends(current_operator)]
+```
+
+- [ ] **Step 7: Implement `auth.py`**
+
+```python
+# selector_drift/api/auth.py
+"""Login, logout, me. argon2id; hashed session tokens; a throttle that survives restarts."""
+from __future__ import annotations
+
+import math
+import re
+import secrets
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+from fastapi import APIRouter, Request, Response
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session as OrmSession
+
+from selector_drift.api.deps import (SESSION_COOKIE, CurrentOperator, Db, token_sha256)
+from selector_drift.api.errors import Invalid, Throttled, Unauthenticated
+from selector_drift.api.views import LoginRequest, OperatorView
+from selector_drift.db.models import AuditLog, Operator, OperatorSession
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+SESSION_LIFETIME = timedelta(hours=12)          # absolute; no sliding renewal
+THROTTLE_LIMIT = 5
+THROTTLE_WINDOW = timedelta(minutes=15)
+_USERNAME = re.compile(r"^[a-z0-9_.-]{1,64}$")
+_hasher = PasswordHasher()                      # argon2id, library defaults
+_DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(16))   # equalises timing for unknown users
+
+
+def audit(db: OrmSession, *, actor: str, action: str, subject: str,
+          detail: dict[str, Any] | None = None) -> None:
+    db.add(AuditLog(at=datetime.now(UTC), actor=actor, action=action, subject=subject,
+                    detail=detail or {}))
+
+
+def create_operator(db: OrmSession, username: str, password: str) -> Operator:
+    if not _USERNAME.fullmatch(username):
+        raise Invalid("username must match ^[a-z0-9_.-]{1,64}$")
+    op = Operator(username=username, password_hash=_hasher.hash(password),
+                  created_at=datetime.now(UTC), disabled_at=None)
+    db.add(op)
+    audit(db, actor="system:create-operator", action="operator_created",
+          subject=f"operator:{username}")
+    db.flush()
+    return op
+
+
+def _failures(db: OrmSession, username: str, now: datetime) -> tuple[int, datetime | None]:
+    since = now - THROTTLE_WINDOW
+    q = select(func.count(), func.min(AuditLog.at)).where(
+        AuditLog.action == "login_failure", AuditLog.subject == f"operator:{username}",
+        AuditLog.at >= since)
+    count, oldest = db.execute(q).one()
+    return int(count), oldest
+
+
+def authenticate(db: OrmSession, username: str, password: str, now: datetime) -> Operator:
+    count, oldest = _failures(db, username, now)
+    if count >= THROTTLE_LIMIT and oldest is not None:
+        wait = max(1, math.ceil((oldest + THROTTLE_WINDOW - now).total_seconds()))
+        raise Throttled(f"Too many attempts - try again in {math.ceil(wait / 60)} minutes",
+                        headers={"Retry-After": str(wait)})
+    op = db.scalars(select(Operator).where(Operator.username == username)).first()
+    usable = op is not None and op.disabled_at is None
+    try:
+        ok = _hasher.verify(op.password_hash if usable and op else _DUMMY_HASH, password)
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
+        ok = False
+    if not (ok and usable and op):
+        audit(db, actor="anonymous", action="login_failure", subject=f"operator:{username}")
+        db.commit()
+        raise Unauthenticated("Username or password is incorrect")
+    if _hasher.check_needs_rehash(op.password_hash):
+        op.password_hash = _hasher.hash(password)
+    return op
+
+
+def issue_session(db: OrmSession, operator: Operator, now: datetime) -> str:
+    raw = secrets.token_urlsafe(32)              # 32 random bytes; only its SHA-256 is stored
+    db.add(OperatorSession(token_sha256=token_sha256(raw), operator_id=operator.id,
+                           created_at=now, expires_at=now + SESSION_LIFETIME, revoked_at=None))
+    audit(db, actor=operator.username, action="login_success",
+          subject=f"operator:{operator.username}")
+    db.commit()
+    return raw
+
+
+@router.post("/login", response_model=OperatorView)
+def login(body: LoginRequest, response: Response, db: Db) -> OperatorView:
+    now = datetime.now(UTC)
+    op = authenticate(db, body.username, body.password, now)
+    raw = issue_session(db, op, now)
+    response.set_cookie(SESSION_COOKIE, raw, max_age=int(SESSION_LIFETIME.total_seconds()),
+                        httponly=True, secure=True, samesite="strict", path="/")
+    return OperatorView(username=op.username)
+
+
+@router.post("/logout", status_code=204, response_class=Response)
+def logout(request: Request, db: Db, op: CurrentOperator) -> Response:
+    raw = request.cookies.get(SESSION_COOKIE) or ""
+    row = db.get(OperatorSession, token_sha256(raw))
+    if row is not None:
+        row.revoked_at = datetime.now(UTC)
+    audit(db, actor=op.username, action="logout", subject=f"operator:{op.username}")
+    db.commit()
+    out = Response(status_code=204)
+    out.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
+    return out
+
+
+@router.get("/me", response_model=OperatorView)
+def me(op: CurrentOperator) -> OperatorView:
+    return OperatorView(username=op.username)
+```
+
+- [ ] **Step 8: Implement `main.py`**
+
+```python
+# selector_drift/api/main.py
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+
+from fastapi import FastAPI, Request, Response
+
+from selector_drift.api import auth
+from selector_drift.api.errors import BadOrigin, install_problem_handlers, problem_response
+from selector_drift.config import ConfigError, Settings, get_settings
+
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def install_origin_guard(app: FastAPI) -> None:
+    """CSRF: SameSite=Strict, plus the Origin of every non-GET must be the web origin."""
+
+    @app.middleware("http")
+    async def origin_guard(request: Request,
+                           call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+        settings: Settings = request.app.state.settings
+        if request.method not in SAFE_METHODS and \
+                request.headers.get("origin") != settings.web_origin:
+            return problem_response(BadOrigin("this request did not come from the web origin"),
+                                    settings.public_base_url)
+        return await call_next(request)
+
+
+def create_app(*, settings: Settings | None = None) -> FastAPI:
+    s = settings or get_settings()
+    if s.fixture_mode and s.env == "production":
+        raise ConfigError("SD_FIXTURE_MODE=1 refuses to start with SD_ENV=production")
+    app = FastAPI(title="Selector Drift API", version="1.0.0",
+                  openapi_url=None, docs_url=None, redoc_url=None)   # schema exported offline
+    app.state.settings = s
+    install_problem_handlers(app)
+    install_origin_guard(app)
+    app.include_router(auth.router, prefix="/api/v1")
+    return app
+```
+
+`openapi_url=None`: the schema is exported by `scripts/gen-types.sh` calling `app.openapi()`
+directly (Task 34C), so no unauthenticated route serves it.
+
+- [ ] **Step 9: `create-operator` in `__main__.py`**
+
+Task 6's module becomes an argparse dispatcher; its original behaviour is the `run` subcommand.
+
+```python
+# selector_drift/__main__.py
+"""python -m selector_drift <command>. No Typer, no Click, no [project.scripts]."""
+from __future__ import annotations
+
+import argparse
+import getpass
+import sys
+
+MIN_PASSWORD = 12
+
+
+def _create_operator(username: str) -> int:
+    if not sys.stdin.isatty():
+        print("create-operator reads the password from a terminal only - never an argument, "
+              "never an environment variable. Refusing.", file=sys.stderr)
+        return 2
+    password = getpass.getpass("Password: ")
+    if password != getpass.getpass("Again: "):
+        print("passwords differ", file=sys.stderr)
+        return 2
+    if len(password) < MIN_PASSWORD:
+        print(f"use at least {MIN_PASSWORD} characters", file=sys.stderr)
+        return 2
+    from selector_drift.api.auth import create_operator
+    from selector_drift.db.session import Session
+    with Session() as s:
+        create_operator(s, username, password)
+        s.commit()
+    print(f"operator {username} created")
+    return 0
+
+
+def _run(spec: str) -> int:
+    from selector_drift.orchestrate.flows import extraction_flow
+    print(extraction_flow(spec))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m selector_drift")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("run", help="run one extraction now").add_argument("spec")
+    sub.add_parser("create-operator", help="create an API operator").add_argument("username")
+    args = parser.parse_args(argv)
+    if args.command == "run":
+        return _run(args.spec)
+    if args.command == "create-operator":
+        return _create_operator(args.username)
+    parser.error(f"unknown command {args.command}")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+(Imports inside the two command functions are deliberate: `create-operator` must not import the
+orchestrator and its Playwright dependency tree just to hash a password.)
+
+- [ ] **Step 10: Add the contract** — append the `api-is-read-side` stanza above to `.importlinter`.
+
+- [ ] **Step 11: Run them and make sure they pass**
+
+Run: `uv run pytest tests/api -v && uv run lint-imports && uv run mypy --strict selector_drift/api`
+Expected: PASS — 13 auth tests, 21 contract tests (parametrised cases counted). `api-is-read-side` kept.
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add selector_drift/api selector_drift/__main__.py .importlinter pyproject.toml uv.lock tests/api
+git commit -m "feat(api): read model, problem+json, argon2id sessions, origin check, DB-backed throttle"
+```
+
+---
+
+### Task 34B: `derive.py` — every computed figure, once (API spec §6)
+
+**Files:**
+- Create: `selector_drift/api/derive.py`
+- Create: `docs/proposals/interface-contract-querysource.md` — **a proposal only, flagged for sign-off; `backoffice-kit` is not edited**
+- Modify: `selector_drift/orchestrate/rung_stats.py` — `rung_stats()` delegates to `derive.rung_shares`
+- Modify: `pyproject.toml` (deps)
+- Test: `tests/api/test_derive.py`, `tests/docs/test_querysource_proposal.py`
+
+**Interfaces:**
+- Consumes: `Heartbeat`, `Run`, `RunAttempt`, `Resolution`, `HealEvent`, `Quarantine`, `Intervention`, `AuditLog` (Task 3 + schema additions); `StatsView` (Task 34); `Verdict`, `Outcome` (Task 20); `Family` (Task 13); `load_spec` (Task 5); `get_settings` (Task 33).
+- Produces (the spec's signatures; `now`/`today` are keyword-only additions so tests do not read the wall clock — M20):
+  - `Window = tuple[date, date]` — inclusive UTC calendar dates
+  - `run_success_rate(db, target: str | None, window: Window) -> float`
+  - `rung_shares(db, target: str | None, window: Window) -> dict[str, float]` — keys `rung1`…`rung5`
+  - `expected_slots(db, target: str, window: Window, *, now: datetime | None = None) -> list[datetime]`
+  - `scheduled_runs(db, target: str | None, window: Window, *, now: datetime | None = None) -> int`
+  - `missed_runs(db, target: str | None, window: Window, *, now: datetime | None = None) -> int`
+  - `fired_without_attempt(db, target: str | None, window: Window) -> int`
+  - `elapsed_days(db, target: str | None, *, today: date | None = None) -> int` — `None` = the whole log
+  - `heal_summary(heal: HealEvent) -> str`
+  - `quarantines_refused_correctly(db, target: str | None, window: Window) -> int | None`
+  - `stats(db, target: str | None, window: Window, *, now: datetime | None = None) -> StatsView`
+  - `METHOD_URL`, `RUNG_METHOD: dict[int, str]`
+
+**Why one module.** API spec §1 rule 1: a value that must be computed is computed in exactly one
+place, which both the operator screen (Task 34C) and the published log (Task 40A) import. The first
+revision computed the rung distribution in `orchestrate/rung_stats.py` (Task 6) and was about to
+compute it again in the publisher and again in the API — three implementations of the headline
+number, one of which would drift. **Found 2026-09-26:** `rung_stats()` now delegates here.
+
+**Four definitions a reader must be able to check (they go into `docs/methodology.md`'s "Published
+figures" section verbatim, and `method_url` points there):**
+
+| Figure | Definition | Audit |
+|---|---|---|
+| run success rate | `run_attempts` rows in `completed` or `healed` ÷ all `run_attempts` rows started in the window. **Never `runs`**: a retry overwrites `runs.state` | M13 |
+| rung shares | resolutions won by rung *n* ÷ **every** `resolutions` row in the window, including rung-1 hits and rows no rung won — so the five shares sum to ≤ 1 and the remainder is "unresolved" | C4 |
+| missed runs | cron slots the target's schedule expected in the window — from its first heartbeat, never before — with no heartbeat at that slot. A down host writes nothing and so shows as missed | B3, design §9.2 |
+| fired without attempt | heartbeats with no `run_attempts` row started at or after the fire — the scheduler fired and the run died before it began (a refused scope, a crashed worker, an unloadable spec) | API spec §6.1 |
+
+**"The schedule as versioned at the time" needs a history, and the frozen schema already has one.**
+A spec's `schedule` can change mid-log. Task 29A records every spec edit in `interventions`; derive
+reads the rows with `kind = "spec_edit"` and `field = "schedule"`, whose `before`/`after` carry
+`{"schedule": "<cron>"}`, and builds one span per schedule. **This is a requirement on Task 29A's
+`record_intervention`** — a schedule change must be recorded at field granularity with that shape —
+and `test_a_schedule_edit_changes_the_expected_slots_from_that_moment` below pins it.
+
+**`quarantines_refused_correctly` reads the scorer's rows, never the answer key** (API spec §4.3).
+`testbench/score.py` writes `audit_log(action="scored", subject=<run_key>, detail={"judgement": …})`
+with `judgement` one of `correct_refusal`, `false_refusal`, `correct_accept`, `false_accept`. That
+detail shape is the reading contract; the bench spec's `score.py` must write it. A target with no
+`scored` rows has no answer key and gets `None`, never `0`.
+
+- [ ] **Step 1: Add the dependency**
+
+```bash
+uv add croniter
+uv add --dev types-croniter
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```python
+# tests/api/test_derive.py
+from __future__ import annotations
+
+import datetime as dt
+from datetime import UTC, datetime
+
+import pytest
+from sqlalchemy import text
+
+from selector_drift.api import derive
+from selector_drift.config import get_settings
+from selector_drift.db.models import (AuditLog, HealEvent, Heartbeat, Intervention, Quarantine,
+                                      Resolution, Run, RunAttempt)
+from selector_drift.db.session import Session, engine
+from selector_drift.resolve.trace import Family
+
+D1 = dt.date(2026, 9, 1)
+WINDOW = (D1, dt.date(2026, 9, 4))
+AFTER = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
+
+
+def at(day: int, h: int = 4, m: int = 12) -> datetime:
+    return datetime(2026, 9, day, h, m, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def db(tmp_path, monkeypatch):
+    specs = tmp_path / "specs"
+    specs.mkdir()
+    (specs / "testbench.yaml").write_text(
+        "version: 1\nscope_ref: scopes/testbench.yaml\nschedule: '12 4 * * *'\n"
+        "row_scope: each row\nnatural_key: [claim_number]\n"
+        "expected_schema: {claim_number: string}\nnavigate: []\n"
+        "targets:\n  - name: claim_number\n    description: the claim number cell\n"
+        "    relation: right_of\n"
+        "    assertions: [{type: format, pattern: '^[A-Z]{2}\\d{8}$'}]\n")
+    monkeypatch.setenv("SD_SPEC_DIR", str(specs))
+    get_settings.cache_clear()
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE runs, run_attempts, resolutions, heal_events, quarantine, "
+                       "interventions, audit_log, heartbeats RESTART IDENTITY CASCADE"))
+    with Session() as s:
+        yield s
+    get_settings.cache_clear()
+
+
+def run(s, day: int, state: str = "completed") -> str:
+    key = f"testbench:1:2026-09-0{day}"
+    s.add(Run(run_key=key, target="testbench", spec_version=1, window=dt.date(2026, 9, day),
+              first_started_at=at(day), state=state))
+    s.flush()
+    return key
+
+
+def beat(s, day: int, key: str | None, h: int = 4, m: int = 12) -> None:
+    s.add(Heartbeat(target="testbench", scheduled_for=at(day, h, m), fired_at=at(day, h, m),
+                    run_key=key))
+
+
+def attempt(s, key: str, n: int, state: str, day: int) -> None:
+    s.add(RunAttempt(run_key=key, attempt=n, started_at=at(day, 4, 13), finished_at=at(day, 4, 14),
+                     state=state, error=None, scope_record_sha256="0" * 64))
+
+
+@pytest.mark.integration
+def test_run_success_rate_reads_run_attempts_not_runs(db):
+    """M13. runs says 'completed'; the attempts say one of two succeeded."""
+    key = run(db, 1, "completed")
+    attempt(db, key, 1, "failed", 1)
+    attempt(db, key, 2, "completed", 1)
+    db.commit()
+    assert derive.run_success_rate(db, "testbench", WINDOW) == 0.5
+
+
+@pytest.mark.integration
+def test_rung_shares_denominator_is_every_resolution(db):
+    """C4. Rung-1 hits and unresolved rows are in the denominator."""
+    key = run(db, 1)
+    for rung in [1] * 8 + [3] + [None]:
+        db.add(Resolution(run_key=key, target="testbench", field="claim_number",
+                          winning_rung=rung, attempts=[], node_id=None, ms=1, at=at(1)))
+    db.commit()
+    shares = derive.rung_shares(db, "testbench", WINDOW)
+    assert shares == {"rung1": 0.8, "rung2": 0.0, "rung3": 0.1, "rung4": 0.0, "rung5": 0.0}
+
+
+@pytest.mark.integration
+def test_missed_runs_counts_expected_slots_with_no_heartbeat(db):
+    for day in (1, 2, 4):
+        beat(db, day, run(db, day))
+    db.commit()
+    assert derive.scheduled_runs(db, "testbench", WINDOW, now=AFTER) == 4
+    assert derive.missed_runs(db, "testbench", WINDOW, now=AFTER) == 1
+
+
+@pytest.mark.integration
+def test_a_down_host_is_missed_not_invisible(db):
+    """Design 9.2. The host that was down writes nothing; the slots still expected it."""
+    beat(db, 1, run(db, 1))
+    db.commit()
+    assert derive.missed_runs(db, "testbench", WINDOW, now=AFTER) == 3
+
+
+@pytest.mark.integration
+def test_slots_before_the_first_heartbeat_are_not_missed(db):
+    beat(db, 3, run(db, 3))
+    beat(db, 4, run(db, 4))
+    db.commit()
+    assert derive.scheduled_runs(db, "testbench", WINDOW, now=AFTER) == 2
+    assert derive.missed_runs(db, "testbench", WINDOW, now=AFTER) == 0
+
+
+@pytest.mark.integration
+def test_a_manual_run_does_not_fill_a_missed_slot(db):
+    beat(db, 1, run(db, 1))
+    beat(db, 2, None, h=10, m=0)            # someone ran it by hand at 10:00
+    db.commit()
+    assert derive.missed_runs(db, "testbench", (D1, dt.date(2026, 9, 2)), now=AFTER) == 1
+
+
+@pytest.mark.integration
+def test_slots_after_now_are_not_yet_missed(db):
+    beat(db, 1, run(db, 1))
+    db.commit()
+    assert derive.missed_runs(db, "testbench", WINDOW, now=at(2, 12, 0)) == 1
+
+
+@pytest.mark.integration
+def test_a_schedule_edit_changes_the_expected_slots_from_that_moment(db):
+    """'As versioned at the time.' Requires Task 29A to record schedule edits at field
+    granularity with {'schedule': cron} before/after."""
+    beat(db, 1, run(db, 1))
+    db.add(Intervention(at=at(3, 0, 0), actor="op1", kind="spec_edit", target="testbench",
+                        field="schedule", before={"schedule": "12 4 * * *"},
+                        after={"schedule": "12 4,16 * * *"}, reason="twice daily"))
+    (get_settings().spec_dir / "testbench.yaml").write_text(
+        (get_settings().spec_dir / "testbench.yaml").read_text()
+        .replace("'12 4 * * *'", "'12 4,16 * * *'"))
+    db.commit()
+    assert derive.scheduled_runs(db, "testbench", WINDOW, now=AFTER) == 1 + 1 + 2 + 2
+
+
+@pytest.mark.integration
+def test_fired_without_attempt_counts_heartbeats_with_no_attempt(db):
+    ran = run(db, 1)
+    beat(db, 1, ran)
+    attempt(db, ran, 1, "completed", 1)
+    beat(db, 2, run(db, 2, "refused"))           # refused: no run_attempts row
+    beat(db, 3, None)                            # spec failed to load
+    db.commit()
+    assert derive.fired_without_attempt(db, "testbench", WINDOW) == 2
+
+
+@pytest.mark.integration
+def test_elapsed_days_counts_from_the_first_heartbeat_not_ninety(db):
+    beat(db, 1, run(db, 1))
+    db.commit()
+    assert derive.elapsed_days(db, "testbench", today=dt.date(2026, 9, 11)) == 10
+    assert derive.elapsed_days(db, "nobody", today=dt.date(2026, 9, 11)) == 0
+
+
+@pytest.mark.integration
+def test_quarantines_refused_correctly_is_none_without_an_answer_key(db):
+    assert derive.quarantines_refused_correctly(db, "testbench", WINDOW) is None
+
+
+@pytest.mark.integration
+def test_quarantines_refused_correctly_counts_the_scorers_rows(db):
+    for day, judgement in [(1, "correct_refusal"), (2, "correct_refusal"), (3, "false_refusal"),
+                           (4, "correct_accept")]:
+        db.add(AuditLog(at=at(day, 5, 0), actor="system:score", action="scored",
+                        subject=run(db, day), detail={"judgement": judgement}))
+    db.commit()
+    assert derive.quarantines_refused_correctly(db, "testbench", WINDOW) == 2
+
+
+@pytest.mark.integration
+def test_stats_assembles_every_figure_from_the_same_functions(db):
+    key = run(db, 1, "quarantined")
+    beat(db, 1, key)
+    attempt(db, key, 1, "quarantined", 1)
+    db.add(HealEvent(run_key=key, target="testbench", field="claim_number", broke_at=at(1),
+                     winning_rung=3, selector_after="td", anchor_after={}, trace=[],
+                     verdicts=[]))
+    db.add(Quarantine(run_key=key, reason="gate", verdicts=[], data_uri="q.parquet"))
+    db.commit()
+    s = derive.stats(db, "testbench", WINDOW, now=AFTER)
+    assert s.window == WINDOW
+    assert s.heals == 1 and s.quarantines == 1
+    assert s.scheduled_runs == derive.scheduled_runs(db, "testbench", WINDOW, now=AFTER) == 4
+    assert s.missed_runs == 3
+    assert s.run_success_rate == derive.run_success_rate(db, "testbench", WINDOW) == 0.0
+    assert s.rung_shares == derive.rung_shares(db, "testbench", WINDOW)
+    assert s.quarantines_refused_correctly is None
+    assert s.manual_interventions == 0
+    assert s.method_url == derive.METHOD_URL
+
+
+def _heal(**kw) -> HealEvent:
+    base = dict(id=1, run_key="testbench:1:2026-09-07", target="testbench", field="claim_number",
+                broke_at=datetime(2026, 9, 7, 4, 12, tzinfo=UTC), winning_rung=3,
+                confirmer_rung=4, confirmer_family=Family.STRUCTURAL.value,
+                selector_after='[aria-label="Claim Number"] + td',
+                verdicts=[
+                    {"check": "FormatAssertion", "outcome": "PASS", "observed": "AB12345678",
+                     "threshold": "^[A-Z]{2}\\d{8}$", "reason": "matches"},
+                    {"check": "IndependentRungAgreement", "outcome": "PASS", "observed": None,
+                     "threshold": None, "reason": "same node"},
+                    {"check": "DistributionalAssertion", "outcome": "PASS",
+                     "observed": "PSI 0.03, n=847", "threshold": "0.20", "reason": "stable"}])
+    return HealEvent(**(base | kw))
+
+
+@pytest.mark.unit
+def test_heal_summary_is_the_design_sentence():
+    """Design 5.4 -- checkable, and strictly more persuasive than a made-up 0.94."""
+    assert derive.heal_summary(_heal()) == (
+        "Selector broke 04:12. Healed to `[aria-label=\"Claim Number\"] + td` via rung 3 "
+        "(label anchor). Independently confirmed by rung 4 (header-verified column position) "
+        "— same element. FormatAssertion ✓ (observed AB12345678, threshold ^[A-Z]{2}\\d{8}$) "
+        "· DistributionalAssertion ✓ (observed PSI 0.03, n=847, threshold 0.20).")
+
+
+@pytest.mark.unit
+def test_heal_summary_names_a_value_family_confirmer():
+    s = derive.heal_summary(_heal(confirmer_rung=None, confirmer_family=Family.VALUE.value))
+    assert "Independently confirmed by row-key continuity (VALUE family)" in s
+
+
+@pytest.mark.unit
+def test_heal_summary_says_when_no_confirmer_resolved():
+    s = derive.heal_summary(_heal(confirmer_rung=None, confirmer_family=None,
+                                  verdicts=[{"check": "IndependentRungAgreement",
+                                             "outcome": "INSUFFICIENT", "observed": None,
+                                             "threshold": None, "reason": "none resolved"}]))
+    assert "No cross-family confirmer resolved." in s
+
+
+@pytest.mark.unit
+def test_rung_stats_delegates_to_derive():
+    """API spec 1 rule 1: one computation of the headline number."""
+    import inspect
+    from selector_drift.orchestrate import rung_stats
+    src = inspect.getsource(rung_stats)
+    assert "derive.rung_shares" in src and "Resolution" not in src
+```
+
+```python
+# tests/docs/test_querysource_proposal.py
+from pathlib import Path
+
+import pytest
+
+DOC = Path("docs/proposals/interface-contract-querysource.md")
+
+
+@pytest.mark.unit
+def test_the_querysource_proposal_is_flagged_for_sign_off_not_applied():
+    text = DOC.read_text()
+    assert "**Status:** proposed" in text and "not applied" in text
+    assert "QuerySource(query_id: str, sql_sha256: str, as_of: datetime)" in text
+    assert "INTERFACE-CONTRACT.md" in text and "§2.2" in text
+```
+
+- [ ] **Step 3: Run them and watch them fail**
+
+Run: `uv run pytest tests/api/test_derive.py tests/docs/test_querysource_proposal.py -v`
+Expected: FAIL — `ImportError: cannot import name 'derive' from 'selector_drift.api'`.
+
+- [ ] **Step 4: Implement `derive.py`**
+
+```python
+# selector_drift/api/derive.py
+"""Every computed figure, once (API spec 6). The operator UI (Task 34C) and the published
+heal log (Task 40A) both import this module, so the screen and the public log cannot
+disagree about a number. Every definition here is written out in docs/methodology.md
+under "Published figures" -- the `method_url` of every StatsView."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
+
+from croniter import croniter
+from pydantic import TypeAdapter
+from sqlalchemy import exists, func, select
+from sqlalchemy.orm import Session as OrmSession
+
+from selector_drift.api.views import StatsView
+from selector_drift.config import get_settings
+from selector_drift.db.models import (AuditLog, HealEvent, Heartbeat, Intervention, Quarantine,
+                                      Resolution, Run, RunAttempt)
+from selector_drift.resolve.trace import Family
+from selector_drift.spec.loader import load_spec
+from selector_drift.validate.verdict import Outcome, Verdict
+
+Window = tuple[date, date]
+SUCCESS_STATES = ("completed", "healed")
+RUNGS = (1, 2, 3, 4, 5)
+METHOD_URL = "docs/methodology.md#published-figures"
+RUNG_METHOD: dict[int, str] = {1: "cached selector", 2: "accessibility tree",
+                               3: "label anchor", 4: "header-verified column position",
+                               5: "escalated to human review"}
+_GLYPH = {Outcome.PASS: "✓", Outcome.FAIL: "✗", Outcome.INSUFFICIENT: "— insufficient evidence"}
+_VERDICTS = TypeAdapter(list[Verdict])
+_FAR_PAST = datetime(1970, 1, 1, tzinfo=UTC)
+_FAR_FUTURE = datetime(9999, 1, 1, tzinfo=UTC)
+
+
+def _bounds(window: Window) -> tuple[datetime, datetime]:
+    """[first day 00:00Z, day after last 00:00Z) -- inclusive dates, half-open instants."""
+    return (datetime.combine(window[0], time.min, UTC),
+            datetime.combine(window[1] + timedelta(days=1), time.min, UTC))
+
+
+def _minute(t: datetime) -> datetime:
+    return t.astimezone(UTC).replace(second=0, microsecond=0)
+
+
+# --------------------------------------------------------------- run success, rung shares
+
+def run_success_rate(db: OrmSession, target: str | None, window: Window) -> float:
+    start, end = _bounds(window)
+    q = (select(func.count(), func.count().filter(RunAttempt.state.in_(SUCCESS_STATES)))
+         .select_from(RunAttempt).join(Run, Run.run_key == RunAttempt.run_key)
+         .where(RunAttempt.started_at >= start, RunAttempt.started_at < end))
+    if target is not None:
+        q = q.where(Run.target == target)
+    total, ok = db.execute(q).one()
+    return ok / total if total else 0.0
+
+
+def rung_shares(db: OrmSession, target: str | None, window: Window) -> dict[str, float]:
+    start, end = _bounds(window)
+    q = (select(Resolution.winning_rung, func.count())
+         .where(Resolution.at >= start, Resolution.at < end)
+         .group_by(Resolution.winning_rung))
+    if target is not None:
+        q = q.where(Resolution.target == target)
+    counts: dict[int | None, int] = {rung: n for rung, n in db.execute(q).all()}
+    total = sum(counts.values())                # every resolution, won or not (C4)
+    return {f"rung{r}": (counts.get(r, 0) / total if total else 0.0) for r in RUNGS}
+
+
+# --------------------------------------------------------------- the schedule and its slots
+
+@dataclass(frozen=True)
+class _Span:
+    start: datetime
+    end: datetime
+    cron: str
+
+
+def _current_schedules() -> dict[str, str]:
+    """target -> cron, from the spec files as they are now. Spec files are <target>.yaml."""
+    return {p.stem: load_spec(p).schedule
+            for p in sorted(get_settings().spec_dir.glob("*.yaml"))}
+
+
+def _schedule_spans(db: OrmSession, target: str, current: str) -> list[_Span]:
+    edits = list(db.scalars(select(Intervention)
+                            .where(Intervention.target == target,
+                                   Intervention.kind == "spec_edit",
+                                   Intervention.field == "schedule")
+                            .order_by(Intervention.at)))
+    if not edits:
+        return [_Span(_FAR_PAST, _FAR_FUTURE, current)]
+    spans = [_Span(_FAR_PAST, edits[0].at, str(edits[0].before["schedule"]))]
+    spans += [_Span(a.at, b.at, str(a.after["schedule"])) for a, b in zip(edits, edits[1:])]
+    spans.append(_Span(edits[-1].at, _FAR_FUTURE, current))     # the file is the truth now
+    return spans
+
+
+def _slots(cron: str, start: datetime, end: datetime) -> list[datetime]:
+    """Cron slots in [start, end)."""
+    it = croniter(cron, start - timedelta(microseconds=1))
+    out: list[datetime] = []
+    while (slot := it.get_next(datetime)) < end:
+        out.append(slot)
+    return out
+
+
+def expected_slots(db: OrmSession, target: str, window: Window, *,
+                   now: datetime | None = None) -> list[datetime]:
+    now = now or datetime.now(UTC)
+    first = db.scalar(select(func.min(Heartbeat.scheduled_for))
+                      .where(Heartbeat.target == target))
+    current = _current_schedules().get(target)
+    if first is None or current is None:
+        return []                               # the log for this target has not started
+    w_start, w_end = _bounds(window)
+    start, end = max(w_start, _minute(first)), min(w_end, now)
+    slots: set[datetime] = set()
+    for span in _schedule_spans(db, target, current):
+        s, e = max(start, span.start), min(end, span.end)
+        if s < e:
+            slots.update(_slots(span.cron, s, e))
+    return sorted(slots)
+
+
+def _targets(db: OrmSession, target: str | None) -> list[str]:
+    if target is not None:
+        return [target]
+    return sorted(set(db.scalars(select(Heartbeat.target).distinct())))
+
+
+def scheduled_runs(db: OrmSession, target: str | None, window: Window, *,
+                   now: datetime | None = None) -> int:
+    return sum(len(expected_slots(db, t, window, now=now)) for t in _targets(db, target))
+
+
+def missed_runs(db: OrmSession, target: str | None, window: Window, *,
+                now: datetime | None = None) -> int:
+    missed = 0
+    for t in _targets(db, target):
+        slots = expected_slots(db, t, window, now=now)
+        if not slots:
+            continue
+        seen = {_minute(hb) for hb in db.scalars(
+            select(Heartbeat.scheduled_for).where(
+                Heartbeat.target == t,
+                Heartbeat.scheduled_for >= slots[0] - timedelta(minutes=1),
+                Heartbeat.scheduled_for <= slots[-1] + timedelta(minutes=1)))}
+        missed += sum(1 for slot in slots if _minute(slot) not in seen)
+    return missed
+
+
+def fired_without_attempt(db: OrmSession, target: str | None, window: Window) -> int:
+    start, end = _bounds(window)
+    attempted = exists().where(RunAttempt.run_key == Heartbeat.run_key,
+                               RunAttempt.started_at >= Heartbeat.fired_at)
+    q = (select(func.count()).select_from(Heartbeat)
+         .where(Heartbeat.scheduled_for >= start, Heartbeat.scheduled_for < end, ~attempted))
+    if target is not None:
+        q = q.where(Heartbeat.target == target)
+    return int(db.scalar(q) or 0)
+
+
+def elapsed_days(db: OrmSession, target: str | None, *, today: date | None = None) -> int:
+    today = today or datetime.now(UTC).date()
+    q = select(func.min(Heartbeat.fired_at))
+    if target is not None:
+        q = q.where(Heartbeat.target == target)
+    first = db.scalar(q)
+    return (today - first.astimezone(UTC).date()).days if first is not None else 0
+
+
+# --------------------------------------------------------------- counts
+
+def _count_heals(db: OrmSession, target: str | None, window: Window) -> int:
+    start, end = _bounds(window)
+    q = select(func.count()).select_from(HealEvent).where(HealEvent.broke_at >= start,
+                                                          HealEvent.broke_at < end)
+    if target is not None:
+        q = q.where(HealEvent.target == target)
+    return int(db.scalar(q) or 0)
+
+
+def _count_quarantines(db: OrmSession, target: str | None, window: Window) -> int:
+    start, end = _bounds(window)
+    q = (select(func.count()).select_from(Quarantine).join(Run, Run.run_key == Quarantine.run_key)
+         .where(Run.first_started_at >= start, Run.first_started_at < end))
+    if target is not None:
+        q = q.where(Run.target == target)
+    return int(db.scalar(q) or 0)
+
+
+def _count_interventions(db: OrmSession, target: str | None, window: Window) -> int:
+    start, end = _bounds(window)
+    q = select(func.count()).select_from(Intervention).where(Intervention.at >= start,
+                                                             Intervention.at < end)
+    if target is not None:
+        q = q.where(Intervention.target == target)
+    return int(db.scalar(q) or 0)
+
+
+def quarantines_refused_correctly(db: OrmSession, target: str | None,
+                                  window: Window) -> int | None:
+    """Counts testbench/score.py's judgements. None -- not 0 -- without an answer key."""
+    scored = select(AuditLog).where(AuditLog.action == "scored")
+    if target is not None:
+        scored = scored.where(AuditLog.subject.startswith(f"{target}:"))
+    if db.scalar(select(func.count()).select_from(scored.subquery())) == 0:
+        return None
+    start, end = _bounds(window)
+    rows = db.scalars(scored.where(AuditLog.at >= start, AuditLog.at < end))
+    return sum(1 for r in rows if r.detail.get("judgement") == "correct_refusal")
+
+
+# --------------------------------------------------------------- the heal-log sentence
+
+def _phrase(v: Verdict) -> str:
+    bits = [b for b in (v.observed and f"observed {v.observed}",
+                        v.threshold and f"threshold {v.threshold}") if b]
+    return f"{v.check} {_GLYPH[Outcome(v.outcome)]}" + (f" ({', '.join(bits)})" if bits else "")
+
+
+def heal_summary(heal: HealEvent) -> str:
+    """Design 5.4: a conjunction of named verdicts, never a confidence score."""
+    parts = [f"Selector broke {heal.broke_at.astimezone(UTC):%H:%M}.",
+             f"Healed to `{heal.selector_after}` via rung {heal.winning_rung} "
+             f"({RUNG_METHOD[heal.winning_rung]})."]
+    if heal.confirmer_family == Family.VALUE:
+        parts.append("Independently confirmed by row-key continuity (VALUE family) "
+                     "— values agree with the last accepted run.")
+    elif heal.confirmer_rung is not None:
+        parts.append(f"Independently confirmed by rung {heal.confirmer_rung} "
+                     f"({RUNG_METHOD[heal.confirmer_rung]}) — same element.")
+    else:
+        parts.append("No cross-family confirmer resolved.")
+    checks = [_phrase(v) for v in _VERDICTS.validate_python(heal.verdicts or [])
+              if v.check != "IndependentRungAgreement"]
+    if checks:
+        parts.append(" · ".join(checks) + ".")
+    return " ".join(parts)
+
+
+# --------------------------------------------------------------- the whole view
+
+def stats(db: OrmSession, target: str | None, window: Window, *,
+          now: datetime | None = None) -> StatsView:
+    now = now or datetime.now(UTC)
+    return StatsView(
+        window=window,
+        elapsed_days=elapsed_days(db, target, today=now.date()),
+        scheduled_runs=scheduled_runs(db, target, window, now=now),
+        missed_runs=missed_runs(db, target, window, now=now),
+        fired_without_attempt=fired_without_attempt(db, target, window),
+        run_success_rate=run_success_rate(db, target, window),
+        rung_shares=rung_shares(db, target, window),
+        heals=_count_heals(db, target, window),
+        quarantines=_count_quarantines(db, target, window),
+        quarantines_refused_correctly=quarantines_refused_correctly(db, target, window),
+        manual_interventions=_count_interventions(db, target, window),
+        method_url=METHOD_URL,
+    )
+```
+
+**A refusal writes no `run_attempts` row.** `fired_without_attempt` counts a refused scope as a fire
+that never became an attempt (API spec §6.1). That holds only if Task 6 calls `record_attempt()`
+*after* `authorise()` succeeds — confirm it there; `test_fired_without_attempt_counts_heartbeats_with_no_attempt`
+pins the reading.
+
+- [ ] **Step 5: Make `rung_stats()` delegate**
+
+```python
+# selector_drift/orchestrate/rung_stats.py
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+
+from selector_drift.api import derive
+from selector_drift.db.session import Session
+
+LOG_START = date(1970, 1, 1)      # every resolution ever recorded; derive owns the definition
+
+
+def rung_stats() -> dict[str, float]:
+    with Session() as s:
+        return derive.rung_shares(s, None, (LOG_START, datetime.now(UTC).date()))
+
+
+if __name__ == "__main__":
+    print(" · ".join(f"{k} {v:.1%}" for k, v in rung_stats().items()))
+```
+
+- [ ] **Step 6: Write the contract-amendment proposal (proposal only — do not edit `backoffice-kit`)**
+
+```markdown
+<!-- docs/proposals/interface-contract-querysource.md -->
+# Proposal: `QuerySource` — a provenance source for figures computed over a product's own tables
+
+**Status:** proposed, **not applied**. Flagged for sign-off by the `backoffice-kit` owner.
+**Amends:** `backoffice-kit/docs/INTERFACE-CONTRACT.md` §2.2 (`Source`), a minor (additive) bump.
+**Raised by:** `selector-drift`, API spec §6.2, plan Task 34B. **Date:** 2026-09-26.
+
+## The gap
+
+`selector-drift` publishes aggregates — run-success rate, rung shares, missed runs, heal and
+quarantine counts. Programme thesis: every number traceable to its origin. `Source` has seven
+variants and none is "a query over this product's own tables", and the contract's rule is that a
+symbol not in the document does not exist. So today these figures cross the wire as plain numbers
+with a `method_url` into `docs/methodology.md`, rendered as figures with a "how this is computed"
+link rather than as `<Claim>`s.
+
+## The addition
+
+    QuerySource(query_id: str, sql_sha256: str, as_of: datetime)
+
+- `query_id` — a stable name for the computation, e.g. `derive.run_success_rate`.
+- `sql_sha256` — SHA-256 of the exact query text, so a reader can tell whether the figure was
+  computed by the query the methodology prints.
+- `as_of` — when the query ran; tables change, and a figure is true as of an instant.
+
+A figure then becomes `Claim[float](value=…, source=QuerySource(…), method=DERIVED,
+confidence=None, observed_at=as_of)`. I3 is unaffected (the claim is `DERIVED`, not
+`DETERMINISTIC`); I1 holds trivially with no model parents; I7 holds because no ancestor is a
+`MODEL` claim.
+
+## What it would require of `bok-core`
+
+1. `QuerySource` added to the `Source` discriminated union.
+2. `render.to_rail()` renders it: query id, the first 12 hex of `sql_sha256`, and `as_of`.
+3. Tests: the union round-trips `QuerySource` through JSON; `to_rail` of a `QuerySource` claim
+   carries all three fields.
+
+## What changes in `selector-drift` if accepted
+
+`StatsView`'s numeric fields become `Claim[float]` / `Claim[int]` built in `derive.stats()`;
+`StatFigure` in `web/` is swapped for `ClaimValue` (one component). Nothing else moves.
+
+## If declined
+
+Nothing changes. `StatsView` keeps plain numbers with `method_url`, which is honest, and is what
+ships until a decision is made.
+
+## Sign-off
+
+- [ ] `backoffice-kit` owner — accepted / declined, date, and the contract version that carries it.
+```
+
+- [ ] **Step 7: Add the "Published figures" section to `docs/methodology.md`** — the four-row
+  definitions table above, verbatim, under the heading `## Published figures` (the anchor
+  `METHOD_URL` points to).
+
+- [ ] **Step 8: Run them and make sure they pass**
+
+Run: `uv run pytest tests/api/test_derive.py tests/docs/test_querysource_proposal.py -v && uv run mypy --strict selector_drift/api`
+Expected: PASS, 18 tests. mypy clean.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add selector_drift/api/derive.py selector_drift/orchestrate/rung_stats.py \
+        docs/proposals/interface-contract-querysource.md docs/methodology.md \
+        pyproject.toml uv.lock tests/api/test_derive.py tests/docs/test_querysource_proposal.py
+git commit -m "feat(api): derive.py computes every published figure once; QuerySource proposal for sign-off"
+```
+
+
+- [ ] **Carried from Task 26C (2026-09-26): count false accepts**
+
+Add to `selector_drift/api/derive.py` and to `StatsView` (`false_accepts: int | None`):
+
+```python
+def false_accepts(db: Session, target: str | None, window: tuple[date, date]) -> int | None:
+    """Wrong heals the gate let through, per the bench scorer. None where no answer key exists."""
+    if target not in (None, "testbench"):
+        return None
+    return int(db.execute(text(
+        "select count(*) from audit_log where action = 'scored' "
+        "and detail->>'judgement' = 'false_accept' and at::date between :a and :b"),
+        {"a": window[0], "b": window[1]}).scalar_one())
+```
+
+`stats()` sets `false_accepts=false_accepts(db, target, window)`. Task 29A's `notify()` fires at `HIGH`
+on any new `false_accept` row. Add to `tests/api/test_derive.py`:
+
+```python
+@pytest.mark.integration
+def test_false_accepts_are_counted_and_never_hidden(db, one_false_accept_scored) -> None:
+    from selector_drift.api.derive import stats
+    assert stats(db, "testbench", WINDOW).false_accepts == 1
+
+@pytest.mark.integration
+def test_false_accepts_is_none_for_a_target_without_an_answer_key(db) -> None:
+    from selector_drift.api.derive import stats
+    assert stats(db, "control-app-1", WINDOW).false_accepts is None
+```
+
+---
+
+### Task 34C: The API — resources, the evidence route, and generated types (API spec §4.2, §7.3, §8, §9)
+
+Runs after Task 34 and Task 34B.
+
+**Files:**
+- Create: `selector_drift/api/evidence.py`, `selector_drift/api/rows.py`, `selector_drift/api/openapi_export.py`
+- Create: `selector_drift/api/routers/targets.py`, `runs.py`, `heals.py`, `quarantine.py`, `quality.py`, `specs.py`, `stats.py`, `_cursor.py`
+- Create: `scripts/gen-types.sh`, `web/lib/openapi.json` and `web/lib/api.d.ts` (both generated, both committed), `web/lib/api.ts`, `docs/api.md`
+- Modify: `selector_drift/api/main.py` (routers; `quarantine_actions=`), `selector_drift/api/deps.py` (`QuarantineActionsLike`, `quarantine_actions`), `selector_drift/__main__.py` (`serve-api`), `selector_drift/validate/quarantine.py` (`StillInvalid.verdicts`), `.github/workflows/ci.yml` (job `api-types`), `web/package.json`
+- Test: `tests/api/seed.py`, `tests/api/test_endpoints.py`, `tests/api/test_evidence.py`, `tests/api/test_types.py`, `tests/validate/test_quarantine.py` (one test added)
+
+**Interfaces:**
+- Consumes: everything in Task 34; `derive.stats`, `derive.heal_summary`, `derive.elapsed_days` (34B); `bundle.py` readers and `EvidenceCorrupted` (Task 19); `DiffSpan`, `dom_diff` (Task 33); `QuarantineActions` (Task 26A, handed in by `__main__`); `StillInvalid` (Task 25); `ScopeRecord` (Task 2); `load_spec` (Task 5); `Finding` (`bok_core.findings`), `Claim`, `DomSource`, `Method` (`bok_core.provenance`), `to_rail` (`bok_core.provenance.render`); `FindingRow`, `SelectorCacheEntry` (Task 3).
+- Produces:
+  - every route in API spec §4.2 under `/api/v1`
+  - `evidence.py`: `BundleState`, `bundle_state(db, settings, heal) -> BundleState`, `side_view(heal_id, state, side) -> EvidenceSideView`, `replay_status(heal, state) -> Literal[...]`, `open_file(db, settings, heal, side, kind) -> bytes`, `SECURITY_HEADERS`
+  - `rows.py`: `run_rows(settings, run_key, limit) -> list[dict[str, object]]`, `quarantine_rows(settings, data_uri, limit) -> list[dict[str, object]]`
+  - `_cursor.py`: `encode_cursor(at: datetime, key: str) -> str`, `decode_cursor(raw: str) -> tuple[datetime, str]`
+  - `deps.py`: `QuarantineActionsLike` protocol, `quarantine_actions(request) -> QuarantineActionsLike`, alias `Actions`
+  - `main.create_app(*, settings=None, quarantine_actions: QuarantineActionsLike | None = None) -> FastAPI`
+  - `openapi_export.export() -> str`; `scripts/gen-types.sh`; `web/lib/api.ts` `apiClient(sessionCookie?: string)`
+  - `StillInvalid(verdicts: list[Verdict])` with `.verdicts`
+  - `python -m selector_drift serve-api [--host H] [--port P]`
+
+**Five decisions, each closing something the first revision left open.**
+
+1. **The evidence route never serves a file it cannot vouch for** (API spec §7.3). Every read
+   recomputes the manifest's SHA-256s. A mismatch is `available=false, unavailable_reason="corrupted"`
+   on the view and **`410 evidence-corrupted`** on the file route — the bytes are not sent. A bundle
+   deleted under retention is `expired` / `410 evidence-expired`, known from the `audit_log` row
+   Task 33's retention flow wrote. A bundle that was written and is now simply gone, with no such
+   row, is *corrupted*, not expired: nothing authorised its deletion.
+2. **The DOM half is a hostile page's markup.** It is served `text/html` with
+   `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff` and
+   `Cache-Control: private, no-store`; the UI renders it as escaped text, never in a script-enabled
+   frame (API spec §4.2).
+3. **Bundles are found by heal id under the configured root, never by opening `evidence_uri`.**
+   The column says *whether* a bundle was written; the path is always
+   `<evidence_read_root>/heals/<id>/`. A path read back out of a database row is not a path the
+   API should open, and it is what lets `SD_FIXTURE_MODE` change where evidence is read from and
+   nothing else (web UI spec §6).
+4. **Rows come from the run's own files, not the deduplicating `lake` view.** A heal's sample values
+   are the rows *this run* landed; the `lake` view keeps only the latest row per natural key, so
+   for any heal older than the next run it would show someone else's values. `rows.py` reads
+   `lake/target=<t>/window=<w>/<run_key>-<attempt>-*.parquet` directly with an in-memory DuckDB
+   connection. **Found 2026-09-26:** `rows.py` is a module the spec's layout (§2) does not list;
+   it is added here rather than folded into `evidence.py`, which the spec scopes to bundles.
+5. **Promotion is a callable the app is handed.** `create_app(quarantine_actions=…)` receives
+   Task 26A's `QuarantineActions`; `api/` never imports the writer it calls
+   (`api-is-read-side`). Task 25's `StillInvalid` gains `.verdicts`, because a `409` that cannot
+   say *which* checks still fail sends the operator back to the logs.
+
+**The JSON shape of a stored rung attempt.** `RungAttemptView` needs `rung`, `family`, `outcome`,
+`ms`; `heal_events.trace` and `resolutions.attempts` are JSONB. Both must hold a list of
+`{"rung": int, "family": str, "outcome": str, "ms": int}`, `outcome` one of the six literals in
+`RungAttemptView`. **This is a requirement on Task 13's `_record_resolution` and Task 26A's
+`record_heals`** — found 2026-09-26: `RungAttempt(rung_id, ok, reason, ms)` as Task 13 defines it
+carries neither `family` nor a closed-vocabulary outcome, and a view cannot invent them. The fix
+is in the writer, not the dataclass: `_record_resolution` serialises each attempt as
+`{"rung": a.rung_id, "family": <that rung's Family>, "outcome": a.reason, "ms": a.ms}`, and every
+rung sets `reason` from the six literals (Task 19's cascade change already emits
+`"resolved"` / `"no_match"`; rung 1 adds `"anchor_mismatch"`, the visibility filter
+`"not_visible"`, a multi-match `"ambiguous"`, rung 5 `"escalated"`).
+
+**Task 25's audit rows are read by `subject = run_key`** to recover a decision's reason
+(`DecisionView.reason`). Task 25's tests assert `detail["reason"]`; they do not pin `subject`, so
+this task pins it (`test_discard_is_recorded_with_its_actor` reads it back).
+
+- [ ] **Step 1: Add the web dependencies**
+
+```bash
+cd web && npm install openapi-fetch && npm install --save-dev openapi-typescript && cd ..
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+`tests/api/conftest.py` from Task 34 gains `spec_dir=tmp_path / "specs"` in the `settings`
+fixture's `replace(...)` call, and the fixtures below — `app` now replaces Task 34's `app`, so
+every API test runs against an app that has been handed its quarantine actions:
+
+```python
+# tests/api/conftest.py (additions)
+from dataclasses import dataclass, field
+
+from selector_drift.config import get_settings
+from selector_drift.orchestrate.quarantine_actions import QuarantineActions
+from selector_drift.validate import quarantine as quarantine_mod
+from selector_drift.validate.quarantine import StillInvalid
+from selector_drift.validate.verdict import Outcome, Verdict
+
+
+@dataclass
+class FakePromote:
+    """Promotion's gate re-run is Task 25's and Task 26A's to test; the API's job is to
+    pass the session actor and to render StillInvalid as a 409."""
+    calls: list[tuple[str, str, str]] = field(default_factory=list)
+    still_invalid: bool = False
+
+    def __call__(self, run_key: str, actor: str, reason: str) -> None:
+        self.calls.append((run_key, actor, reason))
+        if self.still_invalid:
+            raise StillInvalid([
+                Verdict(check="FormatAssertion", outcome=Outcome.FAIL,
+                        threshold=r"^[A-Z]{2}\d{8}$", observed="Prior Amount",
+                        reason="does not match"),
+                Verdict(check="RowKeyContinuity", outcome=Outcome.PASS, threshold=">= 0.95",
+                        observed="0.98", reason="agrees")])
+
+
+@pytest.fixture
+def promote() -> FakePromote:
+    return FakePromote()
+
+
+@pytest.fixture
+def app(settings, clean_db, promote) -> FastAPI:
+    # Real discard (Task 25): it writes the audit row the corrected discard test reads back.
+    return create_app(settings=settings, quarantine_actions=QuarantineActions(
+        promote=promote,
+        discard=lambda k, a, r: quarantine_mod.discard(k, actor=a, reason=r)))
+
+
+@pytest.fixture
+def ids(settings, clean_db, monkeypatch):
+    from tests.api.seed import KEY, seed
+    # Task 33's writers read get_settings(); point them at the roots the app reads.
+    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(settings.evidence_root))
+    monkeypatch.setenv("SD_LAKE_ROOT", str(settings.lake_root))
+    monkeypatch.setenv("SD_REDACTION_KEY", KEY.hex())
+    get_settings.cache_clear()
+    yield seed(settings)
+    get_settings.cache_clear()
+```
+
+Then:
+
+```python
+# tests/api/seed.py
+"""Deterministic rows and bundles for every designed state the API serves."""
+from __future__ import annotations
+
+import dataclasses
+import datetime as dt
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+from sqlalchemy import text
+
+from bok_core.boundary.egress import Plane
+from bok_core.boundary.sensitivity import Sensitivity
+from bok_core.findings import Finding, Severity
+from bok_core.provenance import Claim, DomSource, Method
+from selector_drift.config import Settings
+from selector_drift.db.models import (AuditLog, FindingRow, HealEvent, Quarantine, Resolution,
+                                      Run, RunAttempt, ScopeRecordRow)
+from selector_drift.db.session import Session, engine
+from selector_drift.heallog.bundle import AFTER_PNG
+from selector_drift.heallog.capture import BBox, Evidence
+from selector_drift.heallog.evidence import (PiiMasker, redact_evidence, write_heal_bundle,
+                                             write_last_accepted)
+
+KEY = b"test-only-redaction-key-not-a-secret!"
+PAGE = """<!doctype html><html><body><table><thead><tr><th data-sd-node="n0">Claim Number</th></tr></thead>
+<tbody><tr><td data-sd-node="n1">AB12345678</td></tr></tbody></table></body></html>"""
+BOX = BBox(x=8, y=30, width=120, height=22)
+SPEC_YAML = """version: 1
+scope_ref: scopes/testbench.yaml
+schedule: '12 4 * * *'
+row_scope: each row of the results table
+natural_key: [claim_number]
+expected_schema: {claim_number: string}
+navigate: []
+targets:
+  - name: claim_number
+    description: the claim number cell in the results table
+    relation: right_of
+    assertions:
+      - {type: format, pattern: '^[A-Z]{2}\\d{8}$'}
+"""
+VERDICT_FAIL = {"check": "FormatAssertion", "outcome": "FAIL", "threshold": "^[A-Z]{2}\\d{8}$",
+                "observed": "Prior Amount", "reason": "value does not match the claim format"}
+VERDICT_PASS = {"check": "RowKeyContinuity", "outcome": "PASS", "threshold": ">= 0.95",
+                "observed": "0.98", "reason": "values agree with the last accepted run"}
+TRACE = [{"rung": 1, "family": "NONE", "outcome": "anchor_mismatch", "ms": 2},
+         {"rung": 2, "family": "TEXT_SEMANTIC", "outcome": "no_match", "ms": 5},
+         {"rung": 3, "family": "TEXT_SEMANTIC", "outcome": "resolved", "ms": 4}]
+ANCHOR = {"accessible_name": None, "label_text": "Claim Number", "header_text": "Claim Number"}
+
+
+def _at(day: int) -> datetime:
+    return datetime(2026, 9, day, 4, 12, tzinfo=UTC)
+
+
+def _red(run_key: str, html: str = PAGE):
+    ev = Evidence.from_static(html, run_key=run_key, sensitivity=Sensitivity.SYNTHETIC,
+                              masker=PiiMasker(KEY, Sensitivity.SYNTHETIC), captured_at=_at(1))
+    ev = dataclasses.replace(ev, node_ids={"claim_number": "n1"}, boxes={"claim_number": BOX})
+    return redact_evidence(ev, key=KEY)
+
+
+def seed(settings: Settings) -> dict[str, Any]:
+    """The caller has pointed SD_EVIDENCE_ROOT / SD_LAKE_ROOT at `settings` (see `ids`)."""
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE runs, run_attempts, resolutions, heal_events, quarantine, "
+                       "findings, scope_records, audit_log, heartbeats, interventions "
+                       "RESTART IDENTITY CASCADE"))
+    settings.spec_dir.mkdir(parents=True, exist_ok=True)
+    (settings.spec_dir / "testbench.yaml").write_text(SPEC_YAML)
+    (settings.spec_dir / "unscoped-app.yaml").write_text(SPEC_YAML.replace("testbench", "x"))
+    ids: dict[str, Any] = {}
+    with Session() as s:
+        for target, basis, expires, days in [("testbench", "self-owned", dt.date(2027, 9, 1), None),
+                                             ("old-portal", "client-authorised",
+                                              dt.date(2026, 1, 1), 90)]:
+            s.add(ScopeRecordRow(target=target, basis=basis, authorising_party="me",
+                                 authorised_on=dt.date(2025, 9, 1), expires_on=expires,
+                                 evidence_uri=None if basis == "self-owned" else "file:///a.pdf",
+                                 evidence_sha256=None if basis == "self-owned" else "0" * 64,
+                                 origins=[f"https://{target}.example.invalid"],
+                                 rate_limit={"requests": 1, "per_seconds": 30},
+                                 user_agent_contact="https://example.invalid/contact",
+                                 first_heal_policy="auto_promote" if target == "testbench"
+                                 else "required", legal_review="self_drafted",
+                                 warmup_runs=5 if target == "testbench" else 30,
+                                 evidence_retention_days=days, record_sha256="a" * 64,
+                                 loaded_at=_at(1)))
+        runs = {}
+        for day, state in [(1, "completed"), (2, "healed"), (3, "quarantined"), (4, "healed"),
+                           (5, "healed"), (6, "quarantined")]:
+            key = f"testbench:1:2026-09-0{day}"
+            s.add(Run(run_key=key, target="testbench", spec_version=1,
+                      window=dt.date(2026, 9, day), first_started_at=_at(day),
+                      last_finished_at=_at(day), state=state, rows_written=1, error=None))
+            s.add(RunAttempt(run_key=key, attempt=1, started_at=_at(day), finished_at=_at(day),
+                             state=state, error=None, scope_record_sha256="a" * 64))
+            runs[day] = key
+        s.flush()
+        heals = {}
+        for day in (2, 3, 4, 5):
+            res = Resolution(run_key=runs[day], target="testbench", field="claim_number",
+                             winning_rung=3, attempts=TRACE, node_id="n1", ms=11, at=_at(day))
+            s.add(res)
+            s.flush()
+            heal = HealEvent(run_key=runs[day], resolution_id=res.id, target="testbench",
+                             field="claim_number", broke_at=_at(day), winning_rung=3,
+                             confirmer_rung=4, confirmer_family="STRUCTURAL",
+                             selector_before="#claim", selector_after="td:nth-child(1)",
+                             anchor_before=ANCHOR, anchor_after=ANCHOR, trace=TRACE,
+                             verdicts=[VERDICT_PASS] if day != 3 else [VERDICT_PASS,
+                                                                       VERDICT_FAIL],
+                             replayed_ok=True if day != 4 else False)
+            s.add(heal)
+            s.flush()
+            heals[day] = heal.id
+        s.add(Quarantine(run_key=runs[3], reason="the gate refused the heal",
+                         verdicts=[VERDICT_PASS, VERDICT_FAIL],
+                         data_uri=str(settings.lake_root / "quarantine" /
+                                      "testbench_1_2026-09-03.parquet"),
+                         resolved_as=None, actor=None, resolved_at=None))
+        s.add(Quarantine(run_key=runs[6], reason="the gate refused the heal",
+                         verdicts=[VERDICT_FAIL], data_uri="/nowhere.parquet",
+                         resolved_as="discarded", actor="op1", resolved_at=_at(6)))
+        claim = Claim(value=25, source=DomSource(snapshot_id="s", selector="td", rung=1),
+                      method=Method.DETERMINISTIC, observed_at=_at(3))
+        finding = Finding(id="f-row-count-3", severity=Severity.HIGH,
+                          title="Row count below expectation", claim=claim,
+                          properties={"rule": "row_count", "observed": "25",
+                                      "threshold": ">= 45",
+                                      "threshold_reason": "the bench serves 50 rows a page"})
+        s.add(FindingRow(id=finding.id, run_key=runs[3], severity="HIGH", rule="row_count",
+                         payload=finding.model_dump(mode="json"), at=_at(3)))
+        s.commit()
+
+    for day in (2, 3, 4, 5):
+        with Session() as s:
+            row = s.get(HealEvent, heals[day])
+            assert row is not None
+            if day == 5:                                    # deleted under retention
+                row.evidence_uri = str(settings.evidence_root / "heals" / str(heals[day]))
+                s.add(AuditLog(at=_at(6), actor="system:evidence_retention",
+                               action="evidence_expired", subject=f"heal:{heals[day]}",
+                               detail={"retention_days": 90}))
+            else:
+                if day == 3:
+                    write_last_accepted(_red(runs[1]), "testbench", Plane.CLIENT)
+                row.evidence_uri = write_heal_bundle(heals[day], "testbench",
+                                                     _red(runs[day], PAGE.replace(
+                                                         "Claim Number", "Claim Reference")),
+                                                     Plane.CLIENT)
+            s.commit()
+    tampered = settings.evidence_root / "heals" / str(heals[4]) / AFTER_PNG
+    tampered.write_bytes(tampered.read_bytes() + b"tampered")
+
+    part = settings.lake_root / "target=testbench" / "window=2026-09-02"
+    part.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist([{"claim_number": "AB12345678", "run_key": runs[2],
+                                          "ingested_at": _at(2)}]),
+                   part / f"{runs[2]}-1-01J0000000000000000000000.parquet")
+    (settings.lake_root / "quarantine").mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist([{"claim_number": "ZZ00000000"}]),
+                   settings.lake_root / "quarantine" / "testbench_1_2026-09-03.parquet")
+
+    return {"run_completed": runs[1], "run_healed": runs[2], "run_quarantined": runs[3],
+            "run_discarded": runs[6], "heal_first": heals[2], "heal_with_before": heals[3],
+            "heal_corrupted": heals[4], "heal_expired": heals[5]}
+```
 
 ```python
 # tests/api/test_endpoints.py
+from __future__ import annotations
+
+import datetime as dt
+
 import pytest
 
-@pytest.mark.parametrize("path", ["/targets", "/runs", "/heals/1", "/quality/k", "/specs/testbench"])
-def test_get_endpoints_return_200(client, path):
-    assert client.get(path).status_code == 200
+from selector_drift.api import derive
+from selector_drift.db.session import Session
+from tests.api.conftest import latest_audit
 
-def test_every_route_requires_authentication(anon_client):
+V = "/api/v1"
+
+
+def gets(ids) -> list[str]:
+    return [f"{V}/targets", f"{V}/runs", f"{V}/runs/{ids['run_completed']}",
+            f"{V}/heals/{ids['heal_first']}", f"{V}/heals/{ids['heal_with_before']}/diff",
+            f"{V}/quarantine", f"{V}/quality?run_key={ids['run_quarantined']}",
+            f"{V}/specs/testbench", f"{V}/stats"]
+
+
+@pytest.mark.integration
+def test_get_endpoints_return_200(client, ids):
+    """Corrected 2026-09-26: ids come from the seeded fixture, never a literal 1."""
+    for path in gets(ids):
+        assert client.get(path).status_code == 200, path
+
+
+@pytest.mark.integration
+def test_every_route_requires_authentication(anon_client, ids):
     # H3. These routes serve redacted evidence and extracted client rows.
-    for path in ["/targets", "/runs", "/heals/1", "/quality/k", "/specs/testbench"]:
-        assert anon_client.get(path).status_code == 401
+    for path in gets(ids) + [f"{V}/heals/{ids['heal_first']}/evidence/after/png"]:
+        assert anon_client.get(path).status_code == 401, path
+    for verb in ("promote", "discard"):
+        r = anon_client.post(f"{V}/quarantine/{ids['run_quarantined']}/{verb}",
+                             json={"reason": "x"})
+        assert r.status_code == 401
 
-def test_promote_requires_a_reason_and_takes_its_actor_from_the_session(client):
-    assert client.post("/quarantine/k/promote", json={}).status_code == 422
-    client.post("/quarantine/k/promote", json={"reason": "checked the screenshots"})
-    assert latest_audit().actor == client.session_user      # not from the body
 
-def test_a_caller_supplied_actor_is_rejected_outright(client):
-    r = client.post("/quarantine/k/promote", json={"reason": "x", "actor": "someone-else"})
-    assert r.status_code == 422
+@pytest.mark.integration
+def test_promote_requires_a_reason_and_takes_its_actor_from_the_session(client, ids, promote):
+    url = f"{V}/quarantine/{ids['run_quarantined']}/promote"
+    assert client.post(url, json={}).status_code == 422
+    assert client.post(url, json={"reason": "checked the screenshots"}).status_code == 200
+    assert promote.calls == [(ids["run_quarantined"], client.session_user,
+                              "checked the screenshots")]     # not from the body
 
-def test_a_traversing_run_key_cannot_reach_a_file(client):
-    assert client.get("/quality/..%2f..%2fetc%2fpasswd").status_code in (400, 404, 422)
 
-def test_targets_endpoint_surfaces_the_scope_record(client):
-    t = client.get("/targets").json()[0]
+@pytest.mark.integration
+def test_a_caller_supplied_actor_is_rejected_outright(client, ids, promote):
+    r = client.post(f"{V}/quarantine/{ids['run_quarantined']}/promote",
+                    json={"reason": "x", "actor": "someone-else"})
+    assert r.status_code == 422 and promote.calls == []
+
+
+@pytest.mark.integration
+def test_a_traversing_run_key_cannot_reach_a_file(client, ids):
+    for path in [f"{V}/runs/..%2f..%2fetc%2fpasswd", f"{V}/quarantine/..%2fetc/promote",
+                 f"{V}/quality?run_key=../../etc/passwd", f"{V}/heals/0",
+                 f"{V}/heals/{ids['heal_first']}/evidence/..%2f/dom",
+                 f"{V}/heals/{ids['heal_first']}/evidence/after/html"]:
+        r = client.get(path) if "promote" not in path else client.post(path, json={"reason": "x"})
+        assert r.status_code in (404, 422), path
+
+
+@pytest.mark.integration
+def test_targets_endpoint_surfaces_the_scope_record(client, ids):
+    t = {v["target"]: v for v in client.get(f"{V}/targets").json()}["testbench"]
     assert {"basis", "authorising_party", "expires_on", "rate_limit"} <= t.keys()
+    assert t["status"] == "active" and t["sensitivity"] == "SYNTHETIC"
+    assert t["warmup_runs"] == 5 and t["evidence_retention_days"] is None
 
-def test_heal_response_names_the_confirming_rung(client):
-    assert "confirmer_rung" in client.get("/heals/1").json()
 
-def test_discard_is_recorded_with_its_actor(client):
-    client.post("/quarantine/k/discard", json={"actor": "me", "reason": "wrong column"})
-    assert client.get("/runs").json()[0]["state"] == "quarantined"
+@pytest.mark.integration
+def test_expired_and_unscoped_targets_say_why_in_words(client, ids):
+    t = {v["target"]: v for v in client.get(f"{V}/targets").json()}
+    assert t["old-portal"]["status"] == "expired" and "expired" in t["old-portal"]["locked_reason"]
+    assert t["old-portal"]["sensitivity"] == "CLIENT_CONFIDENTIAL"
+    assert t["unscoped-app"]["status"] == "unscoped" and t["unscoped-app"]["basis"] is None
+    assert "scope record" in t["unscoped-app"]["locked_reason"]
+
+
+@pytest.mark.integration
+def test_heal_response_names_the_confirming_rung(client, ids):
+    h = client.get(f"{V}/heals/{ids['heal_first']}").json()
+    assert h["confirmer_rung"] == 4 and h["confirmer_family"] == "STRUCTURAL"
+    assert h["summary"].startswith("Selector broke 04:12.")
+    assert h["decision"]["resolved_as"] == "accepted" and h["decision"]["actor"] is None
+    assert h["sample_values"][0]["value"] == "AB12345678"
+    assert h["sample_values"][0]["rail"]                      # a rendered Claim, not a bare string
+
+
+@pytest.mark.integration
+def test_discard_is_recorded_with_its_actor(client, ids):
+    """Corrected 2026-09-26: body {reason} only -- the first draft sent "actor", which the
+    test above says must be 422. The frozen enum has no `discarded` state."""
+    key = ids["run_quarantined"]
+    r = client.post(f"{V}/quarantine/{key}/discard", json={"reason": "wrong column"})
+    assert r.status_code == 200
+    run = client.get(f"{V}/runs/{key}").json()
+    assert run["state"] == "quarantined" and run["quarantine_resolution"] == "discarded"
+    audit = latest_audit("discard")
+    assert audit.actor == client.session_user and audit.subject == key
+    decision = r.json()["decision"]
+    assert decision["resolved_as"] == "discarded" and decision["reason"] == "wrong column"
+    assert decision["actor"] == client.session_user
+
+
+@pytest.mark.integration
+def test_promote_that_still_fails_returns_409_with_the_failing_verdicts(client, ids, promote):
+    promote.still_invalid = True
+    r = client.post(f"{V}/quarantine/{ids['run_quarantined']}/promote", json={"reason": "ok"})
+    assert r.status_code == 409 and r.json()["type"].endswith("still-invalid")
+    failing = r.json()["failing"]
+    assert [v["check"] for v in failing] == ["FormatAssertion"]
+    assert all({"threshold", "observed", "reason", "outcome"} <= v.keys() for v in failing)
+
+
+@pytest.mark.integration
+def test_an_already_resolved_run_is_409(client, ids, promote):
+    r = client.post(f"{V}/quarantine/{ids['run_discarded']}/promote", json={"reason": "late"})
+    assert r.status_code == 409 and r.json()["type"].endswith("already-resolved")
+    assert promote.calls == []
+
+
+@pytest.mark.integration
+def test_quarantine_lists_unresolved_and_history_separately(client, ids):
+    open_ = client.get(f"{V}/quarantine").json()
+    assert [q["run_key"] for q in open_] == [ids["run_quarantined"]]
+    q = open_[0]
+    assert [v["check"] for v in q["failing"]] == ["FormatAssertion"]
+    assert q["preview"][0]["claim_number"]["value"] == "ZZ00000000"
+    assert "claim_number" in q["spec_excerpt"] and q["runbook_url"].endswith(
+        "runbook-spec-update.md")
+    history = client.get(f"{V}/quarantine?resolved=true").json()
+    assert [q["run_key"] for q in history] == [ids["run_discarded"]]
+
+
+@pytest.mark.integration
+def test_runs_paginate_with_an_opaque_cursor(client, ids):
+    first = client.get(f"{V}/runs?limit=4").json()
+    assert len(first["items"]) == 4 and first["next_cursor"]
+    rest = client.get(f"{V}/runs?limit=4&cursor={first['next_cursor']}").json()
+    keys = [r["run_key"] for r in first["items"] + rest["items"]]
+    assert len(keys) == len(set(keys)) == 6 and rest["next_cursor"] is None
+    assert client.get(f"{V}/runs?cursor=not-a-cursor").status_code == 422
+    assert client.get(f"{V}/runs?limit=201").status_code == 422
+
+
+@pytest.mark.integration
+def test_run_detail_lists_attempts_resolutions_and_findings(client, ids):
+    d = client.get(f"{V}/runs/{ids['run_quarantined']}").json()
+    assert d["attempts"] == 1 and len(d["run_attempts"]) == 1
+    assert d["resolutions"][0]["winning_rung"] == 3 and d["resolutions"][0]["heal_id"]
+    assert d["resolutions"][0]["attempts"][0]["outcome"] == "anchor_mismatch"
+    assert d["finding_count"] == 1
+
+
+@pytest.mark.integration
+def test_quality_lists_findings_with_their_threshold_and_why(client, ids):
+    f = client.get(f"{V}/quality?run_key={ids['run_quarantined']}").json()["items"][0]
+    assert f["check"] == "row_count" and f["threshold"] == ">= 45"
+    assert f["threshold_reason"] and f["rail"]
+    assert client.get(f"{V}/quality").status_code == 422      # run_key or target required
+
+
+@pytest.mark.integration
+def test_spec_view_carries_the_raw_yaml_and_its_validation_verdicts(client, ids):
+    s = client.get(f"{V}/specs/testbench").json()
+    assert s["version"] == 1 and "natural_key" in s["yaml"]
+    assert {v["check"] for v in s["validation"]} >= {"SpecSchema", "NaturalKeyInSchema"}
+    assert client.get(f"{V}/specs/nope").status_code == 404
+
+
+@pytest.mark.integration
+def test_stats_route_is_derive_stats(client, ids):
+    got = client.get(f"{V}/stats?from=2026-09-01&to=2026-09-06").json()
+    with Session() as s:
+        want = derive.stats(s, None, (dt.date(2026, 9, 1), dt.date(2026, 9, 6)))
+    assert got == want.model_dump(mode="json")
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+```python
+# tests/api/test_evidence.py
+from pathlib import Path
 
-Run: `uv run pytest tests/api -v`
-Expected: FAIL.
+import pytest
 
-- [ ] **Step 3: Implement the routers.**
+from selector_drift.heallog.bundle import AFTER_HTML
+from tests.api.seed import BOX
 
-- [ ] **Step 4: Run them and make sure they pass**
+V = "/api/v1"
 
-Run: `uv run pytest tests/api -v`
-Expected: PASS, 9 tests.
 
-- [ ] **Step 5: Commit**
+@pytest.mark.integration
+def test_dom_evidence_is_served_sandboxed_and_nosniff(client, ids):
+    r = client.get(f"{V}/heals/{ids['heal_first']}/evidence/after/dom")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+    assert r.headers["content-security-policy"] == "sandbox"
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["cache-control"] == "private, no-store"
+
+
+@pytest.mark.integration
+def test_png_evidence_is_private_and_nosniff(client, ids):
+    r = client.get(f"{V}/heals/{ids['heal_first']}/evidence/after/png")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+    assert r.content.startswith(b"\x89PNG")
+    assert r.headers["cache-control"] == "private, no-store"
+    assert r.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.integration
+def test_a_tampered_bundle_is_reported_corrupted_and_not_served(client, ids):
+    """API spec 7.3 / 7.5."""
+    h = client.get(f"{V}/heals/{ids['heal_corrupted']}").json()
+    assert h["after"]["available"] is False
+    assert h["after"]["unavailable_reason"] == "corrupted"
+    r = client.get(f"{V}/heals/{ids['heal_corrupted']}/evidence/after/png")
+    assert r.status_code == 410 and r.json()["type"].endswith("evidence-corrupted")
+    assert not r.content.startswith(b"\x89PNG")
+
+
+@pytest.mark.integration
+def test_a_tampered_after_html_makes_replay_status_corrupted(client, ids, settings):
+    path = settings.evidence_root / "heals" / str(ids["heal_first"]) / AFTER_HTML
+    path.write_text(path.read_text() + "<!-- edited -->")
+    h = client.get(f"{V}/heals/{ids['heal_first']}").json()
+    assert h["replay_status"] == "corrupted"
+
+
+@pytest.mark.integration
+def test_an_expired_bundle_reads_expired_not_corrupted(client, ids):
+    h = client.get(f"{V}/heals/{ids['heal_expired']}").json()
+    assert h["after"]["unavailable_reason"] == "expired"
+    assert h["before"]["unavailable_reason"] == "expired"
+    r = client.get(f"{V}/heals/{ids['heal_expired']}/evidence/after/png")
+    assert r.status_code == 410 and r.json()["type"].endswith("evidence-expired")
+
+
+@pytest.mark.integration
+def test_first_heal_view_reports_before_not_captured(client, ids):
+    h = client.get(f"{V}/heals/{ids['heal_first']}").json()
+    assert h["before"] == {"available": False, "unavailable_reason": "not_captured",
+                           "captured_at": None, "viewport": None, "boxes": {},
+                           "dom_url": None, "png_url": None}
+    assert client.get(f"{V}/heals/{ids['heal_first']}/evidence/before/dom").status_code == 404
+    assert client.get(f"{V}/heals/{ids['heal_first']}/diff").status_code == 404
+
+
+@pytest.mark.integration
+def test_the_view_carries_the_boxes_recorded_at_capture(client, ids):
+    h = client.get(f"{V}/heals/{ids['heal_with_before']}").json()
+    assert h["after"]["boxes"]["claim_number"] == BOX.model_dump()
+    assert h["after"]["viewport"] == [1280, 900]
+    assert h["before"]["available"] is True
+    assert h["after"]["dom_url"] == f"/api/v1/heals/{ids['heal_with_before']}/evidence/after/dom"
+
+
+@pytest.mark.integration
+def test_a_non_reproducible_heal_says_so(client, ids):
+    # heal_corrupted's after.PNG is tampered, its after.html is intact, and it was
+    # recorded replayed_ok=False: the replay verdict stands, the PNG is refused.
+    assert client.get(f"{V}/heals/{ids['heal_corrupted']}").json()["replay_status"] ==         "not_reproducible"
+
+
+@pytest.mark.integration
+def test_fixture_mode_changes_where_bundles_are_read_and_nothing_else(settings, ids, operator,
+                                                                      app):
+    import dataclasses
+    import shutil
+    from selector_drift.api.main import create_app
+    from tests.api.conftest import LOGIN, make_client
+    fixtures = dataclasses.replace(settings, fixture_mode=True)
+    shutil.copytree(settings.evidence_root / "heals", fixtures.fixture_evidence_root / "heals")
+    shutil.rmtree(settings.evidence_root / "heals")
+    fixture_app = create_app(settings=fixtures, quarantine_actions=app.state.quarantine_actions)
+    anon = make_client(fixture_app)
+    assert anon.get(f"{V}/heals/{ids['heal_first']}").status_code == 401   # auth still on
+    anon.post(LOGIN, json={"username": operator[0], "password": operator[1]})
+    assert anon.get(f"{V}/heals/{ids['heal_first']}/evidence/after/png").status_code == 200
+```
+
+```python
+# tests/api/test_types.py
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from selector_drift.api.openapi_export import export
+
+
+@pytest.mark.unit
+def test_generated_types_are_current():
+    """API spec 8. The CI job api-types runs the same comparison."""
+    assert export() == Path("web/lib/openapi.json").read_text(), \
+        "response models changed: run scripts/gen-types.sh and commit web/lib/"
+
+
+@pytest.mark.unit
+def test_every_verdict_in_every_response_carries_a_threshold_field():
+    import json
+    doc = json.loads(export())
+    schemas = doc["components"]["schemas"]
+    verdict = schemas["Verdict"]
+    assert {"check", "outcome", "threshold", "observed", "reason"} <= verdict["properties"].keys()
+    assert "threshold" in verdict["required"]
+    for name, schema in schemas.items():
+        for prop in ("verdicts", "failing", "validation"):
+            if prop in schema.get("properties", {}):
+                items = schema["properties"][prop]["items"]
+                assert items == {"$ref": "#/components/schemas/Verdict"}, (name, prop)
+
+
+@pytest.mark.e2e
+def test_generated_ts_types_are_current(tmp_path):
+    if shutil.which("npx") is None:
+        pytest.fail("npx is required for this check (CI job api-types)")
+    out = tmp_path / "api.d.ts"
+    subprocess.run(["npx", "--no-install", "openapi-typescript", "lib/openapi.json",
+                    "--output", str(out)], cwd="web", check=True)
+    assert out.read_text() == Path("web/lib/api.d.ts").read_text()
+```
+
+Add to `tests/validate/test_quarantine.py`:
+
+```python
+@pytest.mark.unit
+def test_still_invalid_carries_every_verdict():
+    """So the API's 409 can say which checks still fail (API spec 5)."""
+    verdicts = [Verdict(check="A", outcome=Outcome.FAIL, threshold="x", observed="y", reason="r"),
+                Verdict(check="B", outcome=Outcome.PASS, threshold=None, observed=None, reason="r")]
+    exc = StillInvalid(verdicts)
+    assert exc.verdicts == verdicts and "1 check" in str(exc)
+```
+
+- [ ] **Step 3: Run them and watch them fail**
+
+Run: `uv run pytest tests/api tests/validate/test_quarantine.py -v -m "unit or integration"`
+Expected: FAIL — `ModuleNotFoundError: selector_drift.api.evidence`.
+
+- [ ] **Step 4: `StillInvalid` carries its verdicts** — in `selector_drift/validate/quarantine.py`:
+
+```python
+class StillInvalid(Exception):
+    """A re-run gate still fails. Carries every verdict so the caller can show which."""
+
+    def __init__(self, verdicts: list[Verdict]) -> None:
+        failing = [v for v in verdicts if v.outcome is not Outcome.PASS]
+        super().__init__(f"{len(failing)} check(s) still fail after human confirmation")
+        self.verdicts = verdicts
+```
+
+and `promote()` raises `StillInvalid(result.verdicts)` where it raised `StillInvalid(...)` before.
+
+- [ ] **Step 5: Implement `evidence.py`, `rows.py`, `_cursor.py`**
+
+```python
+# selector_drift/api/evidence.py
+"""The bundle read path (API spec 7.3). Hashes are recomputed on every read; a file that
+does not match its manifest is never served."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session as OrmSession
+
+from selector_drift.api.errors import EvidenceGone, NotFound
+from selector_drift.api.views import EvidenceSideView
+from selector_drift.config import Settings
+from selector_drift.db.models import AuditLog, HealEvent
+from selector_drift.heallog.bundle import (AFTER_HTML, AFTER_PNG, BEFORE_HTML, BEFORE_PNG,
+                                           HEALS_DIR, EvidenceCorrupted, HealManifest,
+                                           read_heal_manifest, verified_bytes)
+
+Side = Literal["before", "after"]
+Kind = Literal["dom", "png"]
+FILES: dict[tuple[str, str], str] = {("before", "dom"): BEFORE_HTML,
+                                     ("before", "png"): BEFORE_PNG,
+                                     ("after", "dom"): AFTER_HTML, ("after", "png"): AFTER_PNG}
+SECURITY_HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+
+
+@dataclass(frozen=True)
+class BundleState:
+    status: Literal["ok", "missing", "expired", "not_written"]
+    manifest: HealManifest | None           # None when unreadable or not present
+    corrupt: frozenset[str]                 # files failing their manifest hash
+
+
+def bundle_dir(settings: Settings, heal_id: int) -> Path:
+    # Never Path(heal.evidence_uri): a path read out of a row is not one to open.
+    return settings.evidence_read_root / HEALS_DIR / str(heal_id)
+
+
+def _expired(db: OrmSession, heal_id: int) -> bool:
+    q = select(AuditLog.id).where(AuditLog.action == "evidence_expired",
+                                  AuditLog.subject == f"heal:{heal_id}").limit(1)
+    return db.scalar(q) is not None
+
+
+def bundle_state(db: OrmSession, settings: Settings, heal: HealEvent) -> BundleState:
+    if heal.evidence_uri is None:
+        return BundleState("not_written", None, frozenset())
+    directory = bundle_dir(settings, heal.id)
+    if not directory.is_dir():
+        return BundleState("expired" if _expired(db, heal.id) else "missing", None, frozenset())
+    try:
+        manifest = read_heal_manifest(directory)
+    except EvidenceCorrupted:
+        return BundleState("ok", None, frozenset(FILES.values()))
+    bad: set[str] = set()
+    for name in manifest.files:
+        try:
+            verified_bytes(directory, manifest.files, name)
+        except EvidenceCorrupted:
+            bad.add(name)
+    return BundleState("ok", manifest, frozenset(bad))
+
+
+def _gone(reason: Literal["corrupted", "expired", "not_captured"]) -> EvidenceSideView:
+    return EvidenceSideView(available=False, unavailable_reason=reason, captured_at=None,
+                            viewport=None, boxes={}, dom_url=None, png_url=None)
+
+
+def side_view(heal_id: int, state: BundleState, side: Side) -> EvidenceSideView:
+    if state.status == "expired":
+        return _gone("expired")
+    if state.status == "not_written":
+        return _gone("not_captured")
+    if state.status == "missing" or state.manifest is None:
+        return _gone("corrupted")            # written, now gone, and nothing authorised it
+    m = state.manifest
+    block = m.after if side == "after" else m.before
+    if block is None:
+        return _gone("corrupted" if m.before_unavailable_reason == "corrupted"
+                     else "not_captured")
+    if {FILES[(side, "dom")], FILES[(side, "png")]} & state.corrupt:
+        return _gone("corrupted")
+    base = f"/api/v1/heals/{heal_id}/evidence/{side}"
+    return EvidenceSideView(available=True, unavailable_reason=None,
+                            captured_at=block.captured_at, viewport=block.viewport,
+                            boxes={f: nb.bbox for f, nb in block.nodes.items()},
+                            dom_url=f"{base}/dom", png_url=f"{base}/png")
+
+
+def replay_status(heal: HealEvent, state: BundleState
+                  ) -> Literal["reproduced", "not_reproducible", "not_yet_replayed", "corrupted"]:
+    if state.status == "missing" or (state.status == "ok" and
+                                     (state.manifest is None or AFTER_HTML in state.corrupt)):
+        return "corrupted"                   # the file replay reads fails its hash
+    if heal.replayed_ok is None:
+        return "not_yet_replayed"
+    return "reproduced" if heal.replayed_ok else "not_reproducible"
+
+
+def open_file(db: OrmSession, settings: Settings, heal: HealEvent, side: Side,
+              kind: Kind) -> bytes:
+    state = bundle_state(db, settings, heal)
+    if state.status == "not_written":
+        raise NotFound("no evidence was captured for this heal")
+    if state.status == "expired":
+        raise EvidenceGone("deleted under the target's evidence retention policy",
+                           reason="expired")
+    if state.status == "missing" or state.manifest is None:
+        raise EvidenceGone("the evidence bundle is missing or unreadable", reason="corrupted")
+    name = FILES[(side, kind)]
+    if name not in state.manifest.files:
+        raise NotFound("no 'before' page: this was the first heal of its target")
+    try:
+        return verified_bytes(bundle_dir(settings, heal.id), state.manifest.files, name)
+    except EvidenceCorrupted as exc:
+        raise EvidenceGone("this file does not match its manifest hash",
+                           reason="corrupted") from exc
+```
+
+```python
+# selector_drift/api/rows.py
+"""Rows a run actually landed, read from its own files -- not the dedup view."""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import duckdb
+
+from selector_drift.api.deps import check_run_key
+from selector_drift.config import Settings
+
+_ATTEMPT = re.compile(r"-(\d+)-[^-]+\.parquet$")
+
+
+def _read(path: Path, limit: int) -> list[dict[str, object]]:
+    con = duckdb.connect()                     # in-memory: never a shared DuckDB file
+    try:
+        cur = con.execute("select * from read_parquet(?) limit ?", [str(path), limit])
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def run_rows(settings: Settings, run_key: str, limit: int) -> list[dict[str, object]]:
+    target, _, window = check_run_key(run_key).split(":")
+    part = settings.lake_root / f"target={target}" / f"window={window}"
+    files = [p for p in part.glob("*.parquet") if p.name.startswith(f"{run_key}-")]
+    if not files:
+        return []
+    latest = max(files, key=lambda p: int(m.group(1)) if (m := _ATTEMPT.search(p.name)) else 0)
+    return _read(latest, limit)
+
+
+def quarantine_rows(settings: Settings, data_uri: str | None,
+                    limit: int) -> list[dict[str, object]]:
+    if not data_uri:
+        return []
+    root = (settings.lake_root / "quarantine").resolve()
+    path = Path(data_uri).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return []
+    return _read(path, limit)
+```
+
+```python
+# selector_drift/api/routers/_cursor.py
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+from datetime import datetime
+
+from selector_drift.api.errors import Invalid
+
+
+def encode_cursor(at: datetime, key: str) -> str:
+    return base64.urlsafe_b64encode(json.dumps([at.isoformat(), key]).encode()).decode()
+
+
+def decode_cursor(raw: str) -> tuple[datetime, str]:
+    try:
+        at, key = json.loads(base64.urlsafe_b64decode(raw.encode()))
+        return datetime.fromisoformat(at), str(key)
+    except (ValueError, TypeError, binascii.Error) as exc:
+        raise Invalid("cursor: not a cursor this API issued") from exc
+```
+
+- [ ] **Step 6: Implement the routers**
+
+```python
+# selector_drift/api/routers/targets.py
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from fastapi import APIRouter
+from sqlalchemy import select
+
+from selector_drift.api.deps import AppSettings, CurrentOperator, Db
+from selector_drift.api.views import RateLimitView, TargetView
+from selector_drift.db.models import ScopeRecordRow
+from selector_drift.scope.record import ScopeRecord
+
+router = APIRouter(tags=["targets"])
+UNSCOPED = "No scope record: the scope gate refuses every run for this target."
+
+
+def _unscoped(name: str) -> TargetView:
+    return TargetView(target=name, status="unscoped", locked_reason=UNSCOPED, basis=None,
+                      sensitivity=None, authorising_party=None, authorised_on=None,
+                      expires_on=None, evidence_uri=None, evidence_sha256=None, origins=[],
+                      rate_limit=None, user_agent_contact=None, first_heal_policy=None,
+                      warmup_runs=None, evidence_retention_days=None, legal_review=None,
+                      record_sha256=None, loaded_at=None)
+
+
+@router.get("/targets", response_model=list[TargetView])
+def targets(db: Db, settings: AppSettings, _op: CurrentOperator) -> list[TargetView]:
+    today = datetime.now(UTC).date()
+    latest: dict[str, ScopeRecordRow] = {}
+    for row in db.scalars(select(ScopeRecordRow).order_by(ScopeRecordRow.loaded_at)):
+        latest[row.target] = row
+    names = set(latest) | {p.stem for p in settings.spec_dir.glob("*.yaml")}
+    out: list[TargetView] = []
+    for name in sorted(names):
+        row = latest.get(name)
+        if row is None:
+            out.append(_unscoped(name))
+            continue
+        # Rebuild the record from the mirror: sensitivity is the record's derived property
+        # (R4), computed where it is defined, never re-implemented here.
+        record = ScopeRecord.model_validate({f: getattr(row, f) for f in ScopeRecord.model_fields})
+        expired = record.expires_on < today
+        out.append(TargetView(
+            target=name, status="expired" if expired else "active",
+            locked_reason=(f"Authorisation expired on {record.expires_on.isoformat()}. The scope "
+                           "gate refuses every run until the record is renewed.")
+            if expired else None,
+            basis=record.basis, sensitivity=record.sensitivity,
+            authorising_party=record.authorising_party, authorised_on=record.authorised_on,
+            expires_on=record.expires_on, evidence_uri=record.evidence_uri,
+            evidence_sha256=record.evidence_sha256, origins=list(record.origins),
+            rate_limit=RateLimitView(requests=record.rate_limit.requests,
+                                     per_seconds=record.rate_limit.per_seconds),
+            user_agent_contact=record.user_agent_contact,
+            first_heal_policy=record.first_heal_policy, warmup_runs=record.warmup_runs,
+            evidence_retention_days=record.evidence_retention_days,
+            legal_review=record.legal_review, record_sha256=row.record_sha256,
+            loaded_at=row.loaded_at))
+    return out
+```
+
+```python
+# selector_drift/api/routers/runs.py
+from __future__ import annotations
+
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Annotated
+
+from fastapi import APIRouter, Query
+from sqlalchemy import func, select, tuple_
+from sqlalchemy.orm import Session as OrmSession
+
+from selector_drift.api.deps import CurrentOperator, Db, RunKey, check_target
+from selector_drift.api.errors import NotFound
+from selector_drift.api.routers._cursor import decode_cursor, encode_cursor
+from selector_drift.api.views import (AttemptView, Page, ResolutionView, RunDetailView, RunView,
+                                      RungAttemptView)
+from selector_drift.db.models import FindingRow, HealEvent, Quarantine, Resolution, Run, RunAttempt
+
+router = APIRouter(tags=["runs"])
+
+
+def run_view(db: OrmSession, run: Run) -> RunView:
+    q = db.get(Quarantine, run.run_key)
+    attempts = db.scalar(select(func.count()).select_from(RunAttempt)
+                         .where(RunAttempt.run_key == run.run_key)) or 0
+    return RunView(run_key=run.run_key, target=run.target, spec_version=run.spec_version,
+                   window=run.window, state=run.state,
+                   quarantine_resolution=q.resolved_as if q is not None else None,
+                   attempts=attempts, first_started_at=run.first_started_at,
+                   last_finished_at=run.last_finished_at, rows_written=run.rows_written,
+                   error=run.error)
+
+
+@router.get("/runs", response_model=Page[RunView])
+def list_runs(db: Db, _op: CurrentOperator, target: str | None = None,
+              from_: Annotated[date | None, Query(alias="from")] = None,
+              to: date | None = None, cursor: str | None = None,
+              limit: Annotated[int, Query(ge=1, le=200)] = 50) -> Page[RunView]:
+    q = select(Run).order_by(Run.first_started_at.desc(), Run.run_key.desc())
+    if target is not None:
+        q = q.where(Run.target == check_target(target))
+    if from_ is not None:
+        q = q.where(Run.first_started_at >= datetime.combine(from_, time.min, UTC))
+    if to is not None:
+        q = q.where(Run.first_started_at < datetime.combine(to + timedelta(days=1), time.min, UTC))
+    if cursor is not None:
+        at, key = decode_cursor(cursor)
+        q = q.where(tuple_(Run.first_started_at, Run.run_key) < tuple_(at, key))
+    rows = list(db.scalars(q.limit(limit + 1)))
+    page = rows[:limit]
+    nxt = encode_cursor(page[-1].first_started_at, page[-1].run_key) if len(rows) > limit else None
+    return Page[RunView](items=[run_view(db, r) for r in page], next_cursor=nxt)
+
+
+@router.get("/runs/{run_key}", response_model=RunDetailView)
+def run_detail(run_key: RunKey, db: Db, _op: CurrentOperator) -> RunDetailView:
+    run = db.get(Run, run_key)
+    if run is None:
+        raise NotFound("no run with this key")
+    heal_by_resolution = {h.resolution_id: h.id for h in db.scalars(
+        select(HealEvent).where(HealEvent.run_key == run_key))}
+    attempts = [AttemptView(attempt=a.attempt, started_at=a.started_at,
+                            finished_at=a.finished_at, state=a.state, error=a.error,
+                            scope_record_sha256=a.scope_record_sha256)
+                for a in db.scalars(select(RunAttempt).where(RunAttempt.run_key == run_key)
+                                    .order_by(RunAttempt.attempt))]
+    resolutions = [ResolutionView(field=r.field, winning_rung=r.winning_rung,
+                                  attempts=[RungAttemptView.model_validate(a)
+                                            for a in (r.attempts or [])],
+                                  node_id=r.node_id, heal_id=heal_by_resolution.get(r.id))
+                   for r in db.scalars(select(Resolution).where(Resolution.run_key == run_key)
+                                       .order_by(Resolution.id))]
+    findings = db.scalar(select(func.count()).select_from(FindingRow)
+                         .where(FindingRow.run_key == run_key)) or 0
+    return RunDetailView(**run_view(db, run).model_dump(), run_attempts=attempts,
+                         resolutions=resolutions, finding_count=findings)
+```
+
+```python
+# selector_drift/api/routers/heals.py
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, Path, Response
+from pydantic import TypeAdapter
+from sqlalchemy import select
+from sqlalchemy.orm import Session as OrmSession
+
+from bok_core.provenance import Claim, DomSource, Method
+from bok_core.provenance.render import to_rail
+from selector_drift.api import derive
+from selector_drift.api.deps import AppSettings, CurrentOperator, Db
+from selector_drift.api.errors import NotFound
+from selector_drift.api.evidence import (SECURITY_HEADERS, BundleState, Kind, Side, bundle_state,
+                                         open_file, replay_status, side_view)
+from selector_drift.api.rows import run_rows
+from selector_drift.api.views import (DecisionView, DiffSpan, ExtractedValueView, HealView,
+                                      RungAttemptView)
+from selector_drift.config import Settings
+from selector_drift.db.models import AuditLog, HealEvent, Quarantine, Run
+from selector_drift.heallog.bundle import AFTER_HTML
+from selector_drift.heallog.diff import dom_diff
+from selector_drift.resolve.trace import AnchorEvidence, Family
+from selector_drift.spec.loader import load_spec
+from selector_drift.validate.verdict import Verdict
+
+router = APIRouter(tags=["heals"])
+_VERDICTS = TypeAdapter(list[Verdict])
+HealId = Annotated[int, Path(gt=0)]
+
+
+def decision_view(db: OrmSession, run: Run | None, q: Quarantine | None,
+                  heal: HealEvent | None = None) -> DecisionView:
+    if q is None:
+        if run is not None and run.state == "healed":
+            return DecisionView(resolved_as="accepted", actor=None, at=run.last_finished_at,
+                                reason=None)
+        return DecisionView(resolved_as=None, actor=None, at=None, reason=None)
+    if q.resolved_as is None:
+        return DecisionView(resolved_as=None, actor=None, at=None, reason=None)
+    action = "promote" if q.resolved_as == "promoted" else "discard"
+    audit = db.scalars(select(AuditLog).where(AuditLog.action == action,
+                                              AuditLog.subject == q.run_key)
+                       .order_by(AuditLog.id.desc()).limit(1)).first()
+    actor = (heal.promoted_by if heal is not None and heal.promoted_by and action == "promote"
+             else q.actor)
+    return DecisionView(resolved_as=q.resolved_as, actor=actor, at=q.resolved_at,
+                        reason=str(audit.detail.get("reason")) if audit is not None else None)
+
+
+def _snapshot_id(state: BundleState) -> str:
+    if state.manifest is None or AFTER_HTML not in state.manifest.files:
+        return "not-captured"
+    return state.manifest.files[AFTER_HTML].removeprefix("sha256:")
+
+
+def sample_values(settings: Settings, heal: HealEvent,
+                  state: BundleState) -> list[ExtractedValueView]:
+    spec = load_spec(settings.spec_dir / f"{heal.target}.yaml")
+    out: list[ExtractedValueView] = []
+    for row in run_rows(settings, heal.run_key, 10):
+        if heal.field not in row:
+            continue
+        claim = Claim(value=str(row[heal.field]),
+                      source=DomSource(snapshot_id=_snapshot_id(state),
+                                       selector=heal.selector_after, rung=heal.winning_rung),
+                      method=Method.DETERMINISTIC, observed_at=heal.broke_at)
+        out.append(ExtractedValueView(field=heal.field,
+                                      row_key={k: str(row.get(k)) for k in spec.natural_key},
+                                      value=str(row[heal.field]), rail=to_rail(claim)))
+    return out
+
+
+def _get_heal(db: OrmSession, heal_id: int) -> HealEvent:
+    heal = db.get(HealEvent, heal_id)
+    if heal is None:
+        raise NotFound("no heal with this id")
+    return heal
+
+
+@router.get("/heals/{heal_id}", response_model=HealView)
+def heal(heal_id: HealId, db: Db, settings: AppSettings, _op: CurrentOperator) -> HealView:
+    h = _get_heal(db, heal_id)
+    state = bundle_state(db, settings, h)
+    return HealView(
+        id=h.id, run_key=h.run_key, target=h.target, field=h.field, broke_at=h.broke_at,
+        winning_rung=h.winning_rung, confirmer_rung=h.confirmer_rung,
+        confirmer_family=Family(h.confirmer_family) if h.confirmer_family else None,
+        selector_before=h.selector_before, selector_after=h.selector_after,
+        anchor_before=AnchorEvidence(**h.anchor_before) if h.anchor_before else None,
+        anchor_after=AnchorEvidence(**h.anchor_after),
+        trace=[RungAttemptView.model_validate(a) for a in (h.trace or [])],
+        verdicts=_VERDICTS.validate_python(h.verdicts or []),
+        replay_status=replay_status(h, state),
+        before=side_view(h.id, state, "before"), after=side_view(h.id, state, "after"),
+        sample_values=sample_values(settings, h, state),
+        decision=decision_view(db, db.get(Run, h.run_key), db.get(Quarantine, h.run_key), h),
+        summary=derive.heal_summary(h))
+
+
+@router.get("/heals/{heal_id}/evidence/{side}/{kind}", response_class=Response,
+            responses={200: {"content": {"text/html": {}, "image/png": {}}}})
+def evidence(heal_id: HealId, side: Side, kind: Kind, db: Db, settings: AppSettings,
+             _op: CurrentOperator) -> Response:
+    data = open_file(db, settings, _get_heal(db, heal_id), side, kind)
+    if kind == "dom":
+        # A hostile page's markup: sandboxed, never sniffed, never cached.
+        return Response(data, media_type="text/html; charset=utf-8",
+                        headers={**SECURITY_HEADERS, "Content-Security-Policy": "sandbox"})
+    return Response(data, media_type="image/png",
+                    headers={**SECURITY_HEADERS, "Content-Security-Policy": "default-src 'none'"})
+
+
+@router.get("/heals/{heal_id}/diff", response_model=list[DiffSpan])
+def diff(heal_id: HealId, db: Db, settings: AppSettings, _op: CurrentOperator) -> list[DiffSpan]:
+    h = _get_heal(db, heal_id)
+    before = open_file(db, settings, h, "before", "dom").decode("utf-8")
+    after = open_file(db, settings, h, "after", "dom").decode("utf-8")
+    return dom_diff(before, after)
+```
+
+```python
+# selector_drift/api/routers/quarantine.py
+from __future__ import annotations
+
+from fastapi import APIRouter
+from pydantic import TypeAdapter
+from sqlalchemy import select
+from sqlalchemy.orm import Session as OrmSession
+
+import yaml
+
+from bok_core.provenance import Claim, DomSource, Method
+from bok_core.provenance.render import to_rail
+from selector_drift.api.deps import Actions, AppSettings, CurrentOperator, Db, RunKey
+from selector_drift.api.errors import AlreadyResolved, NotFound, StillInvalidProblem
+from selector_drift.api.evidence import bundle_state
+from selector_drift.api.routers.heals import _snapshot_id, decision_view
+from selector_drift.api.rows import quarantine_rows
+from selector_drift.api.views import DecisionRequest, ExtractedValueView, QuarantineView
+from selector_drift.config import Settings
+from selector_drift.db.models import HealEvent, Quarantine, Resolution, Run, SelectorCacheEntry
+from selector_drift.validate.quarantine import StillInvalid
+from selector_drift.validate.verdict import Outcome, Verdict
+
+router = APIRouter(tags=["quarantine"])
+_VERDICTS = TypeAdapter(list[Verdict])
+RUNBOOK = "docs/runbook-spec-update.md"
+
+
+def _spec_excerpt(settings: Settings, target: str, fields: set[str]) -> str:
+    path = settings.spec_dir / f"{target}.yaml"
+    if not path.is_file():
+        return ""
+    doc = yaml.safe_load(path.read_text()) or {}
+    chosen = [t for t in doc.get("targets", []) if not fields or t.get("name") in fields]
+    return yaml.safe_dump({"targets": chosen}, sort_keys=False)
+
+
+def quarantine_view(db: OrmSession, settings: Settings, q: Quarantine) -> QuarantineView:
+    run = db.get(Run, q.run_key)                  # quarantine.run_key is an FK to runs
+    assert run is not None
+    target = run.target
+    heals = list(db.scalars(select(HealEvent).where(HealEvent.run_key == q.run_key)
+                            .order_by(HealEvent.id)))
+    by_field = {h.field: h for h in heals}
+    rungs = {r.field: r.winning_rung for r in db.scalars(
+        select(Resolution).where(Resolution.run_key == q.run_key))}
+    verdicts = _VERDICTS.validate_python(q.verdicts or [])
+    preview: list[dict[str, ExtractedValueView]] = []
+    for row in quarantine_rows(settings, q.data_uri, 20):
+        cells: dict[str, ExtractedValueView] = {}
+        for name, value in row.items():
+            heal = by_field.get(name)
+            cached = db.get(SelectorCacheEntry, (target, name, run.spec_version))
+            selector = heal.selector_after if heal else (cached.selector if cached else "unknown")
+            snapshot = _snapshot_id(bundle_state(db, settings, heal)) if heal else "not-captured"
+            claim = Claim(value=str(value), method=Method.DETERMINISTIC,
+                          source=DomSource(snapshot_id=snapshot, selector=selector,
+                                           rung=rungs.get(name) or 1),
+                          observed_at=run.first_started_at)
+            cells[name] = ExtractedValueView(field=name, row_key={}, value=str(value),
+                                             rail=to_rail(claim))
+        preview.append(cells)
+    return QuarantineView(
+        run_key=q.run_key, target=target, reason=q.reason, verdicts=verdicts,
+        failing=[v for v in verdicts if v.outcome is not Outcome.PASS], preview=preview,
+        heal_ids=[h.id for h in heals],
+        spec_excerpt=_spec_excerpt(settings, target, set(by_field)), runbook_url=RUNBOOK,
+        decision=decision_view(db, run, q, heals[0] if heals else None))
+
+
+def _open(db: OrmSession, run_key: str) -> Quarantine:
+    q = db.get(Quarantine, run_key)
+    if q is None:
+        raise NotFound("this run is not in quarantine")
+    if q.resolved_as is not None:
+        raise AlreadyResolved(f"this run was already {q.resolved_as}")
+    return q
+
+
+@router.get("/quarantine", response_model=list[QuarantineView])
+def list_quarantine(db: Db, settings: AppSettings, _op: CurrentOperator,
+                    resolved: bool = False) -> list[QuarantineView]:
+    cond = Quarantine.resolved_as.is_not(None) if resolved else Quarantine.resolved_as.is_(None)
+    return [quarantine_view(db, settings, q)
+            for q in db.scalars(select(Quarantine).where(cond).order_by(Quarantine.run_key))]
+
+
+@router.post("/quarantine/{run_key}/promote", response_model=QuarantineView)
+def promote(run_key: RunKey, body: DecisionRequest, db: Db, settings: AppSettings,
+            op: CurrentOperator, actions: Actions) -> QuarantineView:
+    _open(db, run_key)
+    try:
+        actions.promote(run_key, op.username, body.reason)      # actor: the session, never a body
+    except StillInvalid as exc:
+        failing = [v for v in exc.verdicts if v.outcome is not Outcome.PASS]
+        raise StillInvalidProblem(f"{len(failing)} checks still fail after human confirmation.",
+                                  failing=failing) from exc
+    db.expire_all()
+    q = db.get(Quarantine, run_key)
+    assert q is not None
+    return quarantine_view(db, settings, q)
+
+
+@router.post("/quarantine/{run_key}/discard", response_model=QuarantineView)
+def discard(run_key: RunKey, body: DecisionRequest, db: Db, settings: AppSettings,
+            op: CurrentOperator, actions: Actions) -> QuarantineView:
+    _open(db, run_key)
+    actions.discard(run_key, op.username, body.reason)
+    db.expire_all()
+    q = db.get(Quarantine, run_key)
+    assert q is not None
+    return quarantine_view(db, settings, q)
+```
+
+```python
+# selector_drift/api/routers/quality.py
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, Query
+from sqlalchemy import select, tuple_
+
+from bok_core.findings import Finding
+from bok_core.provenance.render import to_rail
+from selector_drift.api.deps import CurrentOperator, Db, check_run_key, check_target
+from selector_drift.api.errors import Invalid
+from selector_drift.api.routers._cursor import decode_cursor, encode_cursor
+from selector_drift.api.views import FindingView, Page
+from selector_drift.db.models import FindingRow, Run
+
+router = APIRouter(tags=["quality"])
+
+
+def finding_view(row: FindingRow) -> FindingView:
+    f = Finding.model_validate(row.payload)
+    p = f.properties
+    return FindingView(id=f.id, run_key=row.run_key, severity=f.severity, title=f.title,
+                       check=str(p["rule"]), observed=str(p.get("observed", "")),
+                       threshold=str(p["threshold"]), threshold_reason=str(p["threshold_reason"]),
+                       rail=to_rail(f.claim))
+
+
+@router.get("/quality", response_model=Page[FindingView])
+def quality(db: Db, _op: CurrentOperator, run_key: str | None = None, target: str | None = None,
+            cursor: str | None = None,
+            limit: Annotated[int, Query(ge=1, le=200)] = 50) -> Page[FindingView]:
+    if run_key is None and target is None:
+        raise Invalid("give run_key or target")
+    q = select(FindingRow).order_by(FindingRow.at.desc(), FindingRow.id.desc())
+    if run_key is not None:
+        q = q.where(FindingRow.run_key == check_run_key(run_key))
+    if target is not None:
+        q = q.join(Run, Run.run_key == FindingRow.run_key).where(Run.target == check_target(target))
+    if cursor is not None:
+        at, key = decode_cursor(cursor)
+        q = q.where(tuple_(FindingRow.at, FindingRow.id) < tuple_(at, key))
+    rows = list(db.scalars(q.limit(limit + 1)))
+    page = rows[:limit]
+    nxt = encode_cursor(page[-1].at, page[-1].id) if len(rows) > limit else None
+    return Page[FindingView](items=[finding_view(r) for r in page], next_cursor=nxt)
+```
+
+```python
+# selector_drift/api/routers/specs.py
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+from fastapi import APIRouter
+
+from selector_drift.api.deps import AppSettings, CurrentOperator, TargetName
+from selector_drift.api.errors import NotFound
+from selector_drift.api.views import SpecView
+from selector_drift.spec.loader import load_spec
+from selector_drift.validate.verdict import Outcome, Verdict
+
+router = APIRouter(tags=["specs"])
+
+
+def _v(check: str, ok: bool, threshold: str, observed: str, reason: str) -> Verdict:
+    return Verdict(check=check, outcome=Outcome.PASS if ok else Outcome.FAIL,
+                   threshold=threshold, observed=observed, reason=reason)
+
+
+def spec_validation(path: Path) -> tuple[int, list[Verdict]]:
+    try:
+        spec = load_spec(path)
+    except Exception as exc:      # the loader's own error, reported as a verdict, never raised
+        raw = yaml.safe_load(path.read_text()) or {}
+        version = raw.get("version") if isinstance(raw.get("version"), int) else 0
+        return version, [_v("SpecSchema", False, "parses as a TaskSpec",
+                            str(exc).splitlines()[0][:200], "the loader refused this file")]
+    missing = set(spec.natural_key) - set(spec.expected_schema)
+    unasserted = [t.name for t in spec.targets if not t.assertions]
+    return spec.version, [
+        _v("SpecSchema", True, "parses as a TaskSpec", "valid", "the loader accepted this file"),
+        _v("NaturalKeyInSchema", not missing, "natural_key within expected_schema",
+           ", ".join(sorted(missing)) or "all present", "M5: the lake dedups on this key"),
+        _v("EveryTargetAsserted", not unasserted, "at least one assertion per target",
+           ", ".join(unasserted) or "all asserted", "a target with no assertion cannot be judged"),
+        _v("ScopeRecordPresent", Path(spec.scope_ref).is_file(), "scope_ref names a file",
+           spec.scope_ref, "no scope record means every run is refused"),
+    ]
+
+
+@router.get("/specs/{target}", response_model=SpecView)
+def spec(target: TargetName, settings: AppSettings, _op: CurrentOperator) -> SpecView:
+    path = settings.spec_dir / f"{target}.yaml"
+    if not path.is_file():
+        raise NotFound("no spec for this target")
+    version, validation = spec_validation(path)
+    return SpecView(target=target, version=version, yaml=path.read_text(), validation=validation)
+```
+
+```python
+# selector_drift/api/routers/stats.py
+from __future__ import annotations
+
+from datetime import UTC, date, datetime, timedelta
+from typing import Annotated
+
+from fastapi import APIRouter, Query
+
+from selector_drift.api import derive
+from selector_drift.api.deps import CurrentOperator, Db, check_target
+from selector_drift.api.errors import Invalid
+from selector_drift.api.views import StatsView
+
+router = APIRouter(tags=["stats"])
+
+
+@router.get("/stats", response_model=StatsView)
+def stats(db: Db, _op: CurrentOperator, target: str | None = None,
+          from_: Annotated[date | None, Query(alias="from")] = None,
+          to: date | None = None) -> StatsView:
+    if target is not None:
+        check_target(target)
+    today = datetime.now(UTC).date()
+    end = to or today
+    start = from_ or today - timedelta(days=derive.elapsed_days(db, target, today=today))
+    if start > end:
+        raise Invalid("from: must not be after to")
+    return derive.stats(db, target, (start, end))
+```
+
+- [ ] **Step 7: Wire the routers, the actions, and `serve-api`**
+
+In `selector_drift/api/deps.py`, add:
+
+```python
+from collections.abc import Callable
+from typing import Protocol
+
+
+class QuarantineActionsLike(Protocol):
+    """Task 26A's QuarantineActions satisfies this. api/ never imports orchestrate/."""
+
+    @property
+    def promote(self) -> Callable[[str, str, str], None]: ...
+
+    @property
+    def discard(self) -> Callable[[str, str, str], None]: ...
+
+
+def quarantine_actions(request: Request) -> QuarantineActionsLike:
+    actions: QuarantineActionsLike | None = request.app.state.quarantine_actions
+    if actions is None:
+        raise RuntimeError("create_app() was not given quarantine_actions; "
+                           "start the API with `python -m selector_drift serve-api`")
+    return actions
+
+
+Actions = Annotated[QuarantineActionsLike, Depends(quarantine_actions)]
+```
+
+`selector_drift/api/main.py`'s `create_app` becomes:
+
+```python
+from selector_drift.api.deps import QuarantineActionsLike
+from selector_drift.api.routers import heals, quality, quarantine, runs, specs, stats, targets
+
+
+def create_app(*, settings: Settings | None = None,
+               quarantine_actions: QuarantineActionsLike | None = None) -> FastAPI:
+    s = settings or get_settings()
+    if s.fixture_mode and s.env == "production":
+        raise ConfigError("SD_FIXTURE_MODE=1 refuses to start with SD_ENV=production")
+    app = FastAPI(title="Selector Drift API", version="1.0.0",
+                  openapi_url=None, docs_url=None, redoc_url=None)
+    app.state.settings = s
+    app.state.quarantine_actions = quarantine_actions
+    install_problem_handlers(app)
+    install_origin_guard(app)
+    for module in (auth, targets, runs, heals, quarantine, quality, specs, stats):
+        app.include_router(module.router, prefix="/api/v1")
+    return app
+```
+
+In `selector_drift/__main__.py`, add the subcommand (imports inside, as for the other two):
+
+```python
+def _serve_api(host: str, port: int) -> int:
+    import uvicorn
+    from selector_drift.api.main import create_app
+    from selector_drift.orchestrate.quarantine_actions import build_quarantine_actions
+    # The composition root: the one place the read-side app is handed the write-side callables.
+    uvicorn.run(create_app(quarantine_actions=build_quarantine_actions()), host=host, port=port)
+    return 0
+
+# in main():
+    api = sub.add_parser("serve-api", help="serve the API (compose network only)")
+    api.add_argument("--host", default="127.0.0.1")
+    api.add_argument("--port", type=int, default=8000)
+# and the dispatch:
+    if args.command == "serve-api":
+        return _serve_api(args.host, args.port)
+```
+
+The compose `api` service runs `python -m selector_drift serve-api --host 0.0.0.0` and publishes no
+port outside the compose network; the web container reaches it at `http://api:8000`.
+
+- [ ] **Step 8: Type generation, the client, the CI drift check**
+
+```python
+# selector_drift/api/openapi_export.py
+"""The OpenAPI document, exported offline: no route serves it (Task 34)."""
+from __future__ import annotations
+
+import json
+import sys
+
+from selector_drift.api.main import create_app
+from selector_drift.config import Settings
+
+
+def export() -> str:
+    doc = create_app(settings=Settings.for_typegen()).openapi()
+    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
+
+
+if __name__ == "__main__":
+    sys.stdout.write(export())
+```
 
 ```bash
-git add selector_drift/api tests/api
-git commit -m "feat(api): FastAPI surface"
+#!/usr/bin/env bash
+# scripts/gen-types.sh -- regenerate the web client's types (API spec 8). Commit both outputs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+uv run python -m selector_drift.api.openapi_export > web/lib/openapi.json
+(cd web && npx --no-install openapi-typescript lib/openapi.json --output lib/api.d.ts)
+```
+
+```bash
+chmod +x scripts/gen-types.sh && scripts/gen-types.sh
+```
+
+```typescript
+// web/lib/api.ts
+import createClient from "openapi-fetch";
+import type { paths } from "./api";
+
+/** Typed by the generated api.d.ts. No hand-written response type exists in web/.
+ *  Server components forward the incoming sd_session cookie (web UI spec 1). */
+export function apiClient(sessionCookie?: string) {
+  return createClient<paths>({
+    baseUrl: process.env.SD_API_URL ?? "http://api:8000",
+    headers: sessionCookie ? { cookie: `sd_session=${sessionCookie}` } : undefined,
+  });
+}
+```
+
+Add to `.github/workflows/ci.yml`:
+
+```yaml
+  api-types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: uv sync --frozen
+      - run: npm ci
+        working-directory: web
+      - run: scripts/gen-types.sh
+      - name: Fail if a response model changed and the UI types were not regenerated
+        run: git diff --exit-code -- web/lib/openapi.json web/lib/api.d.ts
+```
+
+- [ ] **Step 9: Write `docs/api.md`** — one `##` section per problem type, whose heading slug is the
+  `type` slug: `unauthenticated`, `bad-origin`, `not-found`, `invalid`, `still-invalid` (with the
+  shape of `failing`), `already-resolved`, `throttled` (with `Retry-After`), `evidence-corrupted`,
+  `evidence-expired`. Each states the status, what caused it, and what the caller does next. Then a
+  route table copied from API spec §4.2, and the three rules of API spec §1.
+
+- [ ] **Step 10: Run them and make sure they pass**
+
+Run: `uv run pytest tests/api tests/validate/test_quarantine.py -v -m "unit or integration" && uv run lint-imports && uv run mypy --strict selector_drift/api`
+Expected: PASS — 17 endpoint tests, 9 evidence tests, 2 type tests, 1 quarantine test, plus Task 34's
+and 34B's. `api-is-read-side` kept.
+Run (CI): `uv run pytest tests/api/test_types.py -m e2e -v` — PASS, 1 test.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add selector_drift/api selector_drift/__main__.py selector_drift/validate/quarantine.py \
+        scripts/gen-types.sh web/lib web/package.json web/package-lock.json docs/api.md \
+        .github/workflows/ci.yml tests/api tests/validate/test_quarantine.py
+git commit -m "feat(api): resources, hash-verified evidence route, generated TS types with CI drift check"
 ```
 
 ---
 
-### Task 35: Web shell and the Targets screen
+### Task 35: The `web/` scaffold, the E2E fixture harness, authentication, the shell, and the Targets screen
+
+**Why this task is bigger than its title used to be.** Every later UI test needs three things this
+task now builds first: a Next.js app that compiles against the generated API types, a seeded API it
+can log into, and fixture ids it can read instead of guessing. The first revision's tests hardcoded
+`/heals/1` and `/heals/non-reproducible` — the second is a non-numeric id on an integer route and
+could only ever `422` (web UI spec §6). Nothing here renders a heal yet; it makes every later screen
+testable.
+
+**Decisions that are not obvious from the spec, each found 2026-09-26:**
+
+- **An authenticated route group, `app/(app)/`.** The shell will fetch `/targets` for the palette
+  (Task 39A). If the shell wrapped `/login` too, an unauthenticated visit to `/login` would fetch,
+  receive `401`, redirect to `/login`, and loop. `/login` lives outside the group.
+- **API failures render inline as `ProblemState`, not through `error.tsx`.** In a production Next.js
+  build, an error thrown in a server component reaches `error.tsx` with its message replaced by a
+  generic string and a digest. Spec §5 requires the error state to show the problem `title` and
+  `detail`, so `load()` returns `{ok: false, problem}` and the page renders it. `error.tsx` stays for
+  genuinely unexpected throws and shows the digest.
+- **`lib/api.ts` imports its types from `"./api.d"`.** Spec §1 puts the typed client (`api.ts`) beside
+  the generated `api.d.ts`; `import "./api"` from anywhere resolves to the `.ts` file, so the generated
+  types are imported by the explicit `./api.d` specifier, which resolves to `api.d.ts`.
+- **`next` is sanitised twice.** Middleware writes it; the login form reads it through `safeNext()`,
+  which accepts only same-origin relative paths and sends everything else to `/runs`. An open redirect
+  on the login page of a product holding client portal evidence would be an own goal (spec §1).
+- **`bok-ui` via an absolute `file:` path plus `transpilePackages`** (slice spec §2), and Vitest
+  `resolve.dedupe: ["react", "react-dom"]`: the linked package's real path sits in `backoffice-kit`,
+  whose own dev `react` would otherwise load a second React and break every hook in a component test.
+- **The fixture harness points the API at more than evidence.** Spec §6 says `SD_FIXTURE_MODE=1`
+  "only changes where the API reads evidence from". The harness also has to give the API a database,
+  a specs directory and a lake root. Those go through the API's ordinary configuration
+  (`SD_DATABASE_URL`, `SD_SPEC_DIR`, `SD_LAKE_ROOT`, `SD_WEB_ORIGIN`), not through fixture mode, so
+  fixture mode stays as narrow as the spec promises: it moves the evidence root to `web/e2e/fixtures`
+  and refuses `SD_ENV=production`. It never disables authentication, and a harness test proves it.
+- **Quality findings are seeded into the `findings` table** (Task 3, added 2026-09-26 — API spec §4.4),
+  which Task 29's `evaluate()` results are persisted to and Task 34C's `GET /quality` reads. The id is
+  `<finding id>@<run_key>`, unique per run.
+- **Fixture Parquet files avoid `:` in their names.** Task 28 names lake files
+  `{run_key}-{attempt}-{ulid}.parquet`, and a `run_key` contains colons, which are illegal in Windows
+  filenames. The fixtures use `<target>-<days-ago>-<attempt>-<ulid>.parquet` with `run_key` as a
+  column, which `land.query`'s glob reads the same way — flagged for Task 28.
 
 **Files:**
-- Create: `web/app/layout.tsx`, `web/app/targets/page.tsx`, `web/components/ScopeCard.tsx`
-- Test: `web/e2e/targets.spec.ts`
+- Create: `web/package.json`, `web/tsconfig.json`, `web/next.config.ts`, `web/next-env.d.ts`, `web/vitest.config.ts`, `web/vitest.setup.ts`, `web/playwright.config.ts`, `web/middleware.ts`
+- Create: `web/app/layout.tsx`, `web/app/globals.css`, `web/app/login/page.tsx`
+- Create: `web/app/(app)/layout.tsx`, `web/app/(app)/targets/page.tsx`, `web/app/(app)/targets/loading.tsx`, `web/app/(app)/targets/error.tsx`
+- Create: `web/components/LoginForm.tsx`, `Nav.tsx`, `NavLinks.tsx`, `SignOutButton.tsx`, `ProblemState.tsx`, `RouteError.tsx`, `ScopeCard.tsx`, `ScopeCard.module.css`, `CopyButton.tsx`
+- Create: `web/lib/api.ts`, `web/lib/problem.ts`, `web/lib/types.ts`, `web/lib/format.ts`, `web/lib/safe-next.ts`
+- Create: `web/e2e/compose.e2e.yml`, `web/e2e/global-setup.ts`, `web/e2e/fixtures/seed.sql`, `web/e2e/fixtures/make_fixtures.py`, `web/e2e/fixtures/ids.ts`
+- Create (generated by `make_fixtures.py bundles`, committed): `web/e2e/fixtures/bundles/heal-a/{before.html,before.png,after.html,after.png,manifest.json}`, `web/e2e/fixtures/bundles/heal-b/{after.html,after.png,manifest.json}`, `web/e2e/fixtures/corrupt-bundle/{before.html,before.png,after.html,after.png,manifest.json}`
+- Modify: `.gitignore`
+- Test: `web/lib/safe-next.test.ts`, `web/lib/format.test.ts`, `web/e2e/harness.spec.ts`, `web/e2e/auth.spec.ts`, `web/e2e/targets.spec.ts`
 
 **Interfaces:**
-- Consumes: `GET /targets` (Task 34), `bok-ui` tokens.
-- Produces: light-first shell, drift indigo `oklch(0.55 0.14 268)` reserved for the heal state, tabular numerals on every figure.
+- Consumes: Task 34's routes and `scripts/gen-types.sh` output `web/lib/api.d.ts` + `web/lib/openapi.json` (API contract §8); `POST /api/v1/auth/login` (sets `sd_session`), `GET /api/v1/auth/me`, `POST /api/v1/auth/logout`, `GET /api/v1/targets` → `TargetView[]`, `GET /api/v1/heals/{id}`. From the Python side, the names this harness calls (Task 34 must provide them; flagged where the plan does not yet name them): app factory `selector_drift.api.main:create_app` (raises, with `SD_FIXTURE_MODE` in the message, when `SD_FIXTURE_MODE=1` and `SD_ENV=production` — before touching the database), CLI `python -m selector_drift create-operator <username>` (password prompted twice via `getpass`, which reads stdin when no TTY), configuration `SD_DATABASE_URL`, `SD_ENV`, `SD_FIXTURE_MODE`, `SD_WEB_ORIGIN`, `SD_SPEC_DIR`, `SD_LAKE_ROOT`. `bok-ui` from Task 34A-1/34A-2.
+- Produces:
+  - `load<T>(call: (client: ApiClient) => Promise<{data?: T; error?: unknown; response: Response}>) -> Promise<Loaded<T>>`, `Loaded<T> = {ok: true; data: T} | {ok: false; problem: Problem}`, `apiClient()`, `loginHref()` — server-only.
+  - `Problem {type; title; status; detail?; failing?: Verdict[]}`, `isProblem`, `problemFrom`, `readProblem(res)` — client-safe.
+  - `lib/types.ts` aliases: `TargetView`, `RunView`, `RunDetailView`, `AttemptView`, `ResolutionView`, `RungAttemptView`, `HealView`, `EvidenceSideView`, `ExtractedValueView`, `DecisionView`, `QuarantineView`, `FindingView`, `SpecView`, `StatsView`, `Verdict`, `DiffSpanView`, `ApiRailPayload`, `ApiRailNode`, `RunStateName`.
+  - `lib/format.ts`: `rateLimit`, `daysBetween`, `addDays`, `utcToday`, `isIsoDay`, `shortSha`, `percent`, `utcStamp`, `familyLabel`, `confirmerLabel`, `decodeParam`, `methodHref`, `windowOf`.
+  - `safeNext(raw: string | null | undefined): string`.
+  - Components: `<ScopeCard target today />`, `<ProblemState problem />`, `<RouteError error reset />`, `<Nav tools? />`, `<CopyButton text label />`.
+  - E2E: `ids(): FixtureIds`, `SCREENS` and `screenPath(screen: Screen): string` (the seven screens, resolved lazily), `web/e2e/fixtures/fixture-ids.json`, `web/e2e/.auth/storageState.json`, `process.env.SD_E2E_USERNAME` / `SD_E2E_PASSWORD`.
 
-- [ ] **Step 1: Write the failing E2E tests**
+- [ ] **Step 1: Scaffold `web/`**
 
-```typescript
+`web/package.json` — the dependency set the spec requires, pinned to majors:
+
+```json
+{
+  "name": "selector-drift-web",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "bok-ui": "file:D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-ui-minimal/packages/bok-ui",
+    "cmdk": "^1.0.4",
+    "next": "^15.1.6",
+    "openapi-fetch": "^0.13.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.1",
+    "@playwright/test": "^1.49.1",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^25.0.1",
+    "openapi-typescript": "^7.5.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
+```
+
+The `bok-ui` specifier is **absolute** (slice spec §2; the same ruling as the `bok-core` path
+dependency — a relative path breaks when the worktree merges). CI cannot see a `D:` path; Task 39's CI
+job rewrites this one specifier to its own checkout before installing. When `bok-ui` publishes to npm
+the specifier becomes a version range and nothing else changes.
+
+`web/tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "es2022"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{ "name": "next" }],
+    "paths": { "@/*": ["./*"] }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+```
+
+`web/next-env.d.ts` (Next regenerates it identically; committed so `tsc` works before the first build):
+
+```ts
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+```
+
+`web/next.config.ts`:
+
+```ts
+import type { NextConfig } from "next";
+
+// Server components call the API directly on the compose network; the browser reaches the same
+// API through this origin's /api/v1 rewrite, so cookie, page and API share one origin and
+// SameSite=Strict works while the API keeps CORS closed (web UI spec section 1).
+const API = process.env.SD_API_URL ?? "http://api:8000";
+
+const nextConfig: NextConfig = {
+  transpilePackages: ["bok-ui"],
+  poweredByHeader: false,
+  // No ESLint in this slice: `tsc --noEmit` (strict) and the test suites are the gates.
+  eslint: { ignoreDuringBuilds: true },
+  async rewrites() {
+    return [{ source: "/api/v1/:path*", destination: `${API}/api/v1/:path*` }];
+  },
+  async headers() {
+    return [
+      {
+        source: "/(.*)",
+        headers: [
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "same-origin" },
+          { key: "X-Frame-Options", value: "DENY" },
+        ],
+      },
+    ];
+  },
+};
+
+export default nextConfig;
+```
+
+`web/vitest.config.ts`:
+
+```ts
+import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  plugins: [react()],
+  resolve: {
+    alias: { "@": fileURLToPath(new URL("./", import.meta.url)) },
+    // bok-ui is a file: link whose real path has its own dev copy of React; one React only.
+    dedupe: ["react", "react-dom"],
+  },
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./vitest.setup.ts"],
+    include: ["lib/**/*.test.ts", "components/**/*.test.tsx"],
+    server: { deps: { inline: ["bok-ui"] } },
+  },
+});
+```
+
+`web/vitest.setup.ts`:
+
+```ts
+import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
+import { afterEach } from "vitest";
+
+afterEach(() => cleanup());
+
+// jsdom has no modal <dialog>. DecisionDialog (Task 38) needs showModal/close to exist; focus
+// trapping itself is proven in a real browser by the keyboard E2E, not here.
+if (typeof HTMLDialogElement !== "undefined" && typeof HTMLDialogElement.prototype.showModal !== "function") {
+  HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close = function close(this: HTMLDialogElement) {
+    this.removeAttribute("open");
+    this.dispatchEvent(new Event("close"));
+  };
+}
+```
+
+`web/playwright.config.ts`:
+
+```ts
+import { defineConfig, devices } from "@playwright/test";
+import path from "node:path";
+
+export default defineConfig({
+  testDir: "./e2e",
+  globalSetup: "./e2e/global-setup.ts",
+  timeout: 30_000,
+  expect: { timeout: 5_000 },
+  fullyParallel: true,
+  workers: process.env.CI ? 2 : undefined,
+  retries: 0,
+  reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
+  use: {
+    baseURL: "http://localhost:3000",
+    storageState: path.join(__dirname, "e2e", ".auth", "storageState.json"),
+    trace: "retain-on-failure",
+  },
+  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  webServer: {
+    command: "npm run build && npm run start",
+    url: "http://localhost:3000/login",
+    reuseExistingServer: !process.env.CI,
+    timeout: 240_000,
+    // Rewrites are resolved at build time, so the build must see this too.
+    env: { SD_API_URL: "http://127.0.0.1:8000" },
+  },
+});
+```
+
+`web/app/layout.tsx` (root: html, density, stylesheets — no data fetching, so `/login` renders
+without a session):
+
+```tsx
+import type { Metadata } from "next";
+import { cookies } from "next/headers";
+import type { ReactNode } from "react";
+import "bok-ui/tokens.css";
+import "bok-ui/print.css";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: { default: "Selector Drift", template: "%s · Selector Drift" },
+  description: "Production data pipeline with self-healing extraction and data-quality contracts.",
+};
+
+export default async function RootLayout({ children }: { children: ReactNode }) {
+  // Server-rendered density: the right spacing on first paint, no flash (spec section 1).
+  const density = (await cookies()).get("sd_density")?.value === "comfortable" ? "comfortable" : "compact";
+  return (
+    <html lang="en-GB" data-density={density}>
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+`.gitignore` — append:
+
+```gitignore
+# web/
+web/node_modules/
+web/.next/
+web/tsconfig.tsbuildinfo
+web/test-results/
+web/playwright-report/
+web/e2e/.auth/
+web/e2e/fixtures/.generated/
+web/e2e/fixtures/fixture-ids.json
+```
+
+The root layout imports `./globals.css`, which Step 9 fills; create it empty now so the scaffold
+compiles: `touch web/app/globals.css`.
+
+Run: `cd web && npm install && npx tsc --noEmit`
+Expected: `npm install` exits 0 and links `bok-ui` (`npm ls bok-ui` shows `bok-ui@0.0.1 -> ...\packages\bok-ui`); `tsc` exits 0. The linked package resolves to its `dist/`, so `bok-ui` must have been built in its worktree (Task 34A-2 Step 10). If `web/lib/api.d.ts` is absent, run `scripts/gen-types.sh` (Task 34) first.
+
+- [ ] **Step 2: Write the failing unit tests for `safeNext` and the formatters**
+
+```ts
+// web/lib/safe-next.test.ts
+import { describe, expect, it } from "vitest";
+import { safeNext } from "./safe-next";
+
+describe("safeNext", () => {
+  it.each([
+    ["/quarantine", "/quarantine"],
+    ["/runs?target=testbench", "/runs?target=testbench"],
+    ["/heals/12#evidence-after", "/heals/12#evidence-after"],
+    ["/specs/testbench", "/specs/testbench"],
+  ])("keeps the same-origin path %s", (raw, expected) => {
+    expect(safeNext(raw)).toBe(expected);
+  });
+
+  it.each([
+    [null],
+    [""],
+    ["https://evil.example/"],
+    ["//evil.example/"],
+    ["/\\evil.example"],
+    ["javascript:alert(1)"],
+    ["/login?next=/runs"],
+    [" /runs"],
+    ["/ru\nns"],
+  ])("sends %j to /runs", (raw) => {
+    expect(safeNext(raw)).toBe("/runs");
+  });
+});
+```
+
+```ts
+// web/lib/format.test.ts
+import { describe, expect, it } from "vitest";
+import {
+  addDays, confirmerLabel, daysBetween, decodeParam, isIsoDay, methodHref, percent,
+  rateLimit, utcStamp, utcToday, windowOf,
+} from "./format";
+
+describe("format", () => {
+  it("states a rate limit the way the scope record means it", () => {
+    expect(rateLimit({ requests: 1, per_seconds: 30 })).toBe("1 request / 30 s");
+    expect(rateLimit({ requests: 4, per_seconds: 60 })).toBe("4 requests / 60 s");
+  });
+
+  it("counts calendar days in UTC", () => {
+    expect(daysBetween("2026-09-26", "2026-10-08")).toBe(12);
+    expect(daysBetween("2026-09-26", "2026-08-27")).toBe(-30);
+    expect(addDays("2026-03-01", -1)).toBe("2026-02-28");
+  });
+
+  it("takes today from UTC, not the local clock", () => {
+    expect(utcToday(new Date("2026-09-26T23:30:00-05:00"))).toBe("2026-09-27");
+  });
+
+  it("accepts only real ISO dates", () => {
+    expect(isIsoDay("2026-09-26")).toBe(true);
+    expect(isIsoDay("26/09/2026")).toBe(false);
+    expect(isIsoDay(undefined)).toBe(false);
+  });
+
+  it("formats a share as a percentage with one decimal", () => {
+    expect(percent(0.992)).toBe("99.2%");
+  });
+
+  it("stamps instants in UTC to the minute", () => {
+    expect(utcStamp("2026-09-26T04:12:31Z")).toBe("2026-09-26 04:12 UTC");
+  });
+
+  it("names the confirmer as the heal log does", () => {
+    expect(confirmerLabel(4, "STRUCTURAL")).toBe("rung 4 (structural)");
+    expect(confirmerLabel(null, "VALUE")).toBe("VALUE (row-key continuity)");
+    expect(confirmerLabel(null, null)).toBe("no cross-family confirmer resolved");
+  });
+
+  it("anchors a method link without doubling a hash", () => {
+    expect(methodHref("https://x.test/methodology#top", "missed-runs")).toBe("https://x.test/methodology#missed-runs");
+  });
+
+  it("decodes a route parameter and survives a malformed one", () => {
+    expect(decodeParam("testbench%3A1%3A2026-09-26")).toBe("testbench:1:2026-09-26");
+    expect(decodeParam("%E0%A4%A")).toBe("%E0%A4%A");
+  });
+
+  it("reads the window from a run key", () => {
+    expect(windowOf("testbench:1:2026-09-26")).toBe("2026-09-26");
+  });
+});
+```
+
+Run: `cd web && npx vitest run lib`
+Expected: FAIL — `Failed to resolve import "./safe-next"` and `"./format"`.
+
+- [ ] **Step 3: Write `safe-next.ts` and `format.ts`**
+
+```ts
+// web/lib/safe-next.ts
+const FALLBACK = "/runs";
+const PROBE = "http://sd.invalid";
+
+/** Same-origin relative paths only; everything else goes to /runs. An open redirect on the
+ *  login page of a product holding client portal evidence would be an own goal (spec section 1). */
+export function safeNext(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined || raw === "") return FALLBACK;
+  if (!raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) return FALLBACK;
+  if (/[\u0000-\u001f\u007f\\]/.test(raw)) return FALLBACK;
+  let url: URL;
+  try {
+    url = new URL(raw, PROBE);
+  } catch {
+    return FALLBACK;
+  }
+  if (url.origin !== PROBE || url.pathname === "/login") return FALLBACK;
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+```
+
+```ts
+// web/lib/format.ts
+const DAY = 86_400_000;
+
+function dayMs(iso: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (m === null) throw new Error(`not an ISO date: ${iso}`);
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+
+export function rateLimit(r: { requests: number; per_seconds: number }): string {
+  return `${r.requests} ${r.requests === 1 ? "request" : "requests"} / ${r.per_seconds} s`;
+}
+
+export function daysBetween(from: string, to: string): number {
+  return Math.round((dayMs(to) - dayMs(from)) / DAY);
+}
+
+export function addDays(iso: string, n: number): string {
+  return new Date(dayMs(iso) + n * DAY).toISOString().slice(0, 10);
+}
+
+export function utcToday(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
+export function isIsoDay(s: string | undefined): s is string {
+  if (s === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  return new Date(dayMs(s)).toISOString().slice(0, 10) === s;
+}
+
+export function shortSha(s: string, n = 12): string {
+  return s.slice(0, n);
+}
+
+export function percent(x: number, digits = 1): string {
+  return `${(x * 100).toFixed(digits)}%`;
+}
+
+export function utcStamp(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : `${d.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+export function familyLabel(family: string): string {
+  return family.toLowerCase().replace(/_/g, "-");
+}
+
+/** Spec section 3.3 item 4: "rung N (family)", "VALUE (row-key continuity)", or none. */
+export function confirmerLabel(rung: number | null, family: string | null): string {
+  if (family === null) return "no cross-family confirmer resolved";
+  if (rung === null) return "VALUE (row-key continuity)";
+  return `rung ${rung} (${familyLabel(family)})`;
+}
+
+export function decodeParam(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/** StatsView carries one method_url; each figure links to its own anchor in methodology.md. */
+export function methodHref(base: string, anchor: string): string {
+  return `${base.split("#")[0] ?? base}#${anchor}`;
+}
+
+export function windowOf(runKey: string): string {
+  return runKey.split(":")[2] ?? "";
+}
+```
+
+Run: `cd web && npx vitest run lib`
+Expected: PASS, 23 tests (13 safeNext, 10 format).
+
+```bash
+git add web/package.json web/package-lock.json web/tsconfig.json web/next.config.ts web/next-env.d.ts \
+        web/vitest.config.ts web/vitest.setup.ts web/playwright.config.ts web/app/layout.tsx web/app/globals.css \
+        web/lib/safe-next.ts web/lib/safe-next.test.ts web/lib/format.ts web/lib/format.test.ts .gitignore
+git commit -m "feat(web): Next.js 15 scaffold on bok-ui, safe login redirects and formatters"
+```
+
+- [ ] **Step 4: Write the failing harness test**
+
+```ts
+// web/e2e/harness.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+test("every seeded heal id resolves through the web origin with the stored session", async ({ page }) => {
+  for (const [name, id] of Object.entries(ids().heals)) {
+    const res = await page.goto(`/api/v1/heals/${id}`);
+    expect(res?.status(), name).toBe(200);
+  }
+});
+
+test("a seeded heal belongs to the run the fixture file says it does", async ({ page }) => {
+  const res = await page.goto(`/api/v1/heals/${ids().heals.accepted}`);
+  const body = (await res?.json()) as { run_key: string };
+  expect(body.run_key).toBe(ids().runs.healed);
+});
+
+test("fixture mode never disables authentication", async ({ browser }) => {
+  const anon = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+  const res = await (await anon.newPage()).goto(`/api/v1/heals/${ids().heals.accepted}`);
+  expect(res?.status()).toBe(401);
+  await anon.close();
+});
+```
+
+Run: `cd web && npx playwright test e2e/harness.spec.ts`
+Expected: FAIL — `Error: Cannot find module './e2e/global-setup.ts'`.
+
+- [ ] **Step 5: Build the fixture harness**
+
+`web/e2e/compose.e2e.yml` — a throwaway Postgres on loopback, in RAM, with no password at all (so
+nothing resembling a credential is committed):
+
+```yaml
+name: sd-e2e
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sd
+      POSTGRES_DB: sd_e2e
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports: ["127.0.0.1:55432:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sd -d sd_e2e"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+```
+
+`web/e2e/fixtures/make_fixtures.py`:
+
+```python
+"""E2E fixtures for web/ -- kept apart from selector_drift/browser's own (brief section 11).
+
+  bundles   writes bundles/heal-a, bundles/heal-b and corrupt-bundle/ beside this file (committed)
+  runtime   writes specs/, lake/ and quarantine/ for one E2E run into --out (gitignored)
+
+Synthetic bench-style markup only: no client data, no credentials.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import shutil
+import struct
+import zlib
+from datetime import date, timedelta
+from pathlib import Path
+
+import duckdb
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[2]
+VIEWPORT = (1280, 900)
+TOP, ROW_H = 160, 36
+CLAIMS = [f"AB{n:08d}" for n in range(10_000_001, 10_000_021)]
+AMOUNTS = [f"{(n * 7919) % 240_000 + 100:,}.00" for n in range(1, 21)]
+STATUSES = ["Open", "Pending", "Closed", "Referred"]
+Column = tuple[str, int, int]
+BEFORE: list[Column] = [("Claim Number", 80, 220), ("Status", 300, 160), ("Amount", 460, 180)]
+AFTER: list[Column] = [("Status", 80, 160), ("Amount", 240, 180), ("Claim Number", 420, 220)]
+CAPTURED = "2026-01-01T04:12:00Z"
+PAPER, RULE, HEAD, TINT = (250, 249, 246), (205, 202, 194), (228, 225, 218), (236, 234, 250)
+TESTBENCH_ROWS = {1: 12, 2: 20, 5: 20, 9: 20, 10: 20, 11: 20, 12: 20, 13: 20, 14: 20}
+EXPIRING_ROWS = {1: 12, 2: 12, 3: 12}
+
+
+def _chunk(tag: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+
+def png(cols: list[Column]) -> bytes:
+    """A 1280x900 RGB picture of the results table: header band, row rules, claim column tinted."""
+    width, height = VIEWPORT
+    rects: list[tuple[int, int, int, int, tuple[int, int, int]]] = [(80, 120, 640, 156, HEAD)]
+    for name, x, w in cols:
+        if name == "Claim Number":
+            rects.append((x, TOP, x + w, TOP + ROW_H * len(CLAIMS), TINT))
+    for i in range(len(CLAIMS) + 1):
+        y = TOP + i * ROW_H
+        rects.append((80, y, 640, y + 1, RULE))
+    raw = bytearray()
+    for y in range(height):
+        row = bytearray(bytes(PAPER) * width)
+        for x0, y0, x1, y1, rgb in rects:
+            if y0 <= y < y1:
+                row[x0 * 3 : x1 * 3] = bytes(rgb) * (x1 - x0)
+        raw += b"\x00" + row
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", header) + _chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + _chunk(b"IEND", b"")
+
+
+def html(cols: list[Column], claim_class: str) -> str:
+    def cell(name: str, i: int) -> str:
+        if name == "Claim Number":
+            return f'<td class="{claim_class}">{CLAIMS[i]}</td>'
+        if name == "Status":
+            return f"<td>{STATUSES[i % 4]}</td>"
+        return f'<td class="num">{AMOUNTS[i]}</td>'
+
+    head = "".join(f"<th>{name}</th>" for name, _, _ in cols)
+    rows = "".join("<tr>" + "".join(cell(n, i) for n, _, _ in cols) + "</tr>" for i in range(len(CLAIMS)))
+    return (
+        '<!doctype html><html lang="en"><head><title>Results</title></head><body><main>'
+        f'<h1>Search results</h1><table id="results"><thead><tr>{head}</tr></thead>'
+        f"<tbody>{rows}</tbody></table></main></body></html>"
+    )
+
+
+def side(cols: list[Column]) -> dict[str, object]:
+    _, x, w = next(c for c in cols if c[0] == "Claim Number")
+    box = {"x": x, "y": TOP, "width": w, "height": ROW_H}
+    return {
+        "run_key": "fixture:1:2026-01-01",
+        "captured_at": CAPTURED,
+        "viewport": list(VIEWPORT),
+        "nodes": {"claim_number": {"node_id": "n-claim", "bbox": box}},
+    }
+
+
+def write_bundle(dest: Path, *, with_before: bool) -> None:
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    files = {"after.html": html(AFTER, "c-claim-v2").encode(), "after.png": png(AFTER)}
+    if with_before:
+        files |= {"before.html": html(BEFORE, "claim").encode(), "before.png": png(BEFORE)}
+    for name, data in files.items():
+        (dest / name).write_bytes(data)
+    manifest: dict[str, object] = {
+        "version": 1,
+        "files": {n: "sha256:" + hashlib.sha256(d).hexdigest() for n, d in sorted(files.items())},
+        "after": side(AFTER),
+        "redaction": {"scrubbed_credentials": 0, "redacted_identifiers": 0, "verified": True},
+    }
+    if with_before:
+        manifest["before"] = side(BEFORE)
+    (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+def bundles() -> None:
+    write_bundle(HERE / "bundles" / "heal-a", with_before=True)
+    write_bundle(HERE / "bundles" / "heal-b", with_before=False)  # a first heal: no before exists
+    corrupt = HERE / "corrupt-bundle"
+    if corrupt.exists():
+        shutil.rmtree(corrupt)
+    shutil.copytree(HERE / "bundles" / "heal-a", corrupt)
+    after = corrupt / "after.png"
+    data = bytearray(after.read_bytes())
+    data[-5] ^= 0xFF  # one byte of the IEND CRC: the manifest hash no longer matches (spec section 6)
+    after.write_bytes(bytes(data))
+
+
+def write_parquet(con: duckdb.DuckDBPyConnection, path: Path, run_key: str, day: date, claims: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE t (run_key VARCHAR, attempt INTEGER, ingested_at TIMESTAMP, "
+        "claim_number VARCHAR, status VARCHAR, amount VARCHAR)"
+    )
+    stamp = f"{day.isoformat()} 04:13:00"
+    con.executemany(
+        "INSERT INTO t VALUES (?, 1, ?, ?, ?, ?)",
+        [(run_key, stamp, c, STATUSES[i % 4], AMOUNTS[i]) for i, c in enumerate(claims)],
+    )
+    con.execute(f"COPY t TO '{path.as_posix()}' (FORMAT PARQUET)")
+
+
+def runtime(out: Path, today: date) -> None:
+    specs = out / "specs"
+    specs.mkdir(parents=True)
+    source = (REPO / "specs" / "testbench.yaml").read_text()
+    (specs / "testbench.yaml").write_text(source)
+    # An unscoped target: a spec whose scope_ref names a record that does not exist.
+    (specs / "ghost-portal.yaml").write_text(source.replace("scopes/testbench.yaml", "scopes/ghost-portal.yaml"))
+
+    con = duckdb.connect()
+    for target, rows in (("testbench", TESTBENCH_ROWS), ("bench-expiring", EXPIRING_ROWS)):
+        for days_ago, n in rows.items():
+            day = today - timedelta(days=days_ago)
+            run_key = f"{target}:1:{day.isoformat()}"
+            # No ':' in the filename (illegal on Windows); run_key travels as a column.
+            name = f"{target}-{days_ago}-1-01JFIXTURE{days_ago:016d}.parquet"
+            write_parquet(con, out / "lake" / f"target={target}" / f"window={day.isoformat()}" / name, run_key, day, CLAIMS[:n])
+
+    held = out / "quarantine"
+    for name, days_ago, claims in (
+        ("held-quarantined.parquet", 3, AMOUNTS),  # locked onto the adjacent Amount column
+        ("held-promoted.parquet", 5, CLAIMS),
+        ("held-discarded.parquet", 6, CLAIMS),
+    ):
+        day = today - timedelta(days=days_ago)
+        write_parquet(con, held / name, f"testbench:1:{day.isoformat()}", day, list(claims))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("bundles")
+    rt = sub.add_parser("runtime")
+    rt.add_argument("--out", type=Path, required=True)
+    rt.add_argument("--today", type=date.fromisoformat, required=True)
+    args = parser.parse_args()
+    if args.cmd == "bundles":
+        bundles()
+    else:
+        runtime(args.out, args.today)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Run once, from the repo root, and commit the output:
+
+```bash
+uv run python web/e2e/fixtures/make_fixtures.py bundles
+ls web/e2e/fixtures/bundles/heal-a web/e2e/fixtures/bundles/heal-b web/e2e/fixtures/corrupt-bundle
+```
+
+Expected: `heal-a` and `corrupt-bundle` each list `after.html after.png before.html before.png manifest.json`; `heal-b` lists `after.html after.png manifest.json`.
+
+`web/e2e/fixtures/seed.sql`:
+
+```sql
+-- Deterministic rows for every designed state (web UI spec section 6). Loaded by global-setup.ts
+-- after `alembic upgrade head`, as:  psql -v today=YYYY-MM-DD -v held=<abs path to quarantine dir>
+-- Every date is relative to :today so the default 30-day window always contains the fixtures.
+-- Columns follow plan Task 3's frozen schema. Assumed there: scope_records.origins and
+-- scope_records.rate_limit are JSONB. Quality findings are rows in the findings table (API spec 4.4).
+\set ON_ERROR_STOP on
+SET TIME ZONE 'UTC';
+BEGIN;
+
+CREATE TEMP TABLE fx_runs (
+  name text PRIMARY KEY, target text NOT NULL, days_ago int NOT NULL,
+  state text NOT NULL, rows_written int, error text
+);
+INSERT INTO fx_runs VALUES
+  ('completed',   'testbench', 1, 'completed',   12,   NULL),
+  ('healed',      'testbench', 2, 'healed',      20,   NULL),
+  ('quarantined', 'testbench', 3, 'quarantined', NULL, NULL),
+  -- day 4: no run and no heartbeat -- the missed day
+  ('promoted',    'testbench', 5, 'healed',      20,   NULL),
+  ('discarded',   'testbench', 6, 'quarantined', NULL, NULL),
+  ('failed',      'testbench', 7, 'failed',      NULL, 'browser: navigation to /results timed out after 30 s'),
+  ('refused',     'testbench', 8, 'refused',     NULL, 'scope: the record hash changed after it was loaded'),
+  ('corrupted',   'testbench', 9, 'healed',      20,   NULL),
+  ('c10', 'testbench', 10, 'completed', 20, NULL),
+  ('c11', 'testbench', 11, 'completed', 20, NULL),
+  ('c12', 'testbench', 12, 'completed', 20, NULL),
+  ('c13', 'testbench', 13, 'completed', 20, NULL),
+  ('c14', 'testbench', 14, 'completed', 20, NULL),
+  ('exp1', 'bench-expiring', 1, 'completed', 12, NULL),
+  ('exp2', 'bench-expiring', 2, 'completed', 12, NULL),
+  ('exp3', 'bench-expiring', 3, 'completed', 12, NULL);
+
+CREATE TEMP VIEW fx AS
+  SELECT r.*, (:'today'::date - r.days_ago) AS day,
+         r.target || ':1:' || to_char(:'today'::date - r.days_ago, 'YYYY-MM-DD') AS run_key
+  FROM fx_runs r;
+
+-- Scope records: one active, one expiring in 12 days, one expired 30 days ago.
+-- ghost-portal has a spec and no record: the API reports it unscoped.
+INSERT INTO scope_records (target, basis, authorising_party, authorised_on, expires_on, evidence_uri,
+  evidence_sha256, origins, rate_limit, user_agent_contact, first_heal_policy, legal_review,
+  evidence_retention_days, record_sha256, loaded_at)
+SELECT v.target, v.basis, v.party, :'today'::date + v.auth_off, :'today'::date + v.exp_off, v.ev_uri,
+       v.ev_sha, v.origins::jsonb, v.rate::jsonb, 'https://example.invalid/selector-drift', v.policy,
+       v.legal, v.retention, v.sha, :'today'::date + time '00:05'
+FROM (VALUES
+  ('testbench', 'self-owned', 'Selector Drift maintainer', -60, 305, NULL::text, NULL::text,
+   '["http://127.0.0.1:8100"]', '{"requests": 1, "per_seconds": 30}', 'auto_promote', 'self_drafted',
+   NULL::int, repeat('a1', 32)),
+  ('bench-expiring', 'self-owned', 'Selector Drift maintainer', -353, 12, NULL, NULL,
+   '["http://127.0.0.1:8101"]', '{"requests": 1, "per_seconds": 60}', 'required', 'self_drafted',
+   NULL, repeat('b2', 32)),
+  ('bench-expired', 'client-authorised', 'Example Insurance Ltd (fixture)', -395, -30,
+   'authorisations/bench-expired.pdf', repeat('c3', 32), '["http://127.0.0.1:8102"]',
+   '{"requests": 1, "per_seconds": 30}', 'required', 'counsel_reviewed', 90, repeat('d4', 32))
+) AS v(target, basis, party, auth_off, exp_off, ev_uri, ev_sha, origins, rate, policy, legal, retention, sha);
+
+INSERT INTO runs (run_key, target, spec_version, "window", first_started_at, last_finished_at, state, rows_written, error)
+SELECT run_key, target, 1, day, day + time '04:12',
+       day + CASE name WHEN 'failed' THEN time '04:43' ELSE time '04:13' END,
+       state, rows_written, error
+FROM fx;
+
+INSERT INTO run_attempts (run_key, attempt, started_at, finished_at, state, error, scope_record_sha256)
+SELECT run_key, 1, day + time '04:12', day + time '04:13',
+       CASE name WHEN 'promoted' THEN 'quarantined' ELSE state END, error,
+       CASE target WHEN 'testbench' THEN repeat('a1', 32) ELSE repeat('b2', 32) END
+FROM fx;
+INSERT INTO run_attempts (run_key, attempt, started_at, finished_at, state, error, scope_record_sha256)
+SELECT run_key, 2, day + time '04:42', day + time '04:43', 'failed', error, repeat('a1', 32)
+FROM fx WHERE name = 'failed';
+
+INSERT INTO heartbeats (target, scheduled_for, fired_at, run_key)
+SELECT target, day + time '04:12', day + time '04:12:01', run_key FROM fx;
+
+INSERT INTO resolutions (run_key, target, field, winning_rung, attempts, node_id, ms, at)
+SELECT run_key, target, 'claim_number', 1,
+       '[{"rung": 1, "family": "NONE", "outcome": "resolved", "ms": 4}]'::jsonb, 'n-claim', 4,
+       day + time '04:12:30'
+FROM fx WHERE state = 'completed';
+
+CREATE TEMP TABLE fx_heals (
+  name text PRIMARY KEY, winning int, confirmer_rung int, confirmer_family text, sel_before text,
+  sel_after text, anchor_before text, anchor_after text, trace text, verdicts text,
+  evidence_uri text, replayed_ok boolean, promoted_by text, ms int
+);
+INSERT INTO fx_heals VALUES
+  ('healed', 3, 4, 'STRUCTURAL',
+   'table#results tbody tr > td.claim', 'table#results tbody tr > td.c-claim-v2',
+   '{"accessible_name": null, "label_text": "Claim Number", "header_text": "Claim Number"}',
+   '{"accessible_name": null, "label_text": "Claim Number", "header_text": "Claim Number"}',
+   '[{"rung": 1, "family": "NONE", "outcome": "no_match", "ms": 3}, {"rung": 2, "family": "TEXT_SEMANTIC", "outcome": "no_match", "ms": 41}, {"rung": 3, "family": "TEXT_SEMANTIC", "outcome": "resolved", "ms": 57}, {"rung": 4, "family": "STRUCTURAL", "outcome": "resolved", "ms": 22}]',
+   '[{"check": "Format", "outcome": "PASS", "threshold": "^[A-Z]{2}\\d{8}$", "observed": "20 of 20 values match", "reason": "Every healed value has the claim-number shape."}, {"check": "CrossFamilyConfirmation", "outcome": "PASS", "threshold": "a resolver from another family agrees on the same node", "observed": "rung 4", "reason": "The structural rung resolved the same node independently."}, {"check": "RowKeyContinuity", "outcome": "PASS", "threshold": ">= 0.95 of row keys carried over", "observed": "1.00", "reason": "Every row key seen on the last accepted run is still present."}, {"check": "Distribution", "outcome": "PASS", "threshold": "PSI < 0.20 after a 14-run warm-up", "observed": "PSI 0.03", "reason": "The value distribution matches history."}]',
+   'bundles/heal-a', true, NULL, 123),
+  ('quarantined', 2, NULL, NULL,
+   'table#results tbody tr > td.claim', 'table#results tbody tr > td:nth-child(2)',
+   '{"accessible_name": null, "label_text": "Claim Number", "header_text": "Claim Number"}',
+   '{"accessible_name": "Amount", "label_text": null, "header_text": "Amount"}',
+   '[{"rung": 1, "family": "NONE", "outcome": "no_match", "ms": 3}, {"rung": 2, "family": "TEXT_SEMANTIC", "outcome": "resolved", "ms": 38}, {"rung": 3, "family": "TEXT_SEMANTIC", "outcome": "ambiguous", "ms": 61}, {"rung": 4, "family": "STRUCTURAL", "outcome": "anchor_mismatch", "ms": 19}]',
+   '[{"check": "Format", "outcome": "FAIL", "threshold": "^[A-Z]{2}\\d{8}$", "observed": "0 of 20 values match (for example 1,204.00)", "reason": "The healed selector returns currency amounts, not claim numbers."}, {"check": "CrossFamilyConfirmation", "outcome": "INSUFFICIENT", "threshold": "a resolver from another family agrees on the same node", "observed": "no cross-family confirmer resolved", "reason": "Rung 4 found a different node, so nothing independent agrees."}, {"check": "RowKeyContinuity", "outcome": "FAIL", "threshold": ">= 0.95 of row keys carried over", "observed": "0.00", "reason": "None of the last accepted claim numbers appear: the resolver locked onto the adjacent Amount column."}]',
+   'bundles/heal-b', NULL, NULL, 121),
+  ('promoted', 3, NULL, 'VALUE',
+   'table#results tbody tr > td.claim', 'table#results tbody tr > td.c-claim-v2',
+   '{"accessible_name": null, "label_text": "Claim Number", "header_text": "Claim Number"}',
+   '{"accessible_name": null, "label_text": "Claim Number", "header_text": "Claim Number"}',
+   '[{"rung": 1, "family": "NONE", "outcome": "no_match", "ms": 3}, {"rung": 2, "family": "TEXT_SEMANTIC", "outcome": "no_match", "ms": 40}, {"rung": 3, "family": "TEXT_SEMANTIC", "outcome": "resolved", "ms": 55}]',
+   '[{"check": "Format", "outcome": "PASS", "threshold": "^[A-Z]{2}\\d{8}$", "observed": "20 of 20 values match", "reason": "Every healed value has the claim-number shape."}, {"check": "CrossFamilyConfirmation", "outcome": "PASS", "threshold": "a resolver from another family agrees on the same node", "observed": "row-key continuity", "reason": "The value family confirmed the node through carried-over row keys."}, {"check": "RowKeyContinuity", "outcome": "PASS", "threshold": ">= 0.95 of row keys carried over", "observed": "1.00", "reason": "Every row key seen on the last accepted run is still present."}, {"check": "Distribution", "outcome": "FAIL", "threshold": "PSI < 0.20 after a 14-run warm-up", "observed": "PSI 0.31", "reason": "A month-end batch shifted the value mix on the first run after warm-up."}]',
+   'bundles/heal-a', false, 'operator-a', 98),
+  ('corrupted', 2, 4, 'STRUCTURAL',
+   'table#results tbody tr > td.claim', 'table#results tbody tr > td.c-claim-v2',
+   '{"accessible_name": null, "label_text": "Claim Number", "header_text": "Claim Number"}',
+   '{"accessible_name": "Claim Number", "label_text": "Claim Number", "header_text": "Claim Number"}',
+   '[{"rung": 1, "family": "NONE", "outcome": "no_match", "ms": 3}, {"rung": 2, "family": "TEXT_SEMANTIC", "outcome": "resolved", "ms": 36}, {"rung": 4, "family": "STRUCTURAL", "outcome": "resolved", "ms": 20}]',
+   '[{"check": "Format", "outcome": "PASS", "threshold": "^[A-Z]{2}\\d{8}$", "observed": "20 of 20 values match", "reason": "Every healed value has the claim-number shape."}, {"check": "CrossFamilyConfirmation", "outcome": "PASS", "threshold": "a resolver from another family agrees on the same node", "observed": "rung 4", "reason": "The structural rung resolved the same node independently."}, {"check": "RowKeyContinuity", "outcome": "PASS", "threshold": ">= 0.95 of row keys carried over", "observed": "1.00", "reason": "Every row key seen on the last accepted run is still present."}]',
+   'corrupt-bundle', true, NULL, 59);
+
+INSERT INTO resolutions (run_key, target, field, winning_rung, attempts, node_id, ms, at)
+SELECT f.run_key, f.target, 'claim_number', h.winning, h.trace::jsonb, 'n-claim', h.ms, f.day + time '04:12:40'
+FROM fx_heals h JOIN fx f USING (name);
+INSERT INTO resolutions (run_key, target, field, winning_rung, attempts, node_id, ms, at)
+SELECT run_key, target, 'claim_number', 3,
+       '[{"rung": 1, "family": "NONE", "outcome": "no_match", "ms": 3}, {"rung": 3, "family": "TEXT_SEMANTIC", "outcome": "resolved", "ms": 52}]'::jsonb,
+       'n-claim', 55, day + time '04:12:40'
+FROM fx WHERE name = 'discarded';
+
+INSERT INTO heal_events (run_key, resolution_id, target, field, broke_at, winning_rung, confirmer_rung,
+  confirmer_family, selector_before, selector_after, anchor_before, anchor_after, trace, verdicts,
+  evidence_uri, replayed_ok, promoted_by, promoted_at)
+SELECT f.run_key, r.id, f.target, 'claim_number', f.day + time '04:12', h.winning, h.confirmer_rung,
+       h.confirmer_family, h.sel_before, h.sel_after, h.anchor_before::jsonb, h.anchor_after::jsonb,
+       h.trace::jsonb, h.verdicts::jsonb, h.evidence_uri, h.replayed_ok, h.promoted_by,
+       CASE WHEN h.promoted_by IS NULL THEN NULL ELSE f.day + time '09:30' END
+FROM fx_heals h JOIN fx f USING (name)
+JOIN resolutions r ON r.run_key = f.run_key AND r.field = 'claim_number';
+
+INSERT INTO quarantine (run_key, reason, verdicts, data_uri, resolved_as, actor, resolved_at)
+SELECT f.run_key, q.reason, q.verdicts::jsonb, :'held' || '/' || q.file, q.resolved_as, q.actor,
+       CASE WHEN q.actor IS NULL THEN NULL ELSE f.day + time '09:30' END
+FROM fx f JOIN (VALUES
+  ('quarantined', 'Row-key continuity 0.00 is below 0.95 and 0 of 20 values match the claim-number format: the healed selector reads the adjacent Amount column.',
+   (SELECT verdicts FROM fx_heals WHERE name = 'quarantined'), 'held-quarantined.parquet', NULL::text, NULL::text),
+  ('promoted', 'Distribution shift PSI 0.31 is above 0.20 on the first run after warm-up.',
+   (SELECT verdicts FROM fx_heals WHERE name = 'promoted'), 'held-promoted.parquet', 'promoted', 'operator-a'),
+  ('discarded', 'Row-key continuity 0.40 is below 0.95.',
+   '[{"check": "Format", "outcome": "PASS", "threshold": "^[A-Z]{2}\\d{8}$", "observed": "20 of 20 values match", "reason": "Every value has the claim-number shape."}, {"check": "RowKeyContinuity", "outcome": "FAIL", "threshold": ">= 0.95 of row keys carried over", "observed": "0.40", "reason": "Most last-accepted claim numbers are missing from this run."}]',
+   'held-discarded.parquet', 'discarded', 'operator-a')
+) AS q(name, reason, verdicts, file, resolved_as, actor) ON q.name = f.name;
+
+INSERT INTO audit_log (at, actor, action, subject, detail)
+SELECT f.day + time '09:30', 'operator-a', d.action, f.run_key, jsonb_build_object('reason', d.reason)
+FROM fx f JOIN (VALUES
+  ('promoted', 'promote', 'Month-end batch; values checked against the portal export.'),
+  ('discarded', 'discard', 'Healed onto the Amount column; the spec needs a new description.')
+) AS d(name, action, reason) ON d.name = f.name;
+
+INSERT INTO findings (id, run_key, severity, rule, payload, at)
+SELECT q.id || '@' || f.run_key, f.run_key, q.severity, q.rule,
+  jsonb_build_object(
+    'id', q.id, 'severity', q.severity, 'title', q.title, 'taxonomy_refs', '[]'::jsonb,
+    'logical_location', 'testbench/claim_number', 'partial_fingerprints', '{}'::jsonb,
+    'properties', jsonb_build_object('rule', q.rule, 'observed', q.observed, 'threshold', q.threshold, 'threshold_reason', q.why),
+    'claim', jsonb_build_object(
+      'value', q.value, 'method', 'DERIVED', 'derivation', NULL, 'confidence', NULL, 'calibration', NULL, 'caveat', NULL,
+      'observed_at', to_char(f.day + time '04:14', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+      'source', jsonb_build_object('kind', 'dom', 'snapshot_id', repeat('e5', 32), 'selector', 'table#results tbody tr', 'rung', 1),
+      'parents', jsonb_build_array(jsonb_build_object(
+        'value', 'AB10000001', 'method', 'DETERMINISTIC', 'derivation', NULL, 'confidence', NULL, 'calibration', NULL, 'caveat', NULL,
+        'observed_at', to_char(f.day + time '04:13', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+        'source', jsonb_build_object('kind', 'dom', 'snapshot_id', repeat('e5', 32), 'selector', 'table#results tbody tr:nth-child(1) td.claim', 'rung', 1),
+        'parents', '[]'::jsonb)))),
+  f.day + time '04:14'
+FROM fx f, (VALUES
+  ('qf-row-count', 'HIGH', 'Row count below expectation', 'row_count', '12 rows', '>= 18 rows (0.9 x the trailing 14-run median of 20)',
+   'Lost rows usually mean pagination changed; 10 percent slack absorbs normal daily churn.', '12'),
+  ('qf-null-rate', 'MEDIUM', 'Null rate rose on status', 'null_rate', '8.3 percent null', '<= 2 percent null',
+   'Status is mandatory in the portal; the historical rate is 0.4 percent, so 2 percent leaves room for noise.', '0.083'),
+  ('qf-schema', 'LOW', 'Unexpected column in the extraction', 'schema_drift', 'new column: reserve', 'no columns outside expected_schema',
+   'expected_schema is the contract; an extra column is reported, not blocking, until a spec says otherwise.', 'reserve')
+) AS q(id, severity, title, rule, observed, threshold, why, value)
+WHERE f.name = 'completed';
+
+COMMIT;
+```
+
+`web/e2e/fixtures/ids.ts`:
+
+```ts
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+export interface FixtureIds {
+  today: string;
+  missedDay: string;
+  targets: {
+    active: string; expiring: string; expired: string; unscoped: string;
+    expiringOn: string; expiredOn: string; expiringRuns: number;
+  };
+  runs: {
+    completed: string; healed: string; quarantined: string; promoted: string;
+    discarded: string; failed: string; refused: string; corrupted: string;
+  };
+  heals: { accepted: number; firstHeal: number; nonReproducible: number; corrupted: number };
+}
+
+let cached: FixtureIds | null = null;
+
+/** Ids global-setup.ts read back from the seeded database. Never hardcode an id: heal ids are
+ *  sequence values, and the first revision's /heals/non-reproducible could only ever 422. */
+export function ids(): FixtureIds {
+  if (cached === null) {
+    cached = JSON.parse(readFileSync(path.join(__dirname, "fixture-ids.json"), "utf8")) as FixtureIds;
+  }
+  return cached;
+}
+
+/** The seven screens the axe, 375px and invariant suites walk; /login is tested separately.
+ *  Names, not paths: test titles are built when files are collected, and the ids behind two of
+ *  these paths are only known once global setup has seeded the database. */
+export const SCREENS = ["targets", "runs", "run-detail", "heal", "quarantine", "quality", "spec"] as const;
+export type Screen = (typeof SCREENS)[number];
+
+export function screenPath(screen: Screen): string {
+  const i = ids();
+  switch (screen) {
+    case "targets": return "/targets";
+    case "runs": return "/runs";
+    case "run-detail": return `/runs/${encodeURIComponent(i.runs.failed)}`;
+    case "heal": return `/heals/${i.heals.accepted}`;
+    case "quarantine": return "/quarantine";
+    case "quality": return "/quality";
+    case "spec": return `/specs/${i.targets.active}`;
+  }
+}
+```
+
+`web/e2e/global-setup.ts`:
+
+```ts
+import type { FullConfig } from "@playwright/test";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { addDays, utcToday } from "../lib/format";
+import type { FixtureIds } from "./fixtures/ids";
+
+const WEB = path.resolve(__dirname, "..");
+const REPO = path.resolve(WEB, "..");
+const FIXTURES = path.join(__dirname, "fixtures");
+const GENERATED = path.join(FIXTURES, ".generated");
+const COMPOSE = path.join(__dirname, "compose.e2e.yml");
+const AUTH_DIR = path.join(__dirname, ".auth");
+const API = "http://127.0.0.1:8000";
+const WEB_ORIGIN = "http://localhost:3000";
+const DATABASE_URL = "postgresql+psycopg://sd@127.0.0.1:55432/sd_e2e";
+
+const apiEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  SD_ENV: "test",
+  SD_FIXTURE_MODE: "1", // evidence root -> web/e2e/fixtures; never disables auth
+  SD_DATABASE_URL: DATABASE_URL,
+  SD_WEB_ORIGIN: WEB_ORIGIN,
+  SD_SPEC_DIR: path.join(GENERATED, "specs"),
+  SD_LAKE_ROOT: path.join(GENERATED, "lake"),
+};
+
+function run(cmd: string, args: string[], opts: { input?: string; env?: NodeJS.ProcessEnv } = {}): string {
+  return execFileSync(cmd, args, {
+    cwd: REPO, env: opts.env ?? process.env, input: opts.input, encoding: "utf8",
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+}
+
+function psql(args: string[], input?: string): string {
+  return run("docker", ["compose", "-f", COMPOSE, "exec", "-T", "postgres",
+    "psql", "-U", "sd", "-d", "sd_e2e", "-v", "ON_ERROR_STOP=1", ...args], { input });
+}
+
+async function waitForApi(ms: number): Promise<void> {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    try {
+      if ((await fetch(`${API}/api/v1/auth/me`)).status === 401) return;
+    } catch {
+      // not listening yet
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`the API did not answer on ${API} within ${ms} ms`);
+}
+
+async function login(username: string, password: string): Promise<string> {
+  const res = await fetch(`${API}/api/v1/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: WEB_ORIGIN },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) throw new Error(`fixture login failed: ${res.status} ${await res.text()}`);
+  const cookie = res.headers.getSetCookie().find((c) => c.startsWith("sd_session="));
+  if (cookie === undefined) throw new Error("login set no sd_session cookie");
+  return cookie.slice("sd_session=".length).split(";")[0] ?? "";
+}
+
+function stop(api: ChildProcess): void {
+  if (api.pid === undefined) return;
+  if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(api.pid), "/T", "/F"]);
+  else process.kill(-api.pid, "SIGTERM");
+}
+
+function fixtureIds(today: string, heal: Record<string, number>): FixtureIds {
+  const key = (target: string, daysAgo: number) => `${target}:1:${addDays(today, -daysAgo)}`;
+  const runs = {
+    completed: key("testbench", 1), healed: key("testbench", 2), quarantined: key("testbench", 3),
+    promoted: key("testbench", 5), discarded: key("testbench", 6), failed: key("testbench", 7),
+    refused: key("testbench", 8), corrupted: key("testbench", 9),
+  };
+  const need = (runKey: string): number => {
+    const id = heal[runKey];
+    if (id === undefined) throw new Error(`seed.sql wrote no heal for ${runKey}`);
+    return id;
+  };
+  return {
+    today,
+    missedDay: addDays(today, -4),
+    targets: {
+      active: "testbench", expiring: "bench-expiring", expired: "bench-expired", unscoped: "ghost-portal",
+      expiringOn: addDays(today, 12), expiredOn: addDays(today, -30), expiringRuns: 3,
+    },
+    runs,
+    heals: {
+      accepted: need(runs.healed), firstHeal: need(runs.quarantined),
+      nonReproducible: need(runs.promoted), corrupted: need(runs.corrupted),
+    },
+  };
+}
+
+export default async function globalSetup(_config: FullConfig): Promise<() => Promise<void>> {
+  if (process.env.SD_ENV === "production") throw new Error("E2E fixtures refuse to run with SD_ENV=production");
+  for (const f of ["bundles/heal-a/manifest.json", "bundles/heal-b/manifest.json", "corrupt-bundle/manifest.json"]) {
+    if (!existsSync(path.join(FIXTURES, f))) {
+      throw new Error(`missing ${f}: run  uv run python web/e2e/fixtures/make_fixtures.py bundles`);
+    }
+  }
+
+  // Fixture mode must refuse production before anything else is trusted with it (spec section 6).
+  const guard = spawnSync("uv", ["run", "python", "-c", "from selector_drift.api.main import create_app; create_app()"], {
+    cwd: REPO, env: { ...apiEnv, SD_ENV: "production" }, encoding: "utf8",
+  });
+  // It must fail for THAT reason, not because Postgres is not up yet.
+  if (guard.status === 0 || !`${guard.stderr}`.includes("SD_FIXTURE_MODE")) {
+    throw new Error(`create_app() must refuse SD_FIXTURE_MODE=1 under SD_ENV=production, naming SD_FIXTURE_MODE; got exit ${guard.status}`);
+  }
+
+  run("docker", ["compose", "-f", COMPOSE, "down", "-v"]);
+  run("docker", ["compose", "-f", COMPOSE, "up", "-d", "--wait"]);
+  run("uv", ["run", "alembic", "upgrade", "head"], { env: apiEnv });
+
+  const today = utcToday();
+  rmSync(GENERATED, { recursive: true, force: true });
+  run("uv", ["run", "python", path.join(FIXTURES, "make_fixtures.py"), "runtime", "--out", GENERATED, "--today", today]);
+  psql(["-v", `today=${today}`, "-v", `held=${path.join(GENERATED, "quarantine")}`, "-f", "-"],
+    readFileSync(path.join(FIXTURES, "seed.sql"), "utf8"));
+
+  // A random password per run; never an argument, never committed. getpass reads stdin without a TTY.
+  const password = randomBytes(18).toString("base64url");
+  run("uv", ["run", "python", "-m", "selector_drift", "create-operator", "e2e"], {
+    input: `${password}\n${password}\n`, env: apiEnv,
+  });
+
+  const api = spawn("uv", ["run", "uvicorn", "--factory", "selector_drift.api.main:create_app",
+    "--host", "127.0.0.1", "--port", "8000"], {
+    cwd: REPO, env: apiEnv, stdio: ["ignore", "inherit", "inherit"], detached: process.platform !== "win32",
+  });
+  await waitForApi(60_000);
+
+  const token = await login("e2e", password);
+  mkdirSync(AUTH_DIR, { recursive: true });
+  writeFileSync(path.join(AUTH_DIR, "storageState.json"), JSON.stringify({
+    cookies: [{ name: "sd_session", value: token, domain: "localhost", path: "/", expires: -1,
+      httpOnly: true, secure: true, sameSite: "Strict" }],
+    origins: [],
+  }, null, 2));
+  process.env.SD_E2E_USERNAME = "e2e";
+  process.env.SD_E2E_PASSWORD = password;
+
+  const healIds = JSON.parse(
+    psql(["-At", "-c", "SELECT coalesce(json_object_agg(run_key, id), '{}') FROM heal_events"]).trim(),
+  ) as Record<string, number>;
+  writeFileSync(path.join(FIXTURES, "fixture-ids.json"), JSON.stringify(fixtureIds(today, healIds), null, 2));
+
+  return async () => {
+    stop(api);
+    run("docker", ["compose", "-f", COMPOSE, "down", "-v"]);
+  };
+}
+```
+
+Run: `cd web && npx playwright test e2e/harness.spec.ts`
+Expected: PASS, 3 tests. `web/e2e/fixtures/fixture-ids.json` exists and names four heal ids.
+
+```bash
+git add web/e2e/compose.e2e.yml web/e2e/global-setup.ts web/e2e/fixtures/seed.sql \
+        web/e2e/fixtures/make_fixtures.py web/e2e/fixtures/ids.ts web/e2e/fixtures/bundles \
+        web/e2e/fixtures/corrupt-bundle web/e2e/harness.spec.ts
+git commit -m "test(web): E2E fixture harness -- seeded API, per-run operator, fixture ids"
+```
+
+- [ ] **Step 6: Write the failing authentication tests**
+
+```ts
+// web/e2e/auth.spec.ts
+import { expect, test, type Page } from "@playwright/test";
+
+test.use({ storageState: { cookies: [], origins: [] } });
+
+async function signIn(page: Page): Promise<void> {
+  await page.getByLabel("Username").fill(process.env.SD_E2E_USERNAME ?? "e2e");
+  await page.getByLabel("Password").fill(process.env.SD_E2E_PASSWORD ?? "");
+  await page.getByRole("button", { name: "Sign in" }).click();
+}
+
+test("an unauthenticated visit redirects to login and returns after", async ({ page }) => {
+  await page.goto("/targets?view=all");
+  await expect(page).toHaveURL(/\/login\?next=%2Ftargets%3Fview%3Dall$/);
+  await signIn(page);
+  await expect(page).toHaveURL(/\/targets\?view=all$/);
+});
+
+test("a login next= pointing off-origin redirects to /runs", async ({ page, context }) => {
+  for (const next of ["https://evil.example/", "//evil.example/", "/\\evil.example"]) {
+    await context.clearCookies();
+    await page.goto(`/login?next=${encodeURIComponent(next)}`);
+    await signIn(page);
+    await expect(page).toHaveURL(/\/runs$/);
+  }
+});
+
+test("a wrong password is refused in words", async ({ page }) => {
+  await page.goto("/login");
+  await page.getByLabel("Username").fill("nobody-e2e");
+  await page.getByLabel("Password").fill("not-the-password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("alert")).toHaveText("Username or password is incorrect");
+});
+```
+
+Run: `cd web && npx playwright test e2e/auth.spec.ts`
+Expected: FAIL — the first test stays on `/targets` (no middleware), the others find no "Username" field.
+
+- [ ] **Step 7: Write `problem.ts`, `types.ts`, `api.ts`, the middleware and the login page**
+
+```ts
+// web/lib/problem.ts -- client-safe
+import type { Verdict } from "./types";
+
+/** RFC 9457 problem+json, as the API sends it (API contract section 5). */
+export interface Problem {
+  type: string;
+  title: string;
+  status: number;
+  detail?: string;
+  failing?: Verdict[];
+}
+
+export function isProblem(x: unknown): x is Problem {
+  if (typeof x !== "object" || x === null) return false;
+  const p = x as Record<string, unknown>;
+  return typeof p.type === "string" && typeof p.title === "string" && typeof p.status === "number";
+}
+
+export function problemFrom(body: unknown, status: number): Problem {
+  return isProblem(body) ? body : { type: "about:blank", title: `The API returned ${status}`, status };
+}
+
+export async function readProblem(res: Response): Promise<Problem> {
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  return problemFrom(body, res.status);
+}
+```
+
+```ts
+// web/lib/types.ts -- names for the generated schemas; no hand-written response type exists
+import type { components } from "./api.d";
+
+type S = components["schemas"];
+
+export type TargetView = S["TargetView"];
+export type RunView = S["RunView"];
+export type RunDetailView = S["RunDetailView"];
+export type AttemptView = S["AttemptView"];
+export type ResolutionView = S["ResolutionView"];
+export type RungAttemptView = S["RungAttemptView"];
+export type HealView = S["HealView"];
+export type EvidenceSideView = S["EvidenceSideView"];
+export type ExtractedValueView = S["ExtractedValueView"];
+export type DecisionView = S["DecisionView"];
+export type QuarantineView = S["QuarantineView"];
+export type FindingView = S["FindingView"];
+export type SpecView = S["SpecView"];
+export type StatsView = S["StatsView"];
+export type Verdict = S["Verdict"];
+export type DiffSpanView = S["DiffSpan"];
+export type ApiRailPayload = S["RailPayload"];
+export type ApiRailNode = S["RailNode"];
+export type RunStateName = RunView["state"];
+```
+
+```ts
+// web/lib/api.ts
+import "server-only";
+import createClient, { type Client } from "openapi-fetch";
+import { cookies, headers } from "next/headers";
+import { redirect } from "next/navigation";
+import type { paths } from "./api.d";
+import { problemFrom, type Problem } from "./problem";
+
+export const API_ORIGIN = process.env.SD_API_URL ?? "http://api:8000";
+
+export type ApiClient = Client<paths>;
+export type Loaded<T> = { ok: true; data: T } | { ok: false; problem: Problem };
+
+interface Outcome<T> {
+  data?: T;
+  error?: unknown;
+  response: Response;
+}
+
+/** A typed client that forwards the caller's sd_session cookie to the API. */
+export async function apiClient(): Promise<ApiClient> {
+  const session = (await cookies()).get("sd_session")?.value;
+  return createClient<paths>({
+    baseUrl: API_ORIGIN,
+    cache: "no-store",
+    headers: session !== undefined ? { cookie: `sd_session=${session}` } : {},
+  });
+}
+
+export async function loginHref(): Promise<string> {
+  const here = (await headers()).get("x-sd-path") ?? "/runs";
+  return `/login?next=${encodeURIComponent(here)}`;
+}
+
+/** Runs one API call. A 401 redirects to login (the cookie's validity is the API's to judge,
+ *  not the middleware's); any other failure comes back as a Problem for the page to render. */
+export async function load<T>(call: (client: ApiClient) => Promise<Outcome<T>>): Promise<Loaded<T>> {
+  const client = await apiClient();
+  let out: Outcome<T>;
+  try {
+    out = await call(client);
+  } catch (err) {
+    return {
+      ok: false,
+      problem: { type: "about:blank", title: "The API could not be reached", status: 503, detail: err instanceof Error ? err.message : String(err) },
+    };
+  }
+  if (out.response.status === 401) redirect(await loginHref());
+  if (out.response.ok && out.data !== undefined) return { ok: true, data: out.data };
+  return { ok: false, problem: problemFrom(out.error, out.response.status) };
+}
+```
+
+```ts
+// web/middleware.ts
+import { NextResponse, type NextRequest } from "next/server";
+
+const PUBLIC = new Set(["/login"]);
+
+export function middleware(req: NextRequest): NextResponse {
+  const { pathname, search } = req.nextUrl;
+  const forwarded = new Headers(req.headers);
+  forwarded.set("x-sd-path", `${pathname}${search}`); // where a 401 in a server fetch returns to
+  if (PUBLIC.has(pathname)) return NextResponse.next({ request: { headers: forwarded } });
+  if (!req.cookies.has("sd_session")) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/login";
+    url.search = `?next=${encodeURIComponent(`${pathname}${search}`)}`;
+    return NextResponse.redirect(url);
+  }
+  return NextResponse.next({ request: { headers: forwarded } });
+}
+
+// /api/v1 is proxied to the API untouched: the API answers 401 itself.
+export const config = { matcher: ["/((?!api/|_next/|favicon.ico).*)"] };
+```
+
+```tsx
+// web/components/LoginForm.tsx
+"use client";
+
+import { useState, type FormEvent } from "react";
+import { readProblem } from "@/lib/problem";
+
+export async function loginError(res: Response): Promise<string> {
+  if (res.status === 401) return "Username or password is incorrect";
+  if (res.status === 429) {
+    const seconds = Number(res.headers.get("Retry-After"));
+    const minutes = Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds / 60) : 15;
+    return `Too many attempts — try again in ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  }
+  return `Sign-in failed: ${(await readProblem(res)).title}`;
+}
+
+export function LoginForm({ next }: { next: string }) {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const form = new FormData(e.currentTarget);
+    const body = { username: String(form.get("username") ?? ""), password: String(form.get("password") ?? "") };
+    setBusy(true);
+    setError(null);
+    let res: Response;
+    try {
+      res = await fetch("/api/v1/auth/login", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      setBusy(false);
+      setError("The sign-in service could not be reached.");
+      return;
+    }
+    if (res.ok) {
+      window.location.assign(next); // a full navigation, so the middleware sees the new cookie
+      return;
+    }
+    setBusy(false);
+    setError(await loginError(res));
+  }
+
+  return (
+    <form className="sd-login-form" onSubmit={submit} noValidate>
+      <label htmlFor="username">Username</label>
+      <input id="username" name="username" autoComplete="username" required />
+      <label htmlFor="password">Password</label>
+      <input id="password" name="password" type="password" autoComplete="current-password" required />
+      {error !== null && <p role="alert" className="sd-form-error">{error}</p>}
+      <button type="submit" disabled={busy}>Sign in</button>
+    </form>
+  );
+}
+```
+
+```tsx
+// web/app/login/page.tsx
+import type { Metadata } from "next";
+import { LoginForm } from "@/components/LoginForm";
+import { safeNext } from "@/lib/safe-next";
+
+export const metadata: Metadata = { title: "Sign in" };
+
+export default async function LoginPage({ searchParams }: { searchParams: Promise<{ next?: string | string[] }> }) {
+  const raw = (await searchParams).next;
+  const next = safeNext(Array.isArray(raw) ? raw[0] : raw);
+  return (
+    <main className="sd-login" id="main">
+      <p className="sd-brand"><span aria-hidden="true">◇</span> Selector Drift</p>
+      <h1>Sign in</h1>
+      <LoginForm next={next} />
+    </main>
+  );
+}
+```
+
+There is no "remember me": the session's absolute lifetime is 12 hours (API contract §3).
+
+Run: `cd web && npx playwright test e2e/auth.spec.ts`
+Expected: PASS, 3 tests.
+
+```bash
+git add web/lib/problem.ts web/lib/types.ts web/lib/api.ts web/middleware.ts \
+        web/components/LoginForm.tsx web/app/login web/e2e/auth.spec.ts
+git commit -m "feat(web): session auth -- middleware redirect, same-origin next, login in words"
+```
+
+- [ ] **Step 8: Write the failing shell and Targets tests**
+
+```ts
 // web/e2e/targets.spec.ts
-test('a target without a scope record renders locked with the reason', async ({ page }) => {
-  await page.goto('/targets');
-  const locked = page.getByTestId('target-unscoped');
-  await expect(locked).toHaveAttribute('aria-disabled', 'true');
-  await expect(locked).toContainText('No authorisation record');
+import { expect, test, type Page } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+const card = (page: Page, target: string) =>
+  page.locator('[data-testid="scope-card"]').filter({ has: page.getByRole("heading", { name: target, exact: true }) });
+
+test("a target without a scope record renders locked with the reason", async ({ page }) => {
+  await page.goto("/targets");
+  const locked = card(page, ids().targets.unscoped);
+  await expect(locked).toHaveAttribute("aria-disabled", "true");
+  await expect(locked).toHaveAttribute("data-status", "unscoped");
+  await expect(locked.getByTestId("locked-reason")).toContainText("No authorisation record");
 });
 
-test('every scoped target surfaces its basis, party, expiry and rate limit', async ({ page }) => {
-  await page.goto('/targets');
-  const card = page.getByTestId('scope-card').first();
-  for (const field of ['basis', 'authorising-party', 'expires-on', 'rate-limit']) {
-    await expect(card.getByTestId(field)).not.toBeEmpty();
+test("every active target surfaces its basis, party, expiry and rate limit", async ({ page }) => {
+  await page.goto("/targets");
+  const active = page.locator('[data-testid="scope-card"][data-status="active"]');
+  expect(await active.count()).toBeGreaterThanOrEqual(2);
+  for (const c of await active.all()) {
+    for (const field of ["basis", "authorising-party", "expires-on", "rate-limit"]) {
+      await expect(c.getByTestId(field)).not.toBeEmpty();
+    }
+    await expect(c.getByTestId("rate-limit")).toHaveText(/^\d+ requests? \/ \d+ s$/);
+    await expect(c.getByTestId("sensitivity")).toContainText("derived from basis — not editable");
   }
+});
+
+test("an expired target renders locked with its expiry date", async ({ page }) => {
+  await page.goto("/targets");
+  const expired = card(page, ids().targets.expired);
+  await expect(expired).toHaveAttribute("aria-disabled", "true");
+  await expect(expired.getByTestId("locked-reason")).toHaveText(`Authorisation expired on ${ids().targets.expiredOn}`);
+});
+
+test("an expiry within 30 days raises a medium notice on the card", async ({ page }) => {
+  await page.goto("/targets");
+  const notice = card(page, ids().targets.expiring).getByTestId("expiry-notice");
+  await expect(notice).toContainText(`Authorisation expires in 12 days, on ${ids().targets.expiringOn}.`);
+  await expect(notice.locator('[data-severity="MEDIUM"]')).toHaveText("■ Medium");
+});
+
+test("a locked card links to run history only", async ({ page }) => {
+  await page.goto("/targets");
+  for (const name of [ids().targets.expired, ids().targets.unscoped]) {
+    const links = card(page, name).getByRole("link");
+    await expect(links).toHaveCount(1);
+    await expect(links).toHaveText("Run history");
+  }
+});
+
+test("cards are ordered active, then expired, then unscoped", async ({ page }) => {
+  await page.goto("/targets");
+  const order = await page.locator('[data-testid="scope-card"]').evaluateAll((els) => els.map((e) => e.getAttribute("data-status")));
+  const rank = { active: 0, expired: 1, unscoped: 2 } as const;
+  const ranks = order.map((s) => rank[s as keyof typeof rank]);
+  expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
+});
+
+test("a stale session cookie sends the operator to login", async ({ browser }) => {
+  const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+  await ctx.addCookies([{ name: "sd_session", value: "stale", domain: "localhost", path: "/", httpOnly: true, secure: true, sameSite: "Strict" }]);
+  const page = await ctx.newPage();
+  await page.goto("/targets");
+  await expect(page).toHaveURL(/\/login\?next=%2Ftargets$/);
+  await ctx.close();
 });
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
-
 Run: `cd web && npx playwright test e2e/targets.spec.ts`
-Expected: FAIL.
+Expected: FAIL — `/targets` is a 404, so no `scope-card` exists.
 
-- [ ] **Step 3: Build the shell and the screen.** Compliance posture is visible, not buried — it is a selling point.
+- [ ] **Step 9: Build the shell, the designed-state plumbing and the Targets screen**
 
-- [ ] **Step 4: Run them and make sure they pass**
+```tsx
+// web/components/ProblemState.tsx
+"use client";
 
-Run: `cd web && npx playwright test e2e/targets.spec.ts`
-Expected: PASS, 2 tests.
+import { ErrorState } from "bok-ui";
+import { useRouter } from "next/navigation";
+import type { Problem } from "@/lib/problem";
 
-- [ ] **Step 5: Commit**
+/** The error state for an API failure: the problem's own title and detail, and a retry that
+ *  re-runs the server fetch. Client-side because `retry` is a function (slice spec, RSC note). */
+export function ProblemState({ problem }: { problem: Problem }) {
+  const router = useRouter();
+  return <ErrorState title={problem.title} detail={problem.detail} retry={() => router.refresh()} />;
+}
+```
+
+```tsx
+// web/components/RouteError.tsx
+"use client";
+
+import { ErrorState } from "bok-ui";
+
+/** For throws nobody anticipated. In production Next replaces the message; the digest links the
+ *  screen to the server log line. */
+export function RouteError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
+  const detail = error.digest !== undefined ? `Reference ${error.digest} in the server log.` : error.message;
+  return <ErrorState title="This screen failed to render." detail={detail} retry={reset} />;
+}
+```
+
+```tsx
+// web/components/NavLinks.tsx
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+
+const LINKS = [
+  ["/targets", "Targets"],
+  ["/runs", "Runs"],
+  ["/quarantine", "Quarantine"],
+  ["/quality", "Data quality"],
+  ["/specs", "Specs"],
+] as const;
+
+export function NavLinks() {
+  const pathname = usePathname();
+  return (
+    <ul>
+      {LINKS.map(([href, label]) => (
+        <li key={href}>
+          <Link href={href} aria-current={pathname === href || pathname.startsWith(`${href}/`) ? "page" : undefined}>
+            {label}
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+```tsx
+// web/components/SignOutButton.tsx
+"use client";
+
+export function SignOutButton() {
+  return (
+    <button
+      type="button"
+      className="sd-quiet"
+      onClick={async () => {
+        await fetch("/api/v1/auth/logout", { method: "POST", credentials: "same-origin" });
+        window.location.assign("/login");
+      }}
+    >
+      Sign out
+    </button>
+  );
+}
+```
+
+```tsx
+// web/components/Nav.tsx
+import type { ReactNode } from "react";
+import { NavLinks } from "./NavLinks";
+import { SignOutButton } from "./SignOutButton";
+
+export function Nav({ tools }: { tools?: ReactNode }) {
+  return (
+    <header className="sd-top" data-bok-chrome>
+      <a className="sd-skip" href="#main">Skip to content</a>
+      <p className="sd-brand"><span aria-hidden="true">◇</span> Selector Drift</p>
+      <nav aria-label="Primary" data-testid="nav"><NavLinks /></nav>
+      <div className="sd-tools">{tools}<SignOutButton /></div>
+    </header>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/layout.tsx
+import type { ReactNode } from "react";
+import { Nav } from "@/components/Nav";
+
+export default function AppLayout({ children }: { children: ReactNode }) {
+  return (
+    <div className="sd-shell">
+      <Nav />
+      <main id="main" className="sd-main" tabIndex={-1}>{children}</main>
+    </div>
+  );
+}
+```
+
+```tsx
+// web/components/CopyButton.tsx
+"use client";
+
+import { useState } from "react";
+
+export function CopyButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        className="sd-quiet"
+        data-bok-chrome
+        onClick={async () => {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        }}
+      >
+        {label}
+      </button>
+      <span className="bok-visually-hidden" aria-live="polite">{copied ? "Copied" : ""}</span>
+    </>
+  );
+}
+```
+
+```tsx
+// web/components/ScopeCard.tsx
+import { SeverityBadge } from "bok-ui";
+import Link from "next/link";
+import type { ReactNode } from "react";
+import { daysBetween, rateLimit, shortSha } from "@/lib/format";
+import type { TargetView } from "@/lib/types";
+import { CopyButton } from "./CopyButton";
+import styles from "./ScopeCard.module.css";
+
+const STATUS = {
+  active: { glyph: "●", label: "Authorised" },
+  expired: { glyph: "⊘", label: "Expired" },
+  unscoped: { glyph: "⊘", label: "No scope record" },
+} as const;
+
+const POLICY = {
+  required: "a named human confirms every first heal",
+  auto_promote: "first heals promote automatically (synthetic target only)",
+} as const;
+
+function Field({ id, term, children }: { id: string; term: string; children: ReactNode }) {
+  return (
+    <div className={styles.field}>
+      <dt>{term}</dt>
+      <dd data-testid={id}>{children}</dd>
+    </div>
+  );
+}
+
+function LockGlyph() {
+  return (
+    <svg className={styles.lock} viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+      <path d="M4 7V5a4 4 0 1 1 8 0v2h1v8H3V7h1Zm2 0h4V5a2 2 0 1 0-4 0v2Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+/** Compliance posture is visible, not buried: it is a selling point (plan Task 35, design 10). */
+export function ScopeCard({ target: t, today }: { target: TargetView; today: string }) {
+  const locked = t.status !== "active";
+  const headingId = `scope-${t.target}`;
+  const remaining = t.expires_on !== null ? daysBetween(today, t.expires_on) : null;
+  const status = STATUS[t.status];
+  return (
+    <div
+      role="group"
+      aria-labelledby={headingId}
+      aria-disabled={locked ? "true" : undefined}
+      className={styles.card}
+      data-testid="scope-card"
+      data-status={t.status}
+    >
+      <header className={styles.head}>
+        <h2 id={headingId} className={styles.name}>{t.target}</h2>
+        <p className={styles.status} data-status={t.status}><span aria-hidden="true">{status.glyph}</span> {status.label}</p>
+      </header>
+      {locked && (
+        <p className={styles.locked}><LockGlyph /> <span data-testid="locked-reason">{t.locked_reason ?? "Locked"}</span></p>
+      )}
+      {!locked && remaining !== null && remaining <= 30 && (
+        <p className={styles.notice} data-testid="expiry-notice">
+          <SeverityBadge severity="MEDIUM" /> Authorisation expires in {remaining} {remaining === 1 ? "day" : "days"}, on {t.expires_on}.
+        </p>
+      )}
+      {t.status !== "unscoped" && (
+        <dl className={styles.fields}>
+          <Field id="basis" term="Basis">{t.basis}</Field>
+          <Field id="sensitivity" term="Sensitivity">
+            {t.sensitivity} <span className={styles.note}>derived from basis — not editable</span>
+          </Field>
+          <Field id="authorising-party" term="Authorising party">{t.authorising_party}</Field>
+          <Field id="authorised-on" term="Authorised on">{t.authorised_on}</Field>
+          <Field id="expires-on" term="Expires on">
+            {t.expires_on}
+            {remaining !== null && (remaining >= 0 ? ` (${remaining} days remaining)` : ` (${-remaining} days ago)`)}
+          </Field>
+          <Field id="rate-limit" term="Rate limit">{t.rate_limit !== null ? rateLimit(t.rate_limit) : "not set"}</Field>
+          <Field id="origins" term="Origins">{t.origins.join(", ")}</Field>
+          <Field id="first-heal-policy" term="First heal">
+            {t.first_heal_policy !== null ? POLICY[t.first_heal_policy] : "not set"}
+          </Field>
+          <Field id="retention" term="Evidence retention">
+            {t.evidence_retention_days === null ? "kept for the life of the log" : `${t.evidence_retention_days} days`}
+          </Field>
+          <Field id="legal-review" term="Legal review">{t.legal_review ?? "none recorded"}</Field>
+          {t.record_sha256 !== null && (
+            <Field id="record-sha" term="Scope record">
+              <code>{shortSha(t.record_sha256)}</code> <CopyButton text={t.record_sha256} label="Copy full hash" />
+            </Field>
+          )}
+        </dl>
+      )}
+      <nav aria-label={`${t.target} links`} className={styles.links}>
+        <Link href={`/runs?target=${encodeURIComponent(t.target)}`}>Run history</Link>
+        {!locked && <Link href={`/specs/${encodeURIComponent(t.target)}`}>Task spec</Link>}
+      </nav>
+    </div>
+  );
+}
+```
+
+`web/components/ScopeCard.module.css`:
+
+```css
+.card { border: 1px solid var(--bok-neutral-4); border-radius: var(--bok-radius-control); padding: calc(var(--bok-space) * 4); background: var(--bok-paper); display: grid; gap: calc(var(--bok-space) * 3); min-width: 0; }
+.card[aria-disabled="true"] { background: var(--bok-neutral-2); border-style: dashed; }
+.head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--bok-space); flex-wrap: wrap; }
+.name { font-family: var(--bok-font-display); font-size: 1.25rem; margin: 0; overflow-wrap: anywhere; }
+.status { margin: 0; font-size: var(--bok-density-font); }
+.status[data-status="active"] { color: var(--bok-verified-ink); }
+.status[data-status="expired"], .status[data-status="unscoped"] { color: var(--bok-critical-ink); }
+.locked { margin: 0; color: var(--bok-critical-ink); display: flex; gap: var(--bok-space); align-items: center; }
+.lock { flex: none; }
+.notice { margin: 0; display: flex; gap: calc(var(--bok-space) * 2); align-items: center; flex-wrap: wrap; }
+.fields { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: calc(var(--bok-space) * 2) calc(var(--bok-space) * 4); }
+.field dt { color: var(--bok-neutral-9); font-size: 0.8125rem; }
+.field dd { margin: 0; overflow-wrap: anywhere; }
+.note { color: var(--bok-neutral-9); font-size: 0.8125rem; }
+.links { display: flex; gap: calc(var(--bok-space) * 4); }
+```
+
+```tsx
+// web/app/(app)/targets/page.tsx
+import { EmptyState } from "bok-ui";
+import type { Metadata } from "next";
+import { ProblemState } from "@/components/ProblemState";
+import { ScopeCard } from "@/components/ScopeCard";
+import { load } from "@/lib/api";
+import { utcToday } from "@/lib/format";
+
+export const metadata: Metadata = { title: "Targets" };
+
+const RANK = { active: 0, expired: 1, unscoped: 2 } as const;
+
+export default async function TargetsPage() {
+  const r = await load((c) => c.GET("/api/v1/targets"));
+  if (!r.ok) return <ProblemState problem={r.problem} />;
+  const today = utcToday();
+  const targets = [...r.data].sort((a, b) => RANK[a.status] - RANK[b.status] || a.target.localeCompare(b.target));
+  return (
+    <section aria-labelledby="targets-h">
+      <header className="sd-page-head">
+        <h1 id="targets-h">Targets</h1>
+        <p className="sd-lede">
+          Every system this pipeline may touch, and the authorisation that lets it. An unknown or expired
+          target is refused before a browser opens.
+        </p>
+      </header>
+      {targets.length === 0 ? (
+        <EmptyState scope={{ noun: "targets", measuredNoun: "scope records", measured: 0, headline: "No targets.", measuredVerb: "are loaded" }} />
+      ) : (
+        <div className="sd-card-grid">
+          {targets.map((t) => <ScopeCard key={t.target} target={t} today={today} />)}
+        </div>
+      )}
+    </section>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/targets/loading.tsx
+import { Skeleton } from "bok-ui";
+
+export default function Loading() {
+  return <Skeleton shape="cards" rows={4} />;
+}
+```
+
+```tsx
+// web/app/(app)/targets/error.tsx
+"use client";
+
+export { RouteError as default } from "@/components/RouteError";
+```
+
+`web/app/globals.css` (the shell every later screen shares; tables become labelled row cards below
+640px, spec §4):
+
+```css
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { font-size: var(--bok-density-font); line-height: 1.5; }
+/* Drift indigo is the heal state and nothing else (spec section 2), so this product's generic
+   accent -- links, buttons, focus rings -- is graphite. */
+:root { --bok-accent: var(--bok-neutral-11); --bok-accent-ink: var(--bok-neutral-11); }
+a { color: var(--bok-accent-ink); text-underline-offset: 3px; }
+h1, h2, h3 { font-family: var(--bok-font-display); font-weight: 600; line-height: 1.2; }
+code, pre { font-family: var(--bok-font-mono); }
+button { font: inherit; }
+
+.sd-shell { min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+.sd-top { display: flex; align-items: center; gap: calc(var(--bok-space) * 6); flex-wrap: wrap; padding: calc(var(--bok-space) * 3) calc(var(--bok-space) * 6); border-bottom: 1px solid var(--bok-neutral-4); }
+.sd-top nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: calc(var(--bok-space) * 4); margin: 0; padding: 0; }
+.sd-top nav a[aria-current="page"] { font-weight: 600; text-decoration-thickness: 2px; }
+.sd-brand { margin: 0; font-family: var(--bok-font-display); font-size: 1.125rem; }
+.sd-tools { margin-inline-start: auto; display: flex; gap: calc(var(--bok-space) * 2); align-items: center; }
+.sd-skip { position: absolute; left: -9999px; }
+.sd-skip:focus { left: calc(var(--bok-space) * 2); top: calc(var(--bok-space) * 2); background: var(--bok-paper); padding: var(--bok-space); z-index: 50; }
+.sd-main { padding: calc(var(--bok-space) * 6); max-width: 88rem; width: 100%; margin: 0 auto; min-width: 0; }
+.sd-main:focus { outline: none; }
+.sd-page-head { margin-bottom: calc(var(--bok-space) * 6); }
+.sd-page-head h1 { margin: 0 0 var(--bok-space); font-size: 1.75rem; overflow-wrap: anywhere; }
+.sd-lede { margin: 0; color: var(--bok-neutral-10); max-width: 60ch; }
+.sd-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 26rem), 1fr)); gap: calc(var(--bok-space) * 4); }
+.sd-quiet { background: none; border: 1px solid var(--bok-neutral-6); border-radius: var(--bok-radius-control); padding: 2px calc(var(--bok-space) * 2); cursor: pointer; color: var(--bok-ink); }
+.sd-login { max-width: 24rem; margin: 12vh auto; padding: 0 calc(var(--bok-space) * 4); }
+.sd-login-form { display: grid; gap: calc(var(--bok-space) * 2); }
+.sd-login-form input { font: inherit; padding: calc(var(--bok-space) * 2); border: 1px solid var(--bok-neutral-7); border-radius: var(--bok-radius-control); }
+.sd-login-form button[type="submit"], .sd-primary { font: inherit; padding: calc(var(--bok-space) * 2) calc(var(--bok-space) * 4); background: var(--bok-neutral-12); color: var(--bok-neutral-1); border: 0; border-radius: var(--bok-radius-control); cursor: pointer; }
+.sd-form-error { color: var(--bok-critical-ink); margin: 0; }
+.sd-notice { display: flex; gap: calc(var(--bok-space) * 2); align-items: center; flex-wrap: wrap; padding: calc(var(--bok-space) * 3); border: 1px solid var(--bok-neutral-5); border-radius: var(--bok-radius-cell); }
+
+/* Tables: tabular numerals everywhere, row cards below 640px (spec section 4). */
+.sd-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.sd-table caption { text-align: start; font-family: var(--bok-font-display); font-size: 1.125rem; padding-bottom: var(--bok-space); }
+.sd-table th, .sd-table td { text-align: start; vertical-align: top; padding: var(--bok-density-pad-y) var(--bok-density-pad-x); border-bottom: 1px solid var(--bok-neutral-4); overflow-wrap: anywhere; }
+.sd-table thead th { font-size: 0.8125rem; color: var(--bok-neutral-10); }
+@media (max-width: 639.98px) {
+  .sd-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .sd-table tr { display: block; border: 1px solid var(--bok-neutral-4); border-radius: var(--bok-radius-cell); margin-bottom: calc(var(--bok-space) * 2); }
+  .sd-table th, .sd-table td { display: grid; grid-template-columns: 8rem 1fr; gap: var(--bok-space); border: 0; }
+  .sd-table [data-label]::before { content: attr(data-label); color: var(--bok-neutral-9); font-size: 0.8125rem; }
+  .sd-main { padding: calc(var(--bok-space) * 4); }
+  .sd-top { padding: calc(var(--bok-space) * 3) calc(var(--bok-space) * 4); }
+}
+```
+
+Run: `cd web && npx playwright test e2e/harness.spec.ts e2e/auth.spec.ts e2e/targets.spec.ts`
+Expected: PASS, 13 tests (3 harness, 3 auth, 7 targets).
+
+- [ ] **Step 10: Commit**
 
 ```bash
-git add web/app/layout.tsx web/app/targets web/components/ScopeCard.tsx web/e2e/targets.spec.ts
-git commit -m "feat(web): shell and Targets screen"
+git add "web/app/(app)" web/app/globals.css web/components web/e2e/targets.spec.ts
+git commit -m "feat(web): authenticated shell and the Targets screen with locked, expired and expiring states"
 ```
 
 ---
 
-### Task 36: Run timeline
+### Task 36: Runs — the timeline, the figures above it, and the full run record
+
+**Why the run record shows every attempt.** `run_key` is deterministic, so a retry overwrites the
+`runs` row; `run_attempts` keeps the history (audit M13). A run page that shows only the terminal
+state hides exactly the failures the published run-success rate is computed from. And a day with no
+run is drawn as an empty tick, because a missed run is published, not hidden (design §9.2).
+
+**Why every figure has a method link.** Aggregates are not `Claim`s yet — `bok_core` has no
+`QuerySource` (API contract §6.2) — so each `StatsView` number renders as a `StatFigure`: the number
+plus *"How this is computed"* into `docs/methodology.md`. No figure is rendered bare, and the
+component refuses to render without the link. `StatsView` carries one `method_url`; each figure
+links to its own anchor under it (`methodHref`) — found 2026-09-26, the API contract says "anchor for
+each figure" but ships one field.
 
 **Files:**
-- Create: `web/app/runs/page.tsx`, `web/components/RunTimeline.tsx`
-- Test: `web/e2e/runs.spec.ts`
+- Create: `web/app/(app)/runs/page.tsx`, `web/app/(app)/runs/loading.tsx`, `web/app/(app)/runs/error.tsx`
+- Create: `web/app/(app)/runs/[run_key]/page.tsx`, `web/app/(app)/runs/[run_key]/loading.tsx`, `web/app/(app)/runs/[run_key]/error.tsx`
+- Create: `web/components/RunTimelineView.tsx`, `web/components/StatFigure.tsx`, `web/components/StatFigure.module.css`, `web/components/StatsRow.tsx`, `web/components/RunStateLabel.tsx`, `web/components/RunFilters.tsx`
+- Create: `web/lib/runs.ts`, `web/lib/window.ts`
+- Modify: `web/app/globals.css` (append run-state and section rules)
+- Test: `web/lib/window.test.ts`, `web/components/StatFigure.test.tsx`, `web/e2e/runs.spec.ts`
 
 **Interfaces:**
-- Consumes: `GET /runs` (Task 34).
-- Produces: horizontal timeline — green completed, indigo healed, amber quarantined, red failed. **State is never colour alone**; each carries a glyph and a text label.
+- Consumes: `GET /api/v1/runs` → `Page[RunView]` (query `target`, `from`, `to`, `cursor`, `limit ≤ 200`), `GET /api/v1/runs/{run_key}` → `RunDetailView`, `GET /api/v1/stats` → `StatsView`, `GET /api/v1/quality?run_key=` → `Page[FindingView]`, `GET /api/v1/targets`; `load`, `ProblemState`, `RouteError`, `format.ts` (Task 35); `RunTimeline` from `bok-ui/client`, `RUN_STATE`, `EmptyState`, `PartialFailureState`, `Skeleton` from `bok-ui`.
+- Produces:
+  - `resolveWindow(q: WindowQuery, today: string) -> RunWindow {from; to; target?}` (default: the last 30 days ending today, UTC; at most 366 days).
+  - `loadAllRuns(q) -> Loaded<RunView[]>`, `countPassedRuns(target?) -> Loaded<number>` (completed + healed) — server-only.
+  - `<RunTimelineView runs={TimelineRun[]} from to />` (client), `TimelineRun {run_key; window; state; label}`.
+  - `<StatFigure label value methodHref />`, `<StatsRow stats={StatsView} />`, `<RunStateLabel state />`, `isRunState(s)`, `<RunFilters window targets />`.
+  - Test hooks: `[data-bok-timeline]` per target inside a region named for the target, `a[data-run-state]` chips, `li[data-empty-day]`, `[data-stat]`, `[data-testid="run-detail"]`, `[data-testid="attempt-row"]`.
 
-- [ ] **Step 1: Write the failing E2E tests**
+- [ ] **Step 1: Write the failing unit tests**
 
-```typescript
-// web/e2e/runs.spec.ts
-test('every run state exposes a text label, not only a colour', async ({ page }) => {
-  await page.goto('/runs');
-  for (const chip of await page.getByTestId('run-chip').all()) {
-    await expect(chip).toHaveText(/completed|healed|quarantined|failed|refused/);
-  }
-});
+```ts
+// web/lib/window.test.ts
+import { describe, expect, it } from "vitest";
+import { resolveWindow } from "./window";
 
-test('clicking a run opens its full record', async ({ page }) => {
-  await page.goto('/runs');
-  await page.getByTestId('run-chip').first().click();
-  await expect(page.getByTestId('run-detail')).toBeVisible();
+describe("resolveWindow", () => {
+  it("defaults to the last 30 days, ending today, in UTC", () => {
+    expect(resolveWindow({}, "2026-09-26")).toEqual({ from: "2026-08-28", to: "2026-09-26", target: undefined });
+  });
+
+  it("honours a valid range and target from the query string", () => {
+    expect(resolveWindow({ target: "testbench", from: "2026-09-01", to: "2026-09-10" }, "2026-09-26"))
+      .toEqual({ from: "2026-09-01", to: "2026-09-10", target: "testbench" });
+  });
+
+  it("falls back when from is after to, or a value is malformed", () => {
+    expect(resolveWindow({ from: "2026-09-20", to: "2026-09-10" }, "2026-09-26").from).toBe("2026-08-12");
+    expect(resolveWindow({ target: "../etc", to: "yesterday" }, "2026-09-26")).toEqual({ from: "2026-08-28", to: "2026-09-26", target: undefined });
+  });
+
+  it("caps a range at 366 days", () => {
+    expect(resolveWindow({ from: "2020-01-01", to: "2026-09-26" }, "2026-09-26").from).toBe("2025-09-25");
+  });
 });
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+```tsx
+// web/components/StatFigure.test.tsx
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { StatFigure } from "./StatFigure";
+
+describe("StatFigure", () => {
+  it("renders the figure in tabular numerals with its method link", () => {
+    render(<StatFigure label="Run success" value="99.2%" methodHref="https://x.test/methodology#run-success-rate" />);
+    expect(screen.getByText("99.2%")).toHaveAttribute("data-bok-numeric");
+    expect(screen.getByRole("link", { name: /How this is computed/ })).toHaveAttribute("href", "https://x.test/methodology#run-success-rate");
+  });
+
+  it("names each method link after its figure, so a row of them is distinguishable", () => {
+    render(<StatFigure label="Missed runs" value="1 of 30" methodHref="https://x.test/m#missed-runs" />);
+    expect(screen.getByRole("link")).toHaveAccessibleName("How this is computed — Missed runs");
+  });
+
+  it("refuses to render a bare figure", () => {
+    expect(() => StatFigure({ label: "Heals", value: "3", methodHref: " " })).toThrow(/methodHref/);
+  });
+});
+```
+
+Run: `cd web && npx vitest run lib/window.test.ts components/StatFigure.test.tsx`
+Expected: FAIL — `Failed to resolve import "./window"` and `"./StatFigure"`.
+
+- [ ] **Step 2: Write `window.ts`, `StatFigure.tsx`**
+
+```ts
+// web/lib/window.ts
+import { addDays, daysBetween, isIsoDay } from "./format";
+
+export interface WindowQuery {
+  target?: string | string[];
+  from?: string | string[];
+  to?: string | string[];
+}
+
+export interface RunWindow {
+  from: string;
+  to: string;
+  target: string | undefined;
+}
+
+const TARGET = /^[a-z0-9][a-z0-9-]{0,62}$/; // the API's own path pattern (API contract 4.1)
+const pick = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+/** Filters live in the query string so a view is linkable (spec section 3.2). */
+export function resolveWindow(q: WindowQuery, today: string): RunWindow {
+  const rawTo = pick(q.to);
+  const rawFrom = pick(q.from);
+  const rawTarget = pick(q.target);
+  const to = isIsoDay(rawTo) ? rawTo : today;
+  let from = isIsoDay(rawFrom) ? rawFrom : addDays(to, -29);
+  if (daysBetween(from, to) < 0) from = addDays(to, -29);
+  if (daysBetween(from, to) > 366) from = addDays(to, -366);
+  const target = rawTarget !== undefined && TARGET.test(rawTarget) ? rawTarget : undefined;
+  return { from, to, target };
+}
+```
+
+```tsx
+// web/components/StatFigure.tsx
+import styles from "./StatFigure.module.css";
+
+export interface StatFigureProps {
+  label: string;
+  value: string;
+  /** docs/methodology.md anchor where the exact query is written out. Required. */
+  methodHref: string;
+}
+
+/** An aggregate: a plain number with its method, never bare (API contract 6.2). */
+export function StatFigure({ label, value, methodHref }: StatFigureProps) {
+  if (methodHref.trim() === "") throw new Error(`StatFigure "${label}": methodHref is required -- no figure renders bare`);
+  return (
+    <figure className={styles.stat} data-stat>
+      <figcaption className={styles.label}>{label}</figcaption>
+      <p className={styles.value} data-bok-numeric>{value}</p>
+      <a className={styles.method} href={methodHref}>
+        How this is computed<span className="bok-visually-hidden"> — {label}</span>
+      </a>
+    </figure>
+  );
+}
+```
+
+`web/components/StatFigure.module.css`:
+
+```css
+.stat { margin: 0; padding: calc(var(--bok-space) * 3); border: 1px solid var(--bok-neutral-4); border-radius: var(--bok-radius-cell); min-width: 0; }
+.label { font-size: 0.8125rem; color: var(--bok-neutral-10); }
+.value { margin: var(--bok-space) 0; font-size: 1.5rem; }
+.method { font-size: 0.75rem; }
+```
+
+Run: `cd web && npx vitest run lib/window.test.ts components/StatFigure.test.tsx`
+Expected: PASS, 7 tests.
+
+- [ ] **Step 3: Write the failing E2E tests**
+
+```ts
+// web/e2e/runs.spec.ts
+import { expect, test } from "@playwright/test";
+import { addDays } from "../lib/format";
+import { ids } from "./fixtures/ids";
+
+test("every run state exposes a text label, not only a colour", async ({ page }) => {
+  await page.goto("/runs");
+  const chips = page.locator("a[data-run-state]");
+  expect(await chips.count()).toBeGreaterThan(10);
+  for (const chip of await chips.all()) {
+    const state = await chip.getAttribute("data-run-state");
+    await expect(chip).toContainText(state ?? "missing");
+  }
+});
+
+test("clicking a run opens its full record", async ({ page }) => {
+  await page.goto(`/runs?target=${ids().targets.active}`);
+  await page.locator('a[data-run-state="failed"]').first().click();
+  await expect(page).toHaveURL(new RegExp(`/runs/${encodeURIComponent(ids().runs.failed)}$`));
+  await expect(page.getByTestId("run-detail")).toBeVisible();
+});
+
+test("a missed day is visible on the timeline", async ({ page }) => {
+  await page.goto("/runs");
+  const track = page.getByRole("region", { name: ids().targets.active });
+  const gap = track.locator(`[data-empty-day="${ids().missedDay}"]`);
+  await expect(gap).toBeVisible();
+  await expect(gap).toContainText(`${ids().missedDay}: no run`);
+});
+
+test("a failed run shows every attempt, not only the last", async ({ page }) => {
+  await page.goto(`/runs/${encodeURIComponent(ids().runs.failed)}`);
+  const attempts = page.getByTestId("attempt-row");
+  await expect(attempts).toHaveCount(2);
+  for (const a of await attempts.all()) await expect(a).toContainText("navigation to /results timed out");
+});
+
+test("every summary figure links to how it is computed", async ({ page }) => {
+  await page.goto("/runs");
+  const figures = page.locator("[data-stat]");
+  expect(await figures.count()).toBeGreaterThanOrEqual(7);
+  for (const f of await figures.all()) {
+    await expect(f.getByRole("link", { name: /How this is computed/ })).toHaveAttribute("href", /#[a-z0-9-]+$/);
+  }
+});
+
+test("filters live in the query string, so a view is linkable", async ({ page }) => {
+  const from = addDays(ids().today, -6);
+  await page.goto(`/runs?target=${ids().targets.active}&from=${from}&to=${ids().today}`);
+  await expect(page.locator("[data-bok-timeline]")).toHaveCount(1);
+  await expect(page.getByLabel("Target")).toHaveValue(ids().targets.active);
+  await expect(page.getByLabel("From")).toHaveValue(from);
+});
+```
 
 Run: `cd web && npx playwright test e2e/runs.spec.ts`
-Expected: FAIL.
+Expected: FAIL — `/runs` is a 404; no `a[data-run-state]`.
 
-- [ ] **Step 3: Build the timeline.**
+- [ ] **Step 4: Build the runs screens**
 
-- [ ] **Step 4: Run them and make sure they pass**
+```ts
+// web/lib/runs.ts
+import "server-only";
+import { load, type Loaded } from "./api";
+import type { RunView } from "./types";
+
+const PAGE_LIMIT = 200;
+const MAX_PAGES = 20;
+
+export async function loadAllRuns(q: { target?: string; from?: string; to?: string }): Promise<Loaded<RunView[]>> {
+  const items: RunView[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const r = await load((c) =>
+      c.GET("/api/v1/runs", { params: { query: { target: q.target, from: q.from, to: q.to, cursor, limit: PAGE_LIMIT } } }),
+    );
+    if (!r.ok) return r;
+    items.push(...r.data.items);
+    if (r.data.next_cursor === null) return { ok: true, data: items };
+    cursor = r.data.next_cursor;
+  }
+  return {
+    ok: false,
+    problem: { type: "about:blank", title: "Too many runs for one view", status: 413, detail: `More than ${PAGE_LIMIT * MAX_PAGES} runs match; narrow the date range.` },
+  };
+}
+
+/** Runs that passed validation: completed, or healed and accepted/promoted. */
+export async function countPassedRuns(target?: string): Promise<Loaded<number>> {
+  const r = await loadAllRuns({ target });
+  return r.ok ? { ok: true, data: r.data.filter((x) => x.state === "completed" || x.state === "healed").length } : r;
+}
+```
+
+```tsx
+// web/components/RunTimelineView.tsx
+"use client";
+
+import { RunTimeline } from "bok-ui/client";
+import type { RunStateName } from "@/lib/types";
+
+export interface TimelineRun {
+  run_key: string;
+  window: string;
+  state: RunStateName;
+  label: string;
+}
+
+/** Client wrapper: hrefFor is a function, which a server component cannot pass across. */
+export function RunTimelineView({ runs, from, to }: { runs: readonly TimelineRun[]; from: string; to: string }) {
+  return (
+    <RunTimeline
+      runs={runs.map((r) => ({ id: r.run_key, at: r.window, state: r.state, label: r.label }))}
+      range={{ from, to }}
+      hrefFor={(id) => `/runs/${encodeURIComponent(id)}`}
+    />
+  );
+}
+```
+
+```tsx
+// web/components/RunStateLabel.tsx
+import { RUN_STATE } from "bok-ui";
+import type { RunStateName } from "@/lib/types";
+
+export function isRunState(s: string): s is RunStateName {
+  return Object.hasOwn(RUN_STATE, s);
+}
+
+/** Glyph + text label + token colour. Drift indigo appears only for "healed". */
+export function RunStateLabel({ state }: { state: RunStateName }) {
+  const e = RUN_STATE[state];
+  return (
+    <span className="sd-state" data-run-state={state} data-heal-state={state === "healed" ? "healed" : undefined}>
+      <span aria-hidden="true">{e.glyph}</span> {e.label}
+    </span>
+  );
+}
+```
+
+```tsx
+// web/components/StatsRow.tsx
+import { methodHref, percent } from "@/lib/format";
+import type { StatsView } from "@/lib/types";
+import { StatFigure } from "./StatFigure";
+
+export function StatsRow({ stats: s }: { stats: StatsView }) {
+  const m = (anchor: string) => methodHref(s.method_url, anchor);
+  const figures: Array<[label: string, value: string, anchor: string]> = [
+    ["Days elapsed", String(s.elapsed_days), "elapsed-days"],
+    ["Run success", percent(s.run_success_rate), "run-success-rate"],
+    ["Missed runs", `${s.missed_runs} of ${s.scheduled_runs}`, "missed-runs"],
+    ["Fired, never started", String(s.fired_without_attempt), "fired-without-attempt"],
+    ["Heals", String(s.heals), "heals"],
+    ["Quarantines", String(s.quarantines), "quarantines"],
+    ["Manual interventions", String(s.manual_interventions), "manual-interventions"],
+  ];
+  if (s.quarantines_refused_correctly !== null) {
+    figures.push(["Quarantines refused correctly", String(s.quarantines_refused_correctly), "quarantines-refused-correctly"]);
+  }
+  const rungs = Object.entries(s.rung_shares).sort(([a], [b]) => a.localeCompare(b));
+  return (
+    <div className="sd-stats">
+      <ul className="sd-stat-row" aria-label={`Log figures, ${s.window[0]} to ${s.window[1]}`}>
+        {figures.map(([label, value, anchor]) => (
+          <li key={anchor}><StatFigure label={label} value={value} methodHref={m(anchor)} /></li>
+        ))}
+      </ul>
+      <ul className="sd-stat-row" aria-label="Share of resolutions by rung">
+        {rungs.map(([rung, share]) => (
+          <li key={rung}>
+            <StatFigure label={`Resolved at ${rung.replace(/^rung/, "rung ")}`} value={percent(share)} methodHref={m("rung-shares")} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+```tsx
+// web/components/RunFilters.tsx
+import type { RunWindow } from "@/lib/window";
+
+/** A plain GET form: the filter state is the URL, so every view is linkable and needs no JS. */
+export function RunFilters({ window: w, targets }: { window: RunWindow; targets: readonly string[] }) {
+  return (
+    <form className="sd-filters" method="get" action="/runs" aria-label="Filter runs" data-bok-chrome>
+      <label>
+        Target
+        <select name="target" defaultValue={w.target ?? ""}>
+          <option value="">All targets</option>
+          {targets.map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </label>
+      <label>From <input type="date" name="from" defaultValue={w.from} /></label>
+      <label>To <input type="date" name="to" defaultValue={w.to} /></label>
+      <button type="submit" className="sd-quiet">Apply</button>
+    </form>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/runs/page.tsx
+import { EmptyState, PartialFailureState } from "bok-ui";
+import type { Metadata } from "next";
+import Link from "next/link";
+import { ProblemState } from "@/components/ProblemState";
+import { RunFilters } from "@/components/RunFilters";
+import { RunTimelineView, type TimelineRun } from "@/components/RunTimelineView";
+import { StatsRow } from "@/components/StatsRow";
+import { load } from "@/lib/api";
+import { daysBetween, utcToday } from "@/lib/format";
+import { loadAllRuns } from "@/lib/runs";
+import { resolveWindow, type WindowQuery } from "@/lib/window";
+
+export const metadata: Metadata = { title: "Runs" };
+
+export default async function RunsPage({ searchParams }: { searchParams: Promise<WindowQuery> }) {
+  const w = resolveWindow(await searchParams, utcToday());
+  const [targets, stats, runs] = await Promise.all([
+    load((c) => c.GET("/api/v1/targets")),
+    load((c) => c.GET("/api/v1/stats", { params: { query: { target: w.target, from: w.from, to: w.to } } })),
+    loadAllRuns({ target: w.target, from: w.from, to: w.to }),
+  ]);
+  if (!runs.ok) return <ProblemState problem={runs.problem} />;
+
+  const scoped = targets.ok ? targets.data.filter((t) => t.status !== "unscoped").map((t) => t.target) : [];
+  const names = w.target !== undefined ? [w.target] : [...new Set([...scoped, ...runs.data.map((r) => r.target)])].sort();
+  const byTarget = new Map<string, TimelineRun[]>();
+  for (const r of runs.data) {
+    const label = `${r.window} · ${r.state}${r.quarantine_resolution !== null ? ` (${r.quarantine_resolution})` : ""}`;
+    byTarget.set(r.target, [...(byTarget.get(r.target) ?? []), { run_key: r.run_key, window: r.window, state: r.state, label }]);
+  }
+  const linkFor = (t: string) => `/runs?${new URLSearchParams({ target: t, from: w.from, to: w.to }).toString()}`;
+
+  return (
+    <section aria-labelledby="runs-h">
+      <header className="sd-page-head">
+        <h1 id="runs-h">Runs</h1>
+        <p className="sd-lede">{w.from} to {w.to}, UTC{w.target !== undefined ? ` · ${w.target}` : ", every target"}.</p>
+      </header>
+      <RunFilters window={w} targets={scoped} />
+      {stats.ok ? (
+        <StatsRow stats={stats.data} />
+      ) : (
+        <PartialFailureState succeeded={["runs"]} failed={[{ what: "summary figures", why: stats.problem.title }]} />
+      )}
+      {names.length === 0 ? (
+        <EmptyState scope={{ noun: "runs", measuredNoun: "days", measured: daysBetween(w.from, w.to) + 1, headline: "No runs in this window.", measuredVerb: "were examined" }} />
+      ) : (
+        names.map((t) => (
+          <section key={t} className="sd-timeline" aria-labelledby={`tl-${t}`}>
+            <h2 id={`tl-${t}`}><Link href={linkFor(t)}>{t}</Link></h2>
+            <RunTimelineView runs={byTarget.get(t) ?? []} from={w.from} to={w.to} />
+          </section>
+        ))
+      )}
+    </section>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/runs/[run_key]/page.tsx
+import { PartialFailureState } from "bok-ui";
+import type { Metadata } from "next";
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { ProblemState } from "@/components/ProblemState";
+import { isRunState, RunStateLabel } from "@/components/RunStateLabel";
+import { load } from "@/lib/api";
+import { decodeParam, familyLabel, shortSha, utcStamp } from "@/lib/format";
+
+export const metadata: Metadata = { title: "Run" };
+
+export default async function RunPage({ params }: { params: Promise<{ run_key: string }> }) {
+  const runKey = decodeParam((await params).run_key);
+  const [run, findings] = await Promise.all([
+    load((c) => c.GET("/api/v1/runs/{run_key}", { params: { path: { run_key: runKey } } })),
+    load((c) => c.GET("/api/v1/quality", { params: { query: { run_key: runKey } } })),
+  ]);
+  if (!run.ok) {
+    if (run.problem.status === 404 || run.problem.status === 422) notFound();
+    return <ProblemState problem={run.problem} />;
+  }
+  const r = run.data;
+  const enc = encodeURIComponent(r.run_key);
+
+  return (
+    <section aria-labelledby="run-h" data-testid="run-detail">
+      <header className="sd-page-head">
+        <h1 id="run-h">Run <code>{r.run_key}</code></h1>
+        <dl className="sd-facts">
+          <div><dt>Target</dt><dd><Link href={`/runs?target=${encodeURIComponent(r.target)}`}>{r.target}</Link></dd></div>
+          <div><dt>Window</dt><dd>{r.window} (spec version {r.spec_version})</dd></div>
+          <div><dt>State</dt><dd><RunStateLabel state={r.state} /></dd></div>
+          {r.quarantine_resolution !== null && <div><dt>Quarantine</dt><dd>{r.quarantine_resolution}</dd></div>}
+          {r.state === "quarantined" && r.quarantine_resolution === null && (
+            <div><dt>Quarantine</dt><dd><Link href="/quarantine">awaiting a decision</Link></dd></div>
+          )}
+          <div><dt>Rows written</dt><dd data-bok-numeric>{r.rows_written ?? "none"}</dd></div>
+          {r.error !== null && <div><dt>Error</dt><dd>{r.error}</dd></div>}
+        </dl>
+      </header>
+
+      <table className="sd-table">
+        <caption>Attempts — every one, including the failed ones</caption>
+        <thead><tr><th scope="col">Attempt</th><th scope="col">Started</th><th scope="col">Finished</th><th scope="col">State</th><th scope="col">Error</th><th scope="col">Scope record</th></tr></thead>
+        <tbody>
+          {r.run_attempts.map((a) => (
+            <tr key={a.attempt} data-testid="attempt-row">
+              <th scope="row" data-label="Attempt">{a.attempt}</th>
+              <td data-label="Started">{utcStamp(a.started_at)}</td>
+              <td data-label="Finished">{a.finished_at !== null ? utcStamp(a.finished_at) : "did not finish"}</td>
+              <td data-label="State">{isRunState(a.state) ? <RunStateLabel state={a.state} /> : a.state}</td>
+              <td data-label="Error">{a.error ?? "none"}</td>
+              <td data-label="Scope record"><code>{shortSha(a.scope_record_sha256)}</code></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <table className="sd-table">
+        <caption>Resolutions — which rung found each field</caption>
+        <thead><tr><th scope="col">Field</th><th scope="col">Winning rung</th><th scope="col">Rungs tried</th><th scope="col">Heal</th></tr></thead>
+        <tbody>
+          {r.resolutions.map((res) => (
+            <tr key={res.field}>
+              <th scope="row" data-label="Field"><code>{res.field}</code></th>
+              <td data-label="Winning rung">{res.winning_rung !== null ? `rung ${res.winning_rung}` : "none resolved"}</td>
+              <td data-label="Rungs tried">
+                <ol className="sd-inline-list">
+                  {res.attempts.map((t) => (
+                    <li key={t.rung}>rung {t.rung} ({familyLabel(t.family)}) · {t.outcome.replace(/_/g, " ")} · <span data-bok-numeric>{t.ms} ms</span></li>
+                  ))}
+                </ol>
+              </td>
+              <td data-label="Heal">{res.heal_id !== null ? <Link href={`/heals/${res.heal_id}`}>Heal #{res.heal_id}</Link> : "no heal"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {findings.ok ? (
+        <p><Link href={`/quality?run_key=${enc}`}>{r.finding_count} quality {r.finding_count === 1 ? "finding" : "findings"} for this run</Link></p>
+      ) : (
+        <PartialFailureState succeeded={["run record", "attempts", "resolutions"]} failed={[{ what: "quality findings", why: findings.problem.title }]} />
+      )}
+    </section>
+  );
+}
+```
+
+Loading and error files (the four designed states, spec §5; the empty state lives in the page):
+
+```tsx
+// web/app/(app)/runs/loading.tsx
+import { Skeleton } from "bok-ui";
+
+export default function Loading() {
+  return (
+    <>
+      <Skeleton shape="cards" rows={1} />
+      <Skeleton shape="table" rows={3} />
+    </>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/runs/[run_key]/loading.tsx
+import { Skeleton } from "bok-ui";
+
+export default function Loading() {
+  return <Skeleton shape="table" rows={6} />;
+}
+```
+
+```tsx
+// web/app/(app)/runs/error.tsx  and  web/app/(app)/runs/[run_key]/error.tsx (identical)
+"use client";
+
+export { RouteError as default } from "@/components/RouteError";
+```
+
+Append to `web/app/globals.css`:
+
+```css
+.sd-state { white-space: nowrap; }
+.sd-state[data-run-state="completed"]   { color: var(--bok-verified-ink); }
+.sd-state[data-run-state="healed"]      { color: var(--bok-accent-selector-drift-ink); }
+.sd-state[data-run-state="quarantined"] { color: var(--bok-medium-ink); }
+.sd-state[data-run-state="failed"]      { color: var(--bok-critical-ink); }
+.sd-state[data-run-state="refused"]     { color: var(--bok-unverified-ink); }
+.sd-filters { display: flex; flex-wrap: wrap; gap: calc(var(--bok-space) * 3); align-items: end; margin-bottom: calc(var(--bok-space) * 4); }
+.sd-filters label { display: grid; gap: 2px; font-size: 0.8125rem; }
+.sd-filters select, .sd-filters input { font: inherit; padding: 2px var(--bok-space); }
+.sd-stats { display: grid; gap: calc(var(--bok-space) * 2); margin-bottom: calc(var(--bok-space) * 6); }
+.sd-stat-row { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 11rem), 1fr)); gap: calc(var(--bok-space) * 2); }
+.sd-timeline { margin-bottom: calc(var(--bok-space) * 6); }
+.sd-timeline h2 { font-size: 1.125rem; margin: 0 0 calc(var(--bok-space) * 2); }
+.sd-facts { display: flex; flex-wrap: wrap; gap: calc(var(--bok-space) * 2) calc(var(--bok-space) * 6); margin: calc(var(--bok-space) * 2) 0 0; }
+.sd-facts dt { font-size: 0.8125rem; color: var(--bok-neutral-9); }
+.sd-facts dd { margin: 0; overflow-wrap: anywhere; }
+.sd-inline-list { margin: 0; padding-inline-start: 1.25em; }
+.sd-section { margin-top: calc(var(--bok-space) * 8); }
+```
 
 Run: `cd web && npx playwright test e2e/runs.spec.ts`
-Expected: PASS, 2 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add web/app/runs web/components/RunTimeline.tsx web/e2e/runs.spec.ts
-git commit -m "feat(web): run timeline"
+git add "web/app/(app)/runs" web/components/RunTimelineView.tsx web/components/StatFigure.tsx \
+        web/components/StatFigure.module.css web/components/StatFigure.test.tsx web/components/StatsRow.tsx \
+        web/components/RunStateLabel.tsx web/components/RunFilters.tsx web/lib/runs.ts web/lib/window.ts \
+        web/lib/window.test.ts web/app/globals.css web/e2e/runs.spec.ts
+git commit -m "feat(web): run timeline with visible missed days, log figures with methods, full run record"
 ```
 
 ---
 
 ### Task 37: The heal-log screen — the signature
 
-**Files:**
-- Create: `web/app/heals/[id]/page.tsx`
-- Create: `web/components/BeforeAfter.tsx`, `DomDiff.tsx`, `VerdictTable.tsx`, `ElementOutline.tsx`
-- Test: `web/e2e/heallog.spec.ts`
+**Why this is the screen that sells the product.** Design §5.4's sentence — *"Selector broke 04:12.
+Healed to … via rung 3 … Independently confirmed by rung 4"* — is the headline, and everything below
+it is the evidence a sceptic would ask for, in the order they would ask: what it looked like before
+and after, what changed in the markup, which rungs were tried, what the gate checked and against which
+threshold, what values it produced (each opening its provenance), and who decided. The heal log is
+also the report view that gets forwarded to auditors (`00` §5.1), so Task 39A makes it print.
 
-**Interfaces:**
-- Consumes: `GET /heals/{id}` (Task 34), `dom_diff` output (Task 33).
-- Produces: two-column before/after with the resolved element outlined, word-level DOM diff beneath, the winning rung, **the cross-family confirmer**, every `Verdict` with its threshold, and the promote/discard decision with actor and timestamp.
+**The one orchestrated motion in the product.** On mount the "before" outline draws over 220 ms, then
+the "after" outline draws over 220 ms, so the eye tracks the move from the old column to the new one.
+The sequence belongs to this screen (`BeforeAfter`), not to `bok-ui`, which only animates the
+`outlineState` it is given. Under `prefers-reduced-motion` both are drawn at once and the computed
+duration is `0s`.
 
-- [ ] **Step 1: Write the failing E2E tests**
+**Partial states are the normal case here, not an edge.** A first heal has no "before" (API contract
+§7.2, `not_captured`); a tampered bundle is `corrupted` and its file is not served; a client target's
+old bundle is `expired` under retention. Each renders a `PartialFailureState` in that pane only, and
+the rest of the screen — verdicts included — still renders. A heal that did not replay says so at the
+top in words (spec §3.3).
 
-```typescript
-// web/e2e/heallog.spec.ts
-test('every verdict renders its threshold, never a bare badge', async ({ page }) => {
-  await page.goto('/heals/1');
-  for (const row of await page.getByTestId('verdict-row').all()) {
-    await expect(row.getByTestId('threshold')).not.toBeEmpty();
-    await expect(row.getByTestId('reason')).not.toBeEmpty();
-  }
-});
-
-test('the outline animation is disabled under reduced motion', async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.goto('/heals/1');
-  await expect(page.getByTestId('outline')).toHaveCSS('animation-duration', '0s');
-});
-
-test('the confirming rung is named', async ({ page }) => {
-  await page.goto('/heals/1');
-  await expect(page.getByTestId('confirmer')).toContainText(/rung [234]/);
-});
-
-test('a non-reproducible heal says so', async ({ page }) => {
-  await page.goto('/heals/non-reproducible');
-  await expect(page.getByTestId('replay-status')).toContainText('not reproducible');
-});
-```
-
-- [ ] **Step 2: Run them and watch them fail**
-
-Run: `cd web && npx playwright test e2e/heallog.spec.ts`
-Expected: FAIL.
-
-- [ ] **Step 3: Build the screen.** The one orchestrated motion: the outline draws itself over 220 ms, first on "before" then on "after," so the eye tracks the move.
-
-- [ ] **Step 4: Run them and make sure they pass**
-
-Run: `cd web && npx playwright test e2e/heallog.spec.ts`
-Expected: PASS, 4 tests.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add web/app/heals web/components web/e2e/heallog.spec.ts
-git commit -m "feat(web): heal-log screen with outlines, DOM diff and verdicts"
-```
-
----
-
-### Task 38: Quarantine, data quality, and the read-only spec view
+**`ClaimValue` is built here, not in Task 39A**, because this is the first screen with extracted
+values. The provenance tests move with it (found 2026-09-26). Its rail links a snapshot to evidence
+through a small registry: `DomSource.snapshot_id` is the evidence bundle's SHA-256 (plan Task 27), and
+the API contract has **no route that maps a snapshot id to a heal**. Each `ClaimValue` therefore
+registers where its own evidence is shown (`evidenceHref`), and the rail's `hrefForSnapshot` reads that
+registry — flagged: a `GET /snapshots/{sha256}` redirect would remove it.
 
 **Files:**
-- Create: `web/app/quarantine/page.tsx`, `web/app/quality/page.tsx`, `web/app/specs/[target]/page.tsx`
-- Test: `web/e2e/quarantine.spec.ts`, `web/e2e/quality.spec.ts`
+- Create: `web/app/(app)/heals/[id]/page.tsx`, `web/app/(app)/heals/[id]/loading.tsx`, `web/app/(app)/heals/[id]/error.tsx`
+- Create: `web/components/HealHeader.tsx`, `web/components/HealHeader.module.css`, `web/components/BeforeAfter.tsx`, `web/components/BeforeAfter.module.css`, `web/components/VerdictTable.tsx`, `web/components/ClaimValue.tsx`, `web/components/RailRoot.tsx`
+- Create: `web/lib/rail.ts`
+- Modify: `web/app/(app)/layout.tsx` (mount `RailRoot`), `web/lib/format.ts` (add `runAnchor`), `web/lib/format.test.ts` (one test), `web/app/globals.css` (append)
+- Test: `web/lib/rail.test.ts`, `web/components/VerdictTable.test.tsx`, `web/components/ClaimValue.test.tsx`, `web/e2e/heallog.spec.ts`, `web/e2e/provenance.spec.ts`
 
 **Interfaces:**
-- Consumes: the quarantine, quality and spec endpoints (Task 34).
-- Produces: quarantine with data preview, stated reason and promote/discard; data quality as a **table with thresholds and reasons stated** (spec §10 — no plotted distributions in v1); spec view as **read-only YAML with schema validation** (no Monaco, no form view, no live preview).
+- Consumes: `GET /api/v1/heals/{id}` → `HealView`, `GET /api/v1/heals/{id}/diff` → `DiffSpan[]` (Task 33 `dom_diff`; assumed `{kind: "add" | "remove" | "same"; text}`, matching `bok-ui`'s `DiffSpan` — flagged, the API contract does not spell the fields), `GET /api/v1/heals/{id}/evidence/{side}/{kind}` (`dom` as text, `png` as the `<img>` source); `bok-ui`: `EvidencePane`, `DomAdapter`, `DiffView`, `PartialFailureState`, `SeverityBadge`, `Skeleton`, types `RailPayload`, `RailNode`, `Method`; `bok-ui/client`: `Claim`, `ProvenanceRailProvider`.
+- Produces:
+  - `toRailPayload(p: ApiRailPayload) -> RailPayload` (narrows the generated `string` fields to `bok-ui`'s unions and throws on an unknown method), `snapshotIdOf(p) -> string | null`.
+  - `<RailRoot>` (client; one `ProvenanceRailProvider` for the app plus the snapshot registry), `useSnapshotLinks() -> Map<string, string>`.
+  - `<ClaimValue value rail evidenceHref />` (client) — `data-testid="claim-value"`.
+  - `<VerdictTable verdicts caption />`, `sortVerdicts(vs)` — rows `data-testid="verdict-row"`, cells `observed`, `threshold`, `reason`; non-`PASS` first.
+  - `<HealHeader heal />` — `data-testid="replay-status"`, `data-testid="decision-badge"`, `h1#heal-summary`.
+  - `<BeforeAfter field before after />`, `PaneInput {side; view; html; alt}` — panes `#evidence-before`, `#evidence-after`; wrapper `data-heal-state="healed"`.
+  - `runAnchor(runKey) -> string` in `format.ts`.
 
-- [ ] **Step 1: Write the failing E2E tests**
+- [ ] **Step 1: Write the failing unit tests**
 
-```typescript
-// web/e2e/quarantine.spec.ts
-test('empty quarantine states the passing count, and does not celebrate', async ({ page }) => {
-  await page.goto('/quarantine');
-  await expect(page.getByTestId('empty')).toContainText('Nothing quarantined');
-  await expect(page.getByTestId('empty')).toContainText(/\d+ runs passed validation/);
-});
+```ts
+// web/lib/rail.test.ts
+import { describe, expect, it } from "vitest";
+import type { ApiRailPayload } from "./types";
+import { snapshotIdOf, toRailPayload } from "./rail";
 
-test('promote requires a reason', async ({ page }) => {
-  await page.goto('/quarantine');
-  await page.getByRole('button', { name: 'Promote' }).click();
-  await expect(page.getByRole('alert')).toContainText('reason');
-});
+const SNAP = "3f9a1c2e7b4d5a6f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1f";
+const API_RAIL: ApiRailPayload = {
+  depth: 1,
+  inherited_caveats: [],
+  root: {
+    value: "AB10000001", method: "DETERMINISTIC", derivation: null, source_kind: "dom",
+    source: { kind: "dom", snapshot_id: SNAP, selector: "table#results tbody tr:nth-child(1) td.c-claim-v2", rung: 3 },
+    confidence: null, calibration_state: null, calibration_basis: null, renders_as_fact: true,
+    observed_at: "2026-09-24T04:12:00Z", caveat: null, parents: [],
+  },
+};
 
-test('a held run previews its data before any decision', async ({ page }) => {
-  await page.goto('/quarantine');
-  await expect(page.getByTestId('held-preview').first()).toBeVisible();
-});
-```
-
-```typescript
-// web/e2e/quality.spec.ts
-test('every alert states its threshold and why that threshold', async ({ page }) => {
-  await page.goto('/quality');
-  for (const row of await page.getByTestId('quality-row').all()) {
-    await expect(row.getByTestId('threshold')).not.toBeEmpty();
-    await expect(row.getByTestId('threshold-reason')).not.toBeEmpty();
-  }
-});
-```
-
-- [ ] **Step 2: Run them and watch them fail**
-
-Run: `cd web && npx playwright test e2e/quarantine.spec.ts e2e/quality.spec.ts`
-Expected: FAIL.
-
-- [ ] **Step 3: Build the three screens at the v1 scope above.**
-
-- [ ] **Step 4: Run them and make sure they pass**
-
-Run: `cd web && npx playwright test e2e/quarantine.spec.ts e2e/quality.spec.ts`
-Expected: PASS, 4 tests.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add web/app/quarantine web/app/quality web/app/specs web/e2e
-git commit -m "feat(web): quarantine, data quality and read-only spec view"
-```
-
----
-
-### Task 39: Accessibility and full E2E
-
-**Files:**
-- Create: `web/e2e/a11y.spec.ts`, `web/e2e/keyboard.spec.ts`
-- Create: `web/e2e/fixtures/` — E2E fixtures, kept separate from `selector_drift/browser/`'s own
-- Modify: `.github/workflows/ci.yml`
-
-**Interfaces:**
-- Consumes: every screen.
-- Produces: axe zero serious/critical on all six routes; every flow reachable by keyboard.
-
-- [ ] **Step 1: Write the failing tests**
-
-```typescript
-// web/e2e/a11y.spec.ts
-import AxeBuilder from '@axe-core/playwright';
-
-const ROUTES = ['/targets', '/runs', '/heals/1', '/quarantine', '/quality', '/specs/testbench'];
-
-for (const route of ROUTES) {
-  test(`${route} has no serious or critical axe violations`, async ({ page }) => {
-    await page.goto(route);
-    const r = await new AxeBuilder({ page }).analyze();
-    expect(r.violations.filter(v => ['serious', 'critical'].includes(v.impact!))).toEqual([]);
+describe("toRailPayload", () => {
+  it("narrows the generated payload to bok-ui's types without changing it", () => {
+    const p = toRailPayload(API_RAIL);
+    expect(p.root.method).toBe("DETERMINISTIC");
+    expect(p.root.value).toBe("AB10000001");
+    expect(p.root.confidence).toBeNull();
   });
+
+  it("refuses a method bok-ui does not know, instead of rendering it as a fact", () => {
+    expect(() => toRailPayload({ ...API_RAIL, root: { ...API_RAIL.root, method: "GUESSED" } })).toThrow(/unknown method "GUESSED"/);
+  });
+
+  it("keeps a non-scalar value readable", () => {
+    expect(toRailPayload({ ...API_RAIL, root: { ...API_RAIL.root, value: { a: 1 } } }).root.value).toBe('{"a":1}');
+  });
+
+  it("finds the DomSource snapshot id", () => {
+    expect(snapshotIdOf(toRailPayload(API_RAIL))).toBe(SNAP);
+  });
+});
+```
+
+```tsx
+// web/components/VerdictTable.test.tsx
+import { render, screen, within } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import type { Verdict } from "@/lib/types";
+import { VerdictTable } from "./VerdictTable";
+
+const V: Verdict[] = [
+  { check: "Format", outcome: "PASS", threshold: "^[A-Z]{2}\\d{8}$", observed: "20 of 20", reason: "Shape matches." },
+  { check: "RowKeyContinuity", outcome: "FAIL", threshold: ">= 0.95", observed: "0.00", reason: "Adjacent column." },
+  { check: "Structure", outcome: "PASS", threshold: null, observed: null, reason: "Selector matched one node." },
+  { check: "CrossFamilyConfirmation", outcome: "INSUFFICIENT", threshold: "another family agrees", observed: "none", reason: "Nothing independent agrees." },
+];
+
+describe("VerdictTable", () => {
+  it("sorts failing and insufficient checks first, keeping the rest in order", () => {
+    render(<VerdictTable verdicts={V} caption="Gate" />);
+    const checks = screen.getAllByTestId("verdict-row").map((r) => within(r).getByRole("rowheader").textContent);
+    expect(checks).toEqual(["RowKeyContinuity", "CrossFamilyConfirmation", "Format", "Structure"]);
+  });
+
+  it("states a threshold and a reason on every row, never a bare badge", () => {
+    render(<VerdictTable verdicts={V} caption="Gate" />);
+    for (const row of screen.getAllByTestId("verdict-row")) {
+      expect(within(row).getByTestId("threshold").textContent).not.toBe("");
+      expect(within(row).getByTestId("reason").textContent).not.toBe("");
+    }
+    expect(screen.getByText("no threshold: a structural check")).toBeInTheDocument();
+  });
+
+  it("gives every outcome a glyph and a text label", () => {
+    render(<VerdictTable verdicts={V} caption="Gate" />);
+    expect(screen.getByText("Fail").closest("[data-verdict-outcome]")).toHaveTextContent("✕ Fail");
+    expect(screen.getByText("Insufficient evidence").closest("[data-verdict-outcome]")).toHaveTextContent("◌ Insufficient evidence");
+    expect(screen.getAllByText("Pass")[0]?.closest("[data-verdict-outcome]")).toHaveTextContent("✓ Pass");
+  });
+
+  it("says so when a heal recorded no checks", () => {
+    render(<VerdictTable verdicts={[]} caption="Gate" />);
+    expect(screen.getByText("No checks were recorded.")).toBeInTheDocument();
+  });
+});
+```
+
+```tsx
+// web/components/ClaimValue.test.tsx
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it } from "vitest";
+import type { ApiRailPayload } from "@/lib/types";
+import { ClaimValue } from "./ClaimValue";
+import { RailRoot } from "./RailRoot";
+
+const SNAP = "3f9a1c2e7b4d5a6f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1f";
+const RAIL: ApiRailPayload = {
+  depth: 1,
+  inherited_caveats: [],
+  root: {
+    value: "AB10000001", method: "DETERMINISTIC", derivation: null, source_kind: "dom",
+    source: { kind: "dom", snapshot_id: SNAP, selector: "td.c-claim-v2", rung: 3 },
+    confidence: null, calibration_state: null, calibration_basis: null, renders_as_fact: true,
+    observed_at: "2026-09-24T04:12:00Z", caveat: null, parents: [],
+  },
+};
+
+async function openRail() {
+  render(<RailRoot><ClaimValue value="AB10000001" rail={RAIL} evidenceHref="#evidence-after" /></RailRoot>);
+  await userEvent.click(within(screen.getByTestId("claim-value")).getByRole("button"));
+  return screen.getByRole("complementary", { name: "Provenance" });
+}
+
+describe("ClaimValue", () => {
+  it("renders the value as a claim that opens the single rail", async () => {
+    const rail = await openRail();
+    expect(within(rail).getByTestId("provenance-marker")).toHaveTextContent("DETERMINISTIC");
+  });
+
+  it("links the snapshot to where this value's evidence is shown", async () => {
+    const rail = await openRail();
+    const source = within(rail).getByTestId("source");
+    expect(source).toHaveTextContent(`rung 3 · snapshot ${SNAP.slice(0, 12)} · td.c-claim-v2`);
+    expect(within(source).getByRole("link")).toHaveAttribute("href", "#evidence-after");
+  });
+
+  it("shows no confidence for a deterministic value", async () => {
+    const rail = await openRail();
+    expect(within(rail).queryByTestId("confidence")).toBeNull();
+  });
+});
+```
+
+Add to `web/lib/format.test.ts` (inside the existing `describe`):
+
+```ts
+  it("turns a run key into a stable anchor id", () => {
+    expect(runAnchor("testbench:1:2026-09-26")).toBe("run-testbench-1-2026-09-26");
+  });
+```
+
+(and add `runAnchor` to that file's import list).
+
+Run: `cd web && npx vitest run lib components`
+Expected: FAIL — `Failed to resolve import "./rail"`, `"./VerdictTable"`, `"./ClaimValue"`; `runAnchor is not a function`.
+
+- [ ] **Step 2: Write `rail.ts`, `runAnchor`, `RailRoot`, `ClaimValue`, `VerdictTable`**
+
+```ts
+// web/lib/rail.ts
+import type { CalibrationState, Derivation, Method, RailNode, RailPayload } from "bok-ui";
+import type { ApiRailNode, ApiRailPayload } from "./types";
+
+const METHODS: readonly Method[] = ["DETERMINISTIC", "MODEL", "HUMAN", "DERIVED"];
+const DERIVATIONS: readonly Derivation[] = ["SCHEMA", "DESCRIPTION", "PROBE", "ARTIFACT"];
+const CALIBRATION: readonly CalibrationState[] = ["UNCALIBRATED", "CALIBRATED"];
+
+// bok_core's RailNode types these as plain `str`, so the generated TypeScript is `string`.
+// Narrow them here, once, and refuse anything unknown rather than render it as a fact.
+function oneOf<T extends string>(allowed: readonly T[], value: unknown, what: string): T {
+  const hit = allowed.find((a) => a === value);
+  if (hit === undefined) throw new Error(`rail payload: unknown ${what} ${JSON.stringify(value)}`);
+  return hit;
+}
+
+function scalar(v: unknown): RailNode["value"] {
+  if (v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean") return v;
+  return JSON.stringify(v);
+}
+
+export function toRailNode(n: ApiRailNode): RailNode {
+  return {
+    value: scalar(n.value),
+    method: oneOf(METHODS, n.method, "method"),
+    derivation: n.derivation === null ? null : oneOf(DERIVATIONS, n.derivation, "derivation"),
+    source_kind: n.source_kind,
+    source: n.source,
+    confidence: n.confidence,
+    calibration_state: n.calibration_state === null ? null : oneOf(CALIBRATION, n.calibration_state, "calibration state"),
+    calibration_basis: n.calibration_basis,
+    renders_as_fact: n.renders_as_fact,
+    observed_at: n.observed_at,
+    caveat: n.caveat,
+    parents: n.parents.map(toRailNode),
+  };
+}
+
+export function toRailPayload(p: ApiRailPayload): RailPayload {
+  return { root: toRailNode(p.root), depth: p.depth, inherited_caveats: p.inherited_caveats };
+}
+
+export function snapshotIdOf(p: RailPayload): string | null {
+  const id = p.root.source.snapshot_id;
+  return p.root.source_kind === "dom" && typeof id === "string" ? id : null;
 }
 ```
 
-```typescript
-// web/e2e/keyboard.spec.ts
-test('quarantine promote is reachable and operable by keyboard alone', async ({ page }) => {
-  await page.goto('/quarantine');
-  // L3: bounded. An unbounded Tab loop hangs to the suite timeout instead of failing.
-  let found = false;
-  for (let i = 0; i < 60 && !found; i++) {
-    await page.keyboard.press('Tab');
-    found = await page.evaluate(() => !!document.activeElement?.textContent?.includes('Promote'));
+Append to `web/lib/format.ts`:
+
+```ts
+/** A DOM id for a run's card, e.g. on /quarantine. */
+export function runAnchor(runKey: string): string {
+  return `run-${runKey.replace(/[^a-z0-9-]/gi, "-")}`;
+}
+```
+
+```tsx
+// web/components/RailRoot.tsx
+"use client";
+
+import { ProvenanceRailProvider } from "bok-ui/client";
+import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+
+const SnapshotLinks = createContext<Map<string, string> | null>(null);
+
+export function useSnapshotLinks(): Map<string, string> {
+  const links = useContext(SnapshotLinks);
+  if (links === null) throw new Error("ClaimValue must render inside <RailRoot>");
+  return links;
+}
+
+/** The app's one rail. DomSource.snapshot_id is an evidence bundle's SHA-256 and no API route
+ *  resolves it, so every ClaimValue registers where its evidence is on screen. A parent claim's
+ *  snapshot that no value on screen registered falls back to the run list. */
+export function RailRoot({ children }: { children: ReactNode }) {
+  const [links] = useState(() => new Map<string, string>());
+  const hrefForSnapshot = useCallback((id: string) => links.get(id) ?? "/runs", [links]);
+  return (
+    <SnapshotLinks.Provider value={links}>
+      <ProvenanceRailProvider hrefForSnapshot={hrefForSnapshot}>{children}</ProvenanceRailProvider>
+    </SnapshotLinks.Provider>
+  );
+}
+```
+
+```tsx
+// web/components/ClaimValue.tsx
+"use client";
+
+import { Claim } from "bok-ui/client";
+import { useEffect, useMemo } from "react";
+import { snapshotIdOf, toRailPayload } from "@/lib/rail";
+import type { ApiRailPayload } from "@/lib/types";
+import { useSnapshotLinks } from "./RailRoot";
+
+export interface ClaimValueProps {
+  value: string;
+  rail: ApiRailPayload;
+  /** Where this value's evidence is on screen or one click away, e.g. "#evidence-after". */
+  evidenceHref: string;
+}
+
+/** Every extracted value, everywhere (spec section 2): a thin wrapper over bok-ui's Claim. */
+export function ClaimValue({ value, rail, evidenceHref }: ClaimValueProps) {
+  const payload = useMemo(() => toRailPayload(rail), [rail]);
+  const links = useSnapshotLinks();
+  const snapshot = snapshotIdOf(payload);
+  useEffect(() => {
+    if (snapshot !== null) links.set(snapshot, evidenceHref);
+  }, [links, snapshot, evidenceHref]);
+  return (
+    <span className="sd-claim" data-testid="claim-value">
+      <Claim payload={payload}>{value.trim() === "" ? "(empty)" : value}</Claim>
+    </span>
+  );
+}
+```
+
+```tsx
+// web/components/VerdictTable.tsx
+import type { Verdict } from "@/lib/types";
+
+const OUTCOME = {
+  FAIL: { glyph: "✕", label: "Fail", rank: 0 },
+  INSUFFICIENT: { glyph: "◌", label: "Insufficient evidence", rank: 1 },
+  PASS: { glyph: "✓", label: "Pass", rank: 2 },
+} as const;
+
+export function sortVerdicts(vs: readonly Verdict[]): Verdict[] {
+  return vs
+    .map((v, i) => ({ v, i }))
+    .sort((a, b) => OUTCOME[a.v.outcome].rank - OUTCOME[b.v.outcome].rank || a.i - b.i)
+    .map(({ v }) => v);
+}
+
+/** One row per Verdict: check, outcome (glyph + label), observed, threshold, reason. No bare
+ *  badge is possible -- the API sends no boolean that means "passed" (API contract rule 3). */
+export function VerdictTable({ verdicts, caption }: { verdicts: readonly Verdict[]; caption: string }) {
+  if (verdicts.length === 0) return <p className="sd-muted">No checks were recorded.</p>;
+  return (
+    <table className="sd-table sd-verdicts">
+      <caption>{caption}</caption>
+      <thead>
+        <tr><th scope="col">Check</th><th scope="col">Outcome</th><th scope="col">Observed</th><th scope="col">Threshold</th><th scope="col">Reason</th></tr>
+      </thead>
+      <tbody>
+        {sortVerdicts(verdicts).map((v, i) => {
+          const o = OUTCOME[v.outcome];
+          return (
+            <tr key={`${v.check}-${i}`} data-testid="verdict-row" data-outcome={v.outcome}>
+              <th scope="row" data-label="Check">{v.check}</th>
+              <td data-label="Outcome">
+                <span className="sd-outcome" data-verdict-outcome={v.outcome}><span aria-hidden="true">{o.glyph}</span> {o.label}</span>
+              </td>
+              <td data-label="Observed" data-testid="observed">{v.observed ?? "not recorded"}</td>
+              <td data-label="Threshold" data-testid="threshold">{v.threshold ?? "no threshold: a structural check"}</td>
+              <td data-label="Reason" data-testid="reason">{v.reason}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+```
+
+Replace `web/app/(app)/layout.tsx`:
+
+```tsx
+import type { ReactNode } from "react";
+import { Nav } from "@/components/Nav";
+import { RailRoot } from "@/components/RailRoot";
+
+export default function AppLayout({ children }: { children: ReactNode }) {
+  return (
+    <RailRoot>
+      <div className="sd-shell">
+        <Nav />
+        <main id="main" className="sd-main" tabIndex={-1}>{children}</main>
+      </div>
+    </RailRoot>
+  );
+}
+```
+
+Run: `cd web && npx vitest run lib components`
+Expected: PASS, 42 tests — `lib`: 13 safeNext + 11 format + 4 window + 4 rail = 32; `components`: 3 StatFigure + 4 VerdictTable + 3 ClaimValue = 10.
+
+- [ ] **Step 3: Write the failing E2E tests**
+
+```ts
+// web/e2e/heallog.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+test("every verdict renders its threshold and reason, never a bare badge", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  const rows = page.getByTestId("verdict-row");
+  expect(await rows.count()).toBeGreaterThan(0);
+  for (const row of await rows.all()) {
+    await expect(row.getByTestId("threshold")).not.toBeEmpty();
+    await expect(row.getByTestId("reason")).not.toBeEmpty();
   }
-  expect(found, 'Promote never received focus within 60 tab stops').toBe(true);
-  await page.keyboard.press('Enter');
-  await expect(page.getByRole('dialog')).toBeVisible();
+});
+
+test("the outline animation is disabled under reduced motion", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  for (const side of ["before", "after"]) {
+    const outline = page.locator(`#evidence-${side} [data-bok-outline]`);
+    await expect(outline).toHaveCSS("animation-duration", "0s");
+    await expect(page.locator(`#evidence-${side} figure`)).toHaveAttribute("data-outline-state", "drawn");
+  }
+});
+
+test("the outlines draw before, then after, and both finish drawn", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await expect(page.locator("#evidence-before figure")).toHaveAttribute("data-outline-state", "drawn");
+  await expect(page.locator("#evidence-after figure")).toHaveAttribute("data-outline-state", "drawn");
+  const states = await page.evaluate(() => (window as Window & { __sdOutline?: string[] }).__sdOutline ?? []);
+  expect(states.indexOf("before:drawing")).toBeLessThan(states.indexOf("after:drawing"));
+});
+
+test("the confirming rung is named", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await expect(page.getByTestId("confirmer")).toContainText(/rung [234] \(/);
+});
+
+test("a non-reproducible heal says so, in words, at the top", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.nonReproducible}`);
+  await expect(page.getByTestId("replay-status")).toHaveText("Not reproducible from stored evidence");
+  await expect(page.getByTestId("replay-notice")).toContainText(
+    "This heal did not reproduce from stored evidence. It is counted as non-reproducible in the published log.",
+  );
+});
+
+test("the heal screen renders a partial state for a corrupted evidence pane and still shows verdicts", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.corrupted}`);
+  const after = page.locator("#evidence-after");
+  await expect(after.getByRole("region", { name: "Partially available" })).toContainText(
+    "after capture did not load — evidence corrupted (hash mismatch); the file is not served",
+  );
+  await expect(page.locator("#evidence-before img")).toBeVisible();
+  expect(await page.getByTestId("verdict-row").count()).toBeGreaterThan(0);
+});
+
+test("a first heal says the before capture does not exist", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.firstHeal}`);
+  await expect(page.locator("#evidence-before")).toContainText("no earlier accepted run exists for this target");
+  await expect(page.locator("#evidence-after img")).toBeVisible();
+});
+
+test("the DOM diff marks additions and removals with glyphs", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await expect(page.locator("[data-bok-diff] ins").first()).toContainText("+");
+  await expect(page.locator("[data-bok-diff] del").first()).toContainText("−");
 });
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
-
-Run: `cd web && npx playwright test e2e/a11y.spec.ts e2e/keyboard.spec.ts`
-Expected: FAIL on at least one route.
-
-- [ ] **Step 3: Fix every violation.**
-
-- [ ] **Step 4: Run them, and wire axe into CI**
-
-Run: `cd web && npx playwright test`
-Expected: PASS, 7 tests. CI job `axe` added to `.github/workflows/ci.yml`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add web/e2e .github/workflows/ci.yml
-git commit -m "test(web): axe and keyboard E2E in CI"
-```
-
----
-
-### Task 39A: The cross-cutting UI requirements `00` mandates — R17 (M8, M11)
-
-**Files:**
-- Create: `web/components/ClaimValue.tsx` (wraps `bok-ui` `Claim` + `ProvenanceRail`), `web/components/CommandPalette.tsx`
-- Create: `web/app/print.css`
-- Modify: `web/app/heals/[id]/page.tsx`, `web/app/quality/page.tsx`, `web/app/quarantine/page.tsx`
-- Test: `web/e2e/provenance.spec.ts`, `web/e2e/print.spec.ts`, `web/e2e/responsive.spec.ts`
-
-**Why this task exists.** Five requirements from `00` §5 apply to every product in the programme and
-none of them appears anywhere in Tasks 35–39 (verified: `grep -ic` for `ProvenanceRail`,
-`provenance rail`, `cmdk`, `375` all return 0). Design §10 makes an explicit and well-argued scope
-call on screens 2 and 5; it makes none on these, so they read as forgotten rather than cut — and one
-of them is the programme's signature element.
-
-| Requirement | Source | Why it is not optional here |
-|---|---|---|
-| **Provenance rail** on every rendered figure | `00` §5.3: *"the signature element, present in all four products, and the reason a buyer remembers which vendor you were"*; contract §7 lists `Claim` + `ProvenanceRail` among this repo's consumed components | Task 27 turns every extracted value into a `Claim` with a `DomSource` carrying `snapshot_id`, and no screen renders one. Clicking an extracted value and watching it unfold to *the DOM snapshot and the rung that produced it* is this product's version of the demo `00` §5.3 describes |
-| **Print stylesheet** | `00` §5.5: *"for every report view"* | The heal log **is** the report view. It gets printed and forwarded to auditors; that is the buyer behaviour `00` §5.1 designs the whole system around |
-| **`cmdk` command palette** | `00` §5.5: *"full keyboard operation including a `cmdk` command palette"* | — |
-| **Responsive to 375px** | `00` §5.5 | — |
-| **Density modes** | `00` §5.2, contract §6.1 ships `comfortable`/`compact` in v0.1 | Free from `bok-ui`; needs wiring only |
-
-- [ ] **Step 1: Write the failing tests**
-
-```typescript
+```ts
 // web/e2e/provenance.spec.ts
-test('an extracted value opens its provenance chain', async ({ page }) => {
-  await page.goto('/heals/1');
-  await page.getByTestId('claim-value').first().click();
-  const rail = page.getByTestId('provenance-rail');
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+test("an extracted value opens its provenance chain", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await page.getByTestId("claim-value").first().click();
+  const rail = page.getByRole("complementary", { name: "Provenance" });
   await expect(rail).toBeVisible();
-  await expect(rail).toContainText('DETERMINISTIC');
-  await expect(rail.getByTestId('source')).toContainText(/rung [1-4]/);
-  await expect(rail.getByTestId('source')).toContainText('snapshot');   // DomSource
+  await expect(rail).toContainText("DETERMINISTIC");
+  await expect(rail.getByTestId("source")).toContainText(/rung [1-4] · snapshot [0-9a-f]{12} · /);
 });
 
-test('a deterministic claim shows no confidence figure at all', async ({ page }) => {
+test("a deterministic claim shows no confidence figure at all", async ({ page }) => {
   // Invariant I3 + design 5.4: there is no confidence score in this product,
   // so the UI must not imply one exists but is hidden.
-  await page.goto('/heals/1');
-  await page.getByTestId('claim-value').first().click();
-  await expect(page.getByTestId('confidence')).toHaveCount(0);
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await page.getByTestId("claim-value").first().click();
+  await expect(page.getByTestId("confidence")).toHaveCount(0);
 });
 ```
 
-```typescript
-// web/e2e/print.spec.ts
-test('the heal log prints without the chrome and keeps the verdict table', async ({ page }) => {
-  await page.goto('/heals/1');
-  await page.emulateMedia({ media: 'print' });
-  await expect(page.getByTestId('nav')).toBeHidden();
-  await expect(page.getByTestId('verdict-row').first()).toBeVisible();
+Run: `cd web && npx playwright test e2e/heallog.spec.ts e2e/provenance.spec.ts`
+Expected: FAIL — `/heals/<id>` is a 404.
+
+- [ ] **Step 4: Build the screen**
+
+```tsx
+// web/components/HealHeader.tsx
+import Link from "next/link";
+import { utcStamp } from "@/lib/format";
+import type { DecisionView, HealView } from "@/lib/types";
+import styles from "./HealHeader.module.css";
+
+const REPLAY = {
+  reproduced: "Reproduced from stored evidence",
+  not_reproducible: "Not reproducible from stored evidence",
+  not_yet_replayed: "Not yet replayed",
+  corrupted: "Cannot replay: evidence corrupted",
+} as const;
+
+function DecisionBadge({ d }: { d: DecisionView }) {
+  switch (d.resolved_as) {
+    case null:
+      return <span className={styles.badge} data-decision="pending"><span aria-hidden="true">⏸</span> Quarantined, awaiting a decision</span>;
+    case "accepted":
+      return <span className={styles.badge} data-decision="accepted"><span aria-hidden="true">✓</span> Accepted by the gate</span>;
+    case "promoted":
+      return <span className={styles.badge} data-decision="promoted"><span aria-hidden="true">✓</span> Promoted by {d.actor}</span>;
+    case "discarded":
+      return <span className={styles.badge} data-decision="discarded"><span aria-hidden="true">✕</span> Discarded by {d.actor}</span>;
+  }
+}
+
+/** The design 5.4 sentence as the headline, then the decision and the replay status in words. */
+export function HealHeader({ heal: h }: { heal: HealView }) {
+  return (
+    <header className={styles.head}>
+      <p className={styles.kicker}>
+        <span className={styles.healMark} data-heal-state="healed"><span aria-hidden="true">↻</span> Heal #{h.id}</span>
+        {" · "}{h.target} · field <code>{h.field}</code> · broke {utcStamp(h.broke_at)}
+      </p>
+      <h1 id="heal-summary" className={styles.summary}>{h.summary}</h1>
+      <dl className="sd-facts">
+        <div><dt>Decision</dt><dd data-testid="decision-badge"><DecisionBadge d={h.decision} /></dd></div>
+        <div><dt>Replay</dt><dd data-testid="replay-status">{REPLAY[h.replay_status]}</dd></div>
+        <div><dt>Run</dt><dd><Link href={`/runs/${encodeURIComponent(h.run_key)}`}>{h.run_key}</Link></dd></div>
+        <div><dt>Selector</dt><dd><code>{h.selector_before ?? "none cached"}</code> → <code>{h.selector_after}</code></dd></div>
+      </dl>
+    </header>
+  );
+}
+```
+
+`web/components/HealHeader.module.css`:
+
+```css
+.head { margin-bottom: calc(var(--bok-space) * 6); }
+.kicker { margin: 0 0 calc(var(--bok-space) * 2); font-size: 0.8125rem; color: var(--bok-neutral-10); overflow-wrap: anywhere; }
+.healMark { color: var(--bok-accent-selector-drift-ink); font-weight: 600; }
+.summary { font-size: 1.5rem; max-width: 70ch; margin: 0; }
+.badge { display: inline-flex; gap: 0.35em; align-items: baseline; }
+.badge[data-decision="pending"] { color: var(--bok-medium-ink); }
+.badge[data-decision="discarded"] { color: var(--bok-critical-ink); }
+.badge[data-decision="accepted"], .badge[data-decision="promoted"] { color: var(--bok-verified-ink); }
+```
+
+```tsx
+// web/components/BeforeAfter.tsx
+"use client";
+
+import { DomAdapter, EvidencePane, PartialFailureState, type DomRange, type OutlineState } from "bok-ui";
+import { useEffect, useState } from "react";
+import { utcStamp } from "@/lib/format";
+import type { EvidenceSideView } from "@/lib/types";
+import styles from "./BeforeAfter.module.css";
+
+export interface PaneInput {
+  side: "before" | "after";
+  view: EvidenceSideView;
+  html: string | null;
+  alt: string;
+}
+
+const WHY = {
+  not_captured: "no earlier accepted run exists for this target, so there is no before capture — this is its first heal",
+  corrupted: "evidence corrupted (hash mismatch); the file is not served",
+  expired: "deleted under the target's evidence-retention policy",
+} as const;
+
+type Sides = { before: OutlineState; after: OutlineState };
+
+function outlineMs(): number {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue("--bok-evidence-outline-duration").trim();
+  const n = Number.parseFloat(raw);
+  if (!Number.isFinite(n)) return 220;
+  return raw.endsWith("ms") ? n : n * 1000;
+}
+
+function record(step: string): void {
+  // Read by the E2E suite to assert the before-then-after order; harmless in production.
+  const w = window as Window & { __sdOutline?: string[] };
+  (w.__sdOutline ??= []).push(step);
+}
+
+/** The product's one orchestrated motion: "before" draws, then "after" draws, 220 ms each. */
+export function BeforeAfter({ field, before, after }: { field: string; before: PaneInput; after: PaneInput }) {
+  const [states, setStates] = useState<Sides>({ before: "idle", after: "idle" });
+
+  useEffect(() => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setStates({ before: "drawn", after: "drawn" });
+      return;
+    }
+    const ms = outlineMs();
+    const lead = before.view.available ? ms : 0;
+    setStates({ before: before.view.available ? "drawing" : "drawn", after: "idle" });
+    record("before:drawing");
+    const t1 = window.setTimeout(() => {
+      setStates({ before: "drawn", after: "drawing" });
+      record("after:drawing");
+    }, lead);
+    const t2 = window.setTimeout(() => setStates({ before: "drawn", after: "drawn" }), lead + ms);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, [before.view.available]);
+
+  return (
+    <div className={styles.pair} data-heal-state="healed">
+      <Pane input={before} other={after} field={field} outlineState={states.before} />
+      <Pane input={after} other={before} field={field} outlineState={states.after} />
+    </div>
+  );
+}
+
+function Pane({ input, other, field, outlineState }: { input: PaneInput; other: PaneInput; field: string; outlineState: OutlineState }) {
+  const { side, view, html, alt } = input;
+  const title = side === "before" ? "Before — the last accepted run" : "After — this run";
+  const box = view.boxes[field];
+  const ranges: DomRange[] = box !== undefined ? [{ id: field, label: field, bbox: box }] : [];
+  return (
+    <section id={`evidence-${side}`} className={styles.pane} aria-labelledby={`evidence-${side}-h`}>
+      <h3 id={`evidence-${side}-h`}>{title}</h3>
+      {view.available && view.png_url !== null && view.viewport !== null ? (
+        <>
+          <EvidencePane
+            adapter={DomAdapter}
+            source={{ screenshotUrl: view.png_url, alt, viewport: view.viewport, html: html ?? undefined }}
+            ranges={ranges}
+            outlineState={outlineState}
+          />
+          <p className={styles.caption}>
+            Captured {view.captured_at !== null ? utcStamp(view.captured_at) : "at an unrecorded time"} · outline recorded at
+            capture, not recomputed{box === undefined ? " · no box was recorded for this field" : ""} ·{" "}
+            <a href={view.png_url} data-evidence-link>screenshot file</a>
+          </p>
+        </>
+      ) : (
+        <PartialFailureState
+          succeeded={[...(other.view.available ? [`${other.side} capture`] : []), "DOM diff", "cascade trace", "verdicts"]}
+          failed={[{ what: `${side} capture`, why: view.unavailable_reason !== null ? WHY[view.unavailable_reason] : "not recorded" }]}
+        />
+      )}
+    </section>
+  );
+}
+```
+
+`web/components/BeforeAfter.module.css`:
+
+```css
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: calc(var(--bok-space) * 4); }
+.pane { min-width: 0; }
+.pane h3 { font-size: 1rem; margin: 0 0 calc(var(--bok-space) * 2); }
+.caption { font-size: 0.75rem; color: var(--bok-neutral-10); margin: var(--bok-space) 0 0; overflow-wrap: anywhere; }
+@media (max-width: 899.98px) { .pair { grid-template-columns: 1fr; } }
+```
+
+```tsx
+// web/app/(app)/heals/[id]/page.tsx
+import { DiffView, PartialFailureState, SeverityBadge } from "bok-ui";
+import type { Metadata } from "next";
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { BeforeAfter, type PaneInput } from "@/components/BeforeAfter";
+import { ClaimValue } from "@/components/ClaimValue";
+import { HealHeader } from "@/components/HealHeader";
+import { ProblemState } from "@/components/ProblemState";
+import { VerdictTable } from "@/components/VerdictTable";
+import { load } from "@/lib/api";
+import { confirmerLabel, familyLabel, runAnchor, utcStamp } from "@/lib/format";
+import type { EvidenceSideView, HealView } from "@/lib/types";
+
+export const metadata: Metadata = { title: "Heal" };
+
+const DOM_LIMIT = 200_000; // the pane truncates too; never ship megabytes into the RSC payload
+
+async function domText(id: number, side: "before" | "after", view: EvidenceSideView): Promise<string | null> {
+  if (!view.available || view.dom_url === null) return null;
+  const r = await load((c) =>
+    c.GET("/api/v1/heals/{id}/evidence/{side}/{kind}", { params: { path: { id, side, kind: "dom" } }, parseAs: "text" }),
+  );
+  return r.ok ? r.data.slice(0, DOM_LIMIT) : null;
+}
+
+function Decision({ heal: h }: { heal: HealView }) {
+  const d = h.decision;
+  if (d.resolved_as === null) {
+    return (
+      <p>
+        Still quarantined, awaiting a decision.{" "}
+        <Link href={`/quarantine#${runAnchor(h.run_key)}`}>Decide on the quarantine screen</Link>.
+      </p>
+    );
+  }
+  if (d.resolved_as === "accepted") {
+    return <p>Accepted by the validation gate with no human decision{d.at !== null ? `, ${utcStamp(d.at)}` : ""}.</p>;
+  }
+  return (
+    <dl className="sd-facts">
+      <div><dt>Resolved as</dt><dd>{d.resolved_as}</dd></div>
+      <div><dt>By</dt><dd>{d.actor}</dd></div>
+      <div><dt>At</dt><dd>{d.at !== null ? utcStamp(d.at) : "not recorded"}</dd></div>
+      <div><dt>Reason</dt><dd>{d.reason}</dd></div>
+    </dl>
+  );
+}
+
+export default async function HealPage({ params }: { params: Promise<{ id: string }> }) {
+  const raw = (await params).id;
+  const id = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(id) || id <= 0) notFound();
+
+  const [heal, diff] = await Promise.all([
+    load((c) => c.GET("/api/v1/heals/{id}", { params: { path: { id } } })),
+    load((c) => c.GET("/api/v1/heals/{id}/diff", { params: { path: { id } } })),
+  ]);
+  if (!heal.ok) {
+    if (heal.problem.status === 404) notFound();
+    return <ProblemState problem={heal.problem} />;
+  }
+  const h = heal.data;
+  const [beforeHtml, afterHtml] = await Promise.all([domText(id, "before", h.before), domText(id, "after", h.after)]);
+  const pane = (side: "before" | "after", view: EvidenceSideView, html: string | null): PaneInput => ({
+    side,
+    view,
+    html,
+    alt: side === "before"
+      ? `The ${h.target} results page on the last accepted run, before the selector broke`
+      : `The ${h.target} results page on run ${h.run_key}, after the heal`,
+  });
+
+  return (
+    <article className="sd-heal" aria-labelledby="heal-summary">
+      {h.replay_status === "not_reproducible" && (
+        <p className="sd-notice" data-testid="replay-notice">
+          <SeverityBadge severity="HIGH" /> This heal did not reproduce from stored evidence. It is counted as
+          non-reproducible in the published log.
+        </p>
+      )}
+      <HealHeader heal={h} />
+
+      <section className="sd-section" aria-labelledby="evidence-h">
+        <h2 id="evidence-h">Before and after</h2>
+        <BeforeAfter field={h.field} before={pane("before", h.before, beforeHtml)} after={pane("after", h.after, afterHtml)} />
+      </section>
+
+      <section className="sd-section" aria-labelledby="diff-h">
+        <h2 id="diff-h">What changed in the markup</h2>
+        {diff.ok ? (
+          <DiffView spans={diff.data} />
+        ) : (
+          <PartialFailureState succeeded={["heal record", "evidence", "verdicts"]} failed={[{ what: "DOM diff", why: diff.problem.title }]} />
+        )}
+      </section>
+
+      <section className="sd-section" aria-labelledby="trace-h">
+        <h2 id="trace-h">Cascade trace</h2>
+        <table className="sd-table">
+          <caption className="bok-visually-hidden">Every rung tried, in order</caption>
+          <thead><tr><th scope="col">Rung</th><th scope="col">Family</th><th scope="col">Outcome</th><th scope="col">Time</th><th scope="col">Role</th></tr></thead>
+          <tbody>
+            {h.trace.map((t) => (
+              <tr key={t.rung}>
+                <th scope="row" data-label="Rung">rung {t.rung}</th>
+                <td data-label="Family">{familyLabel(t.family)}</td>
+                <td data-label="Outcome">{t.outcome.replace(/_/g, " ")}</td>
+                <td data-label="Time" data-bok-numeric>{t.ms} ms</td>
+                <td data-label="Role">
+                  {t.rung === h.winning_rung ? "winner" : t.rung === h.confirmer_rung ? "confirmer" : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p data-testid="confirmer">
+          {h.confirmer_family === null
+            ? "No cross-family confirmer resolved."
+            : `Independently confirmed by ${confirmerLabel(h.confirmer_rung, h.confirmer_family)}.`}
+        </p>
+      </section>
+
+      <section className="sd-section" aria-labelledby="verdicts-h">
+        <h2 id="verdicts-h">Validation gate</h2>
+        <VerdictTable verdicts={h.verdicts} caption="Every check the gate ran on this heal" />
+      </section>
+
+      <section className="sd-section" aria-labelledby="samples-h">
+        <h2 id="samples-h">Healed values</h2>
+        {h.sample_values.length === 0 ? (
+          <p className="sd-muted">No values were extracted with the healed selector.</p>
+        ) : (
+          <table className="sd-table">
+            <caption className="bok-visually-hidden">The first ten healed values; each opens its provenance</caption>
+            <thead><tr><th scope="col">Row</th><th scope="col">{h.field}</th></tr></thead>
+            <tbody>
+              {h.sample_values.map((v, i) => (
+                <tr key={i}>
+                  <th scope="row" data-label="Row">{Object.entries(v.row_key).map(([k, val]) => `${k} ${val}`).join(", ")}</th>
+                  <td data-label={h.field}><ClaimValue value={v.value} rail={v.rail} evidenceHref="#evidence-after" /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="sd-section" aria-labelledby="decision-h">
+        <h2 id="decision-h">Decision</h2>
+        <Decision heal={h} />
+      </section>
+    </article>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/heals/[id]/loading.tsx
+import { Skeleton } from "bok-ui";
+
+export default function Loading() {
+  return (
+    <>
+      <Skeleton shape="text" rows={2} />
+      <Skeleton shape="figure" />
+      <Skeleton shape="table" rows={5} />
+    </>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/heals/[id]/error.tsx
+"use client";
+
+export { RouteError as default } from "@/components/RouteError";
+```
+
+Append to `web/app/globals.css`:
+
+```css
+.sd-muted { color: var(--bok-neutral-9); }
+.sd-outcome[data-verdict-outcome="PASS"] { color: var(--bok-verified-ink); }
+.sd-outcome[data-verdict-outcome="FAIL"] { color: var(--bok-critical-ink); }
+.sd-outcome[data-verdict-outcome="INSUFFICIENT"] { color: var(--bok-medium-ink); }
+.sd-heal .sd-notice { margin-bottom: calc(var(--bok-space) * 4); }
+```
+
+Run: `cd web && npx playwright test e2e/heallog.spec.ts e2e/provenance.spec.ts`
+Expected: PASS, 10 tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add "web/app/(app)/heals" "web/app/(app)/layout.tsx" web/components/HealHeader.tsx \
+        web/components/HealHeader.module.css web/components/BeforeAfter.tsx web/components/BeforeAfter.module.css \
+        web/components/VerdictTable.tsx web/components/VerdictTable.test.tsx web/components/ClaimValue.tsx \
+        web/components/ClaimValue.test.tsx web/components/RailRoot.tsx web/lib/rail.ts web/lib/rail.test.ts \
+        web/lib/format.ts web/lib/format.test.ts web/app/globals.css web/e2e/heallog.spec.ts web/e2e/provenance.spec.ts
+git commit -m "feat(web): heal-log screen -- outlined before/after, word diff, cascade trace, verdicts, provenance"
+```
+
+---
+
+### Task 38: Quarantine, data quality, the read-only spec view, and the spec-update runbook
+
+**Why quarantine is the screen that earns trust.** *"A client who sees the system refuse to write
+questionable data trusts it more than one that never refuses"* (CLAUDE.md). So a held run shows its
+data before any decision, states why it was held in words, lists the checks a human must resolve with
+their thresholds, and offers promote or discard — both with a required reason, both recorded with the
+session's operator, never an actor from the request body (audit H3).
+
+**A refused promotion is information, not an error (API contract §5).** Promote re-runs every check
+with the human's confirmation and writes only if they all pass. A `409 still-invalid` keeps the dialog
+open and lists the verdicts that still fail — it is the gate doing its job, and a toast that vanished
+would teach the operator to click again.
+
+**The remediation panel is the retainer's daily work (audit M11).** After a permanent UI change — a
+label renamed for good — the steady state is a nightly quarantine, because the spec editor is
+read-only in v1. The operator's only route is editing the spec YAML, and until now nothing in the UI
+said so. Each quarantined run shows the failing field's current spec excerpt and a link to
+`docs/runbook-spec-update.md`: edit the description, bump `spec_version` (which invalidates the cache
+by M14's key), re-run, confirm the first heal. **Found 2026-09-26:** `QuarantineView.runbook_url` is a
+repository path, which a browser cannot open, so the web app serves the runbook at
+`/runbook/spec-update`, read from `docs/` (`SD_DOCS_DIR` in a container).
+
+**Two more findings, 2026-09-26.** The empty quarantine must say *"Nothing quarantined. 41 runs passed
+validation."* with the count "from `GET /stats`", but `StatsView` has no passed-runs field; the count
+comes from `GET /runs` (completed + healed) until one is added — flagged for Task 34. And the E2E seed
+necessarily holds an unresolved quarantine, so the empty state is proven through a target filter
+(`/quarantine?target=bench-expiring`), which the screen supports for linking from a target anyway.
+
+**Files:**
+- Create: `web/app/(app)/quarantine/page.tsx`, `loading.tsx`, `error.tsx`
+- Create: `web/app/(app)/quality/page.tsx`, `loading.tsx`, `error.tsx`
+- Create: `web/app/(app)/specs/page.tsx`, `web/app/(app)/specs/[target]/page.tsx`, `web/app/(app)/specs/[target]/loading.tsx`, `web/app/(app)/specs/[target]/error.tsx`
+- Create: `web/app/(app)/runbook/spec-update/page.tsx`
+- Create: `web/components/DecisionDialog.tsx`, `web/components/DecisionDialog.module.css`, `web/components/DecisionProvider.tsx`, `web/components/QuarantineActions.tsx`, `web/components/RemediationPanel.tsx`, `web/components/PreviewTable.tsx`, `web/lib/quality.ts`
+- Create: `docs/runbook-spec-update.md`
+- Modify: `web/app/(app)/layout.tsx` (mount `DecisionProvider`), `web/app/globals.css` (append)
+- Test: `web/components/DecisionDialog.test.tsx`, `web/e2e/quarantine.spec.ts`, `web/e2e/quality.spec.ts`, `web/e2e/specs.spec.ts`
+
+**Interfaces:**
+- Consumes: `GET /api/v1/quarantine` (unresolved) and `?resolved=true` (history) → `QuarantineView[]`; `POST /api/v1/quarantine/{run_key}/promote` and `/discard`, body `{reason}` only → `QuarantineView`, or `409` problem `still-invalid` carrying `failing: Verdict[]`, or `409 already-resolved`; `GET /api/v1/quality?target=|run_key=` → `Page[FindingView]`; `GET /api/v1/specs/{target}` → `SpecView`; `GET /api/v1/targets`. From earlier tasks: `load`, `ProblemState`, `RouteError`, `VerdictTable`, `ClaimValue`, `RunStateLabel`, `countPassedRuns`, `loadAllRuns`, `resolveWindow`, `runAnchor`, `windowOf`, `readProblem`; `bok-ui`: `EmptyState`, `ErrorState`, `PartialFailureState`, `SeverityBadge`, `Skeleton`.
+- Produces:
+  - `<DecisionDialog kind={"promote" | "discard"} runKey onClose onResolved />` (client, native modal `<dialog>`; `data-testid="decision-dialog"`).
+  - `<DecisionProvider>` and `useDecision() -> {open(kind, runKey): void; onScreen: readonly string[]; register(runKey): () => void}` — one dialog for the app; Task 39A's palette opens the same dialog through it.
+  - `<QuarantineActions runKey />` (registers the run as on screen), `<RemediationPanel specExcerpt />` (`data-testid="remediation"`), `fieldsFromExcerpt(yaml)`, `<PreviewTable rows evidenceHref caption />` (`data-testid="held-preview"`).
+  - Routes: `/quarantine` (`?resolved=true`, `?target=`), `/quality` (`?target=`, `?run_key=`; rows `data-testid="quality-row"`, cells `threshold`, `threshold-reason`), `/specs`, `/specs/[target]` (`data-testid="read-only-banner"`, `data-testid="spec-yaml"`), `/runbook/spec-update`.
+
+- [ ] **Step 1: Write the failing `DecisionDialog` test**
+
+```tsx
+// web/components/DecisionDialog.test.tsx
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Verdict } from "@/lib/types";
+import { DecisionDialog } from "./DecisionDialog";
+
+const RUN = "testbench:1:2026-09-23";
+const FAILING: Verdict[] = [
+  { check: "Format", outcome: "FAIL", threshold: "^[A-Z]{2}\\d{8}$", observed: "0 of 20", reason: "Amounts, not claim numbers." },
+];
+
+function setup(response: () => Response) {
+  const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => response());
+  vi.stubGlobal("fetch", fetchMock);
+  const onClose = vi.fn();
+  const onResolved = vi.fn();
+  render(<DecisionDialog kind="promote" runKey={RUN} onClose={onClose} onResolved={onResolved} />);
+  return { fetchMock, onClose, onResolved, dialog: screen.getByRole("dialog") };
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("DecisionDialog", () => {
+  it("promote requires a reason, and nothing is sent without one", async () => {
+    const { fetchMock, dialog } = setup(() => new Response(null, { status: 200 }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Promote" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("A reason is required");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("promote that still fails lists the failing verdicts and keeps the dialog open", async () => {
+    const problem = {
+      type: "https://selector-drift.dev/problems/still-invalid", title: "Promotion refused: the gate still fails",
+      status: 409, detail: "1 check still fails after human confirmation.", failing: FAILING,
+    };
+    const { onResolved, dialog } = setup(() => new Response(JSON.stringify(problem), { status: 409, headers: { "content-type": "application/problem+json" } }));
+    await userEvent.type(within(dialog).getByLabelText(/Reason/), "checked the screenshots");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Promote" }));
+    expect(await within(dialog).findByText("The gate still fails — nothing was written")).toBeInTheDocument();
+    expect(within(dialog).getAllByTestId("verdict-row")).toHaveLength(1);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(onResolved).not.toHaveBeenCalled();
+  });
+
+  it("sends only the reason -- the actor comes from the session, never the body", async () => {
+    const { fetchMock, onResolved, dialog } = setup(() => new Response("{}", { status: 200 }));
+    await userEvent.type(within(dialog).getByLabelText(/Reason/), "  values match the portal export  ");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Promote" }));
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(url).toBe("/api/v1/quarantine/testbench%3A1%3A2026-09-23/promote");
+    expect(JSON.parse(String(init?.body))).toEqual({ reason: "values match the portal export" });
+    expect(onResolved).toHaveBeenCalledOnce();
+  });
+
+  it("Escape cancels the dialog", () => {
+    const { onClose, dialog } = setup(() => new Response(null, { status: 200 }));
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 });
 ```
 
-```typescript
-// web/e2e/responsive.spec.ts
-for (const route of ROUTES) {
-  test(`${route} does not scroll horizontally at 375px`, async ({ page }) => {
-    await page.setViewportSize({ width: 375, height: 800 });
-    await page.goto(route);
-    expect(await page.evaluate(() =>
-      document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+Run: `cd web && npx vitest run components/DecisionDialog.test.tsx`
+Expected: FAIL — `Failed to resolve import "./DecisionDialog"`.
+
+- [ ] **Step 2: Write `DecisionDialog`, `DecisionProvider`, `QuarantineActions`**
+
+```tsx
+// web/components/DecisionDialog.tsx
+"use client";
+
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { readProblem } from "@/lib/problem";
+import type { Verdict } from "@/lib/types";
+import styles from "./DecisionDialog.module.css";
+import { VerdictTable } from "./VerdictTable";
+
+export type DecisionKind = "promote" | "discard";
+
+const COPY = {
+  promote: { verb: "Promote", summary: "Re-runs every check with your confirmation. Writes only if they all pass." },
+  discard: { verb: "Discard", summary: "Discards this run's held data. Nothing is written. The decision and your reason are recorded with your name." },
+} as const;
+
+export interface DecisionDialogProps {
+  kind: DecisionKind;
+  runKey: string;
+  onClose: () => void;
+  onResolved: () => void;
+}
+
+/** A native modal <dialog>: the page behind is inert, focus stays inside, Escape cancels. */
+export function DecisionDialog({ kind, runKey, onClose, onResolved }: DecisionDialogProps) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const id = useId();
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [failing, setFailing] = useState<Verdict[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const copy = COPY[kind];
+
+  useEffect(() => {
+    const d = ref.current;
+    if (d !== null && !d.open) d.showModal();
+    return () => {
+      if (d?.open) d.close();
+    };
+  }, []);
+
+  async function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const trimmed = reason.trim();
+    if (trimmed.length < 1 || trimmed.length > 500) {
+      setError("A reason is required (1–500 characters). It is recorded in the audit log with your name.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setFailing(null);
+    let res: Response;
+    try {
+      res = await fetch(`/api/v1/quarantine/${encodeURIComponent(runKey)}/${kind}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: trimmed }),
+      });
+    } catch {
+      setBusy(false);
+      setError("The API could not be reached. Nothing was recorded.");
+      return;
+    }
+    setBusy(false);
+    if (res.ok) {
+      onResolved();
+      return;
+    }
+    if (res.status === 401) {
+      window.location.assign(`/login?next=${encodeURIComponent(window.location.pathname)}`);
+      return;
+    }
+    const problem = await readProblem(res);
+    if (res.status === 409 && problem.type.endsWith("/still-invalid")) {
+      setFailing(problem.failing ?? []);
+      return;
+    }
+    if (res.status === 409) {
+      setError("This run was already resolved. Close this dialog to see the decision.");
+      return;
+    }
+    setError(problem.detail !== undefined ? `${problem.title}: ${problem.detail}` : problem.title);
+  }
+
+  return (
+    <dialog
+      ref={ref}
+      className={styles.dialog}
+      aria-labelledby={`${id}-title`}
+      aria-describedby={`${id}-summary`}
+      data-testid="decision-dialog"
+      onCancel={(e) => {
+        e.preventDefault();
+        onClose();
+      }}
+      onKeyDown={(e) => {
+        // A modal <dialog> makes the page inert, but Tab past the last control can still leave for
+        // the browser's own UI. Wrap it, so focus is trapped as spec section 4 requires.
+        if (e.key !== "Tab") return;
+        const focusable = Array.from(
+          e.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), textarea, a[href], [tabindex]:not([tabindex="-1"])'),
+        );
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (first === undefined || last === undefined) return;
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }}
+    >
+      <form onSubmit={submit} noValidate className={styles.form}>
+        <h2 id={`${id}-title`}>{copy.verb} run <code>{runKey}</code></h2>
+        <p id={`${id}-summary`}>{copy.summary}</p>
+        <label htmlFor={`${id}-reason`}>
+          Reason <span className={styles.hint}>(required, recorded with your name)</span>
+        </label>
+        <textarea
+          id={`${id}-reason`}
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          maxLength={500}
+          rows={4}
+          aria-invalid={error !== null ? true : undefined}
+          aria-describedby={error !== null ? `${id}-error` : `${id}-count`}
+        />
+        <p id={`${id}-count`} className={styles.hint}><span data-bok-numeric>{reason.trim().length}</span> / 500</p>
+        {error !== null && <p id={`${id}-error`} role="alert" className="sd-form-error">{error}</p>}
+        {failing !== null && (
+          <section role="alert" aria-labelledby={`${id}-still`} className={styles.still}>
+            <h3 id={`${id}-still`}>The gate still fails — nothing was written</h3>
+            <p>
+              {failing.length} {failing.length === 1 ? "check still fails" : "checks still fail"} after your confirmation.
+              Fix the cause, or discard the run.
+            </p>
+            <VerdictTable verdicts={failing} caption="Checks that still fail" />
+          </section>
+        )}
+        <div className={styles.actions}>
+          <button type="button" className="sd-quiet" onClick={onClose}>Cancel</button>
+          <button type="submit" className="sd-primary" disabled={busy}>{copy.verb}</button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+```
+
+`web/components/DecisionDialog.module.css`:
+
+```css
+.dialog { width: min(44rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow: auto; border: 1px solid var(--bok-neutral-6); border-radius: var(--bok-radius-control); padding: calc(var(--bok-space) * 5); background: var(--bok-paper); color: var(--bok-ink); }
+.dialog::backdrop { background: oklch(0.22 0.012 85 / 0.45); }
+.form { display: grid; gap: calc(var(--bok-space) * 2); }
+.form h2 { margin: 0; font-size: 1.25rem; overflow-wrap: anywhere; }
+.form textarea { font: inherit; padding: calc(var(--bok-space) * 2); border: 1px solid var(--bok-neutral-7); border-radius: var(--bok-radius-control); }
+.hint { color: var(--bok-neutral-9); font-size: 0.8125rem; margin: 0; }
+.still { border-inline-start: 3px solid var(--bok-critical-ink); padding-inline-start: calc(var(--bok-space) * 3); }
+.still h3 { margin: 0; font-size: 1rem; }
+.actions { display: flex; justify-content: flex-end; gap: calc(var(--bok-space) * 2); }
+```
+
+```tsx
+// web/components/DecisionProvider.tsx
+"use client";
+
+import { useRouter } from "next/navigation";
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { DecisionDialog, type DecisionKind } from "./DecisionDialog";
+
+interface DecisionApi {
+  open(kind: DecisionKind, runKey: string): void;
+  /** Quarantined runs currently on screen -- the palette offers "Promote this run" for these. */
+  onScreen: readonly string[];
+  register(runKey: string): () => void;
+}
+
+const DecisionContext = createContext<DecisionApi | null>(null);
+
+export function useDecision(): DecisionApi {
+  const api = useContext(DecisionContext);
+  if (api === null) throw new Error("useDecision must be used inside <DecisionProvider>");
+  return api;
+}
+
+/** One decision dialog for the app, opened by the card buttons and by the command palette alike. */
+export function DecisionProvider({ children }: { children: ReactNode }) {
+  const router = useRouter();
+  const [current, setCurrent] = useState<{ kind: DecisionKind; runKey: string } | null>(null);
+  const [onScreen, setOnScreen] = useState<string[]>([]);
+  const trigger = useRef<HTMLElement | null>(null);
+
+  const open = useCallback((kind: DecisionKind, runKey: string) => {
+    trigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setCurrent({ kind, runKey });
+  }, []);
+
+  const close = useCallback(() => {
+    setCurrent(null);
+    const el = trigger.current;
+    trigger.current = null;
+    if (el?.isConnected) el.focus(); // the dialog returns focus to what opened it
+  }, []);
+
+  const register = useCallback((runKey: string) => {
+    setOnScreen((xs) => (xs.includes(runKey) ? xs : [...xs, runKey]));
+    return () => setOnScreen((xs) => xs.filter((x) => x !== runKey));
+  }, []);
+
+  const api = useMemo<DecisionApi>(() => ({ open, onScreen, register }), [open, onScreen, register]);
+
+  return (
+    <DecisionContext.Provider value={api}>
+      {children}
+      {current !== null && (
+        <DecisionDialog
+          key={`${current.kind}:${current.runKey}`}
+          kind={current.kind}
+          runKey={current.runKey}
+          onClose={close}
+          onResolved={() => {
+            close();
+            router.refresh(); // server components re-fetch; there is no client cache to invalidate
+          }}
+        />
+      )}
+    </DecisionContext.Provider>
+  );
+}
+```
+
+```tsx
+// web/components/QuarantineActions.tsx
+"use client";
+
+import { useEffect } from "react";
+import { useDecision } from "./DecisionProvider";
+
+export function QuarantineActions({ runKey }: { runKey: string }) {
+  const { open, register } = useDecision();
+  useEffect(() => register(runKey), [register, runKey]);
+  return (
+    <div className="sd-actions" data-bok-chrome>
+      <button type="button" className="sd-primary" onClick={() => open("promote", runKey)}>
+        Promote<span className="bok-visually-hidden"> run {runKey}</span>
+      </button>
+      <button type="button" className="sd-quiet" onClick={() => open("discard", runKey)}>
+        Discard<span className="bok-visually-hidden"> run {runKey}</span>
+      </button>
+    </div>
+  );
+}
+```
+
+Replace `web/app/(app)/layout.tsx`:
+
+```tsx
+import type { ReactNode } from "react";
+import { DecisionProvider } from "@/components/DecisionProvider";
+import { Nav } from "@/components/Nav";
+import { RailRoot } from "@/components/RailRoot";
+
+export default function AppLayout({ children }: { children: ReactNode }) {
+  return (
+    <RailRoot>
+      <DecisionProvider>
+        <div className="sd-shell">
+          <Nav />
+          <main id="main" className="sd-main" tabIndex={-1}>{children}</main>
+        </div>
+      </DecisionProvider>
+    </RailRoot>
+  );
+}
+```
+
+Run: `cd web && npx vitest run components/DecisionDialog.test.tsx`
+Expected: PASS, 4 tests.
+
+- [ ] **Step 3: Write the failing E2E tests**
+
+```ts
+// web/e2e/quarantine.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+test("empty quarantine states the passing count, and does not celebrate", async ({ page }) => {
+  await page.goto(`/quarantine?target=${ids().targets.expiring}`);
+  const main = page.locator("main");
+  await expect(main).toContainText(`Nothing quarantined. ${ids().targets.expiringRuns} runs passed validation.`);
+  await expect(main).not.toContainText(/congrat|great job|all clear|you're safe/i);
+});
+
+test("promote requires a reason", async ({ page }) => {
+  await page.goto("/quarantine");
+  await page.getByRole("button", { name: /^Promote/ }).first().click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "Promote", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("A reason is required");
+});
+
+test("a held run previews its data before any decision", async ({ page }) => {
+  await page.goto("/quarantine");
+  const preview = page.getByTestId("held-preview").first();
+  await expect(preview).toBeVisible();
+  expect(await preview.getByTestId("claim-value").count()).toBeGreaterThan(0);
+});
+
+test("promote that still fails lists the failing verdicts and keeps the dialog open", async ({ page }) => {
+  await page.goto("/quarantine");
+  await page.getByRole("button", { name: `Promote run ${ids().runs.quarantined}` }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel(/Reason/).fill("checked the screenshots");
+  await dialog.getByRole("button", { name: "Promote", exact: true }).click();
+  await expect(dialog).toContainText("The gate still fails — nothing was written");
+  expect(await dialog.getByTestId("verdict-row").count()).toBeGreaterThanOrEqual(1);
+  await expect(dialog).toBeVisible();
+});
+
+test("a quarantined run shows its spec excerpt and the runbook", async ({ page }) => {
+  await page.goto("/quarantine");
+  const panel = page.getByTestId("remediation").first();
+  await expect(panel).toContainText("If the portal changed permanently");
+  await expect(panel.locator("pre")).toContainText("claim_number");
+  await panel.getByRole("link", { name: /Runbook/ }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Runbook: updating a task spec after a permanent UI change");
+  await expect(page.locator("main")).toContainText("spec_version");
+});
+
+test("decision history names the actor and the reason", async ({ page }) => {
+  await page.goto("/quarantine?resolved=true");
+  const main = page.locator("main");
+  await expect(main).toContainText("operator-a");
+  await expect(main).toContainText("Month-end batch; values checked against the portal export.");
+  await expect(main).toContainText("Healed onto the Amount column; the spec needs a new description.");
+});
+```
+
+```ts
+// web/e2e/quality.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+test("every finding states its threshold and why that threshold", async ({ page }) => {
+  await page.goto("/quality");
+  const rows = page.getByTestId("quality-row");
+  expect(await rows.count()).toBeGreaterThanOrEqual(3);
+  for (const row of await rows.all()) {
+    await expect(row.getByTestId("threshold")).not.toBeEmpty();
+    await expect(row.getByTestId("threshold-reason")).not.toBeEmpty();
+  }
+});
+
+test("each severity carries a glyph and a text label", async ({ page }) => {
+  await page.goto("/quality");
+  await expect(page.locator('[data-severity="HIGH"]').first()).toHaveText("▲ High");
+  await expect(page.locator('[data-severity="MEDIUM"]').first()).toHaveText("■ Medium");
+  await expect(page.locator('[data-severity="LOW"]').first()).toHaveText("● Low");
+});
+
+test("findings filter by run, and an empty run says what was checked", async ({ page }) => {
+  await page.goto(`/quality?run_key=${encodeURIComponent(ids().runs.completed)}`);
+  await expect(page.getByTestId("quality-row")).toHaveCount(3);
+  await page.goto(`/quality?run_key=${encodeURIComponent(ids().runs.healed)}`);
+  await expect(page.locator("main")).toContainText("No quality findings. 1 run was checked.");
+});
+```
+
+```ts
+// web/e2e/specs.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+test("the spec view is read-only YAML with a banner saying so", async ({ page }) => {
+  await page.goto(`/specs/${ids().targets.active}`);
+  await expect(page.getByTestId("read-only-banner")).toContainText("Read-only in v1. Specs are edited in the repository; see the runbook.");
+  await expect(page.getByTestId("spec-yaml")).toContainText("scope_ref:");
+  await expect(page.locator("main textarea, main [contenteditable], main input")).toHaveCount(0);
+});
+
+test("the spec's validation verdicts render with thresholds", async ({ page }) => {
+  await page.goto(`/specs/${ids().targets.active}`);
+  expect(await page.getByTestId("verdict-row").count()).toBeGreaterThan(0);
+  for (const row of await page.getByTestId("verdict-row").all()) await expect(row.getByTestId("threshold")).not.toBeEmpty();
+});
+```
+
+Run: `cd web && npx playwright test e2e/quarantine.spec.ts e2e/quality.spec.ts e2e/specs.spec.ts`
+Expected: FAIL — `/quarantine`, `/quality` and `/specs/testbench` are 404s.
+
+- [ ] **Step 4: Build the screens, the remediation panel and the runbook**
+
+```tsx
+// web/components/RemediationPanel.tsx
+import Link from "next/link";
+
+export function fieldsFromExcerpt(yaml: string): string[] {
+  return [...yaml.matchAll(/^\s*-?\s*name:\s*([A-Za-z0-9_]+)/gm)].map((m) => m[1] ?? "").filter((f) => f !== "");
+}
+
+/** Audit M11: after a permanent portal change the operator's only route is the spec YAML.
+ *  `headingId` is unique per card, because a page shows one panel per quarantined run. */
+export function RemediationPanel({ specExcerpt, headingId }: { specExcerpt: string; headingId: string }) {
+  const fields = fieldsFromExcerpt(specExcerpt);
+  return (
+    <section className="sd-remedy" aria-labelledby={headingId} data-testid="remediation">
+      <h3 id={headingId}>If the portal changed permanently</h3>
+      <p>
+        Edit {fields.length === 1 ? "this field's" : "these fields'"} <code>description</code> in the task spec, bump{" "}
+        <code>spec_version</code>, re-run, and confirm the first heal. Specs are read-only here in v1.
+      </p>
+      {fields.length > 0 && (
+        <p>Failing {fields.length === 1 ? "field" : "fields"}: {fields.map((f, i) => <span key={f}>{i > 0 ? ", " : ""}<code>{f}</code></span>)}</p>
+      )}
+      <p className="sd-muted">Current spec excerpt:</p>
+      <pre className="sd-yaml" tabIndex={0}><code>{specExcerpt}</code></pre>
+      <p><Link href="/runbook/spec-update" data-evidence-link>Runbook: updating a task spec after a permanent UI change</Link></p>
+    </section>
+  );
+}
+```
+
+```tsx
+// web/components/PreviewTable.tsx
+import type { QuarantineView } from "@/lib/types";
+import { ClaimValue } from "./ClaimValue";
+
+export function PreviewTable({ rows, evidenceHref, caption }: { rows: QuarantineView["preview"]; evidenceHref: string; caption: string }) {
+  if (rows.length === 0) return <p className="sd-muted">No rows were held for this run.</p>;
+  const columns = Object.keys(rows[0] ?? {});
+  return (
+    <div className="sd-scroll" role="region" aria-label={caption} tabIndex={0} data-testid="held-preview">
+      <table className="sd-table">
+        <caption>{caption}</caption>
+        <thead><tr>{columns.map((c) => <th key={c} scope="col">{c}</th>)}</tr></thead>
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={i}>
+              {columns.map((c) => {
+                const cell = row[c];
+                return (
+                  <td key={c} data-label={c}>
+                    {cell !== undefined ? <ClaimValue value={cell.value} rail={cell.rail} evidenceHref={evidenceHref} /> : "—"}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/quarantine/page.tsx
+import { EmptyState, PartialFailureState } from "bok-ui";
+import type { Metadata } from "next";
+import Link from "next/link";
+import type { ReactNode } from "react";
+import { PreviewTable } from "@/components/PreviewTable";
+import { ProblemState } from "@/components/ProblemState";
+import { QuarantineActions } from "@/components/QuarantineActions";
+import { RemediationPanel } from "@/components/RemediationPanel";
+import { RunStateLabel } from "@/components/RunStateLabel";
+import { VerdictTable } from "@/components/VerdictTable";
+import { load } from "@/lib/api";
+import { runAnchor, utcStamp, utcToday, windowOf } from "@/lib/format";
+import { countPassedRuns } from "@/lib/runs";
+import type { DecisionView, QuarantineView } from "@/lib/types";
+import { resolveWindow } from "@/lib/window";
+
+export const metadata: Metadata = { title: "Quarantine" };
+
+type Query = Promise<{ resolved?: string | string[]; target?: string | string[] }>;
+
+function DecisionLine({ d }: { d: DecisionView }) {
+  if (d.resolved_as === null) return null;
+  const glyph = d.resolved_as === "discarded" ? "✕" : "✓";
+  return (
+    <p className="sd-decision">
+      <span aria-hidden="true">{glyph}</span> {d.resolved_as} by <strong>{d.actor ?? "the gate"}</strong>
+      {d.at !== null ? `, ${utcStamp(d.at)}` : ""}{d.reason !== null ? ` — “${d.reason}”` : ""}
+    </p>
+  );
+}
+
+function Card({ q, resolved }: { q: QuarantineView; resolved: boolean }) {
+  const anchor = runAnchor(q.run_key);
+  const firstHeal = q.heal_ids[0];
+  const evidenceHref = firstHeal !== undefined ? `/heals/${firstHeal}#evidence-after` : `#${anchor}`;
+  return (
+    <article id={anchor} className="sd-qcard" aria-labelledby={`${anchor}-h`}>
+      <header className="sd-qcard-head">
+        <h2 id={`${anchor}-h`}><Link href={`/runs/${encodeURIComponent(q.run_key)}`}>{q.run_key}</Link></h2>
+        <p>{q.target} · <RunStateLabel state="quarantined" /></p>
+      </header>
+      <p><strong>Held because:</strong> {q.reason}</p>
+      {resolved && <DecisionLine d={q.decision} />}
+      <VerdictTable verdicts={q.failing} caption="Checks a human must resolve" />
+      <PreviewTable rows={q.preview} evidenceHref={evidenceHref} caption={`Held rows (first ${q.preview.length})`} />
+      <p>
+        {q.heal_ids.length > 0
+          ? <>Heals: {q.heal_ids.map((id, i) => <span key={id}>{i > 0 ? ", " : ""}<Link href={`/heals/${id}`}>#{id}</Link></span>)}</>
+          : "No heal is recorded for this run."}
+      </p>
+      {!resolved && <RemediationPanel specExcerpt={q.spec_excerpt} headingId={`${anchor}-remedy`} />}
+      {!resolved && q.decision.resolved_as === null && <QuarantineActions runKey={q.run_key} />}
+    </article>
+  );
+}
+
+export default async function QuarantinePage({ searchParams }: { searchParams: Query }) {
+  const sp = await searchParams;
+  const resolved = (Array.isArray(sp.resolved) ? sp.resolved[0] : sp.resolved) === "true";
+  const target = resolveWindow({ target: sp.target }, utcToday()).target;
+  const q = await load((c) => c.GET("/api/v1/quarantine", { params: { query: resolved ? { resolved: true } : {} } }));
+  if (!q.ok) return <ProblemState problem={q.problem} />;
+  const rows = q.data
+    .filter((r) => target === undefined || r.target === target)
+    .sort((a, b) => windowOf(b.run_key).localeCompare(windowOf(a.run_key)));
+
+  let body: ReactNode;
+  if (rows.length > 0) {
+    body = rows.map((r) => <Card key={r.run_key} q={r} resolved={resolved} />);
+  } else if (resolved) {
+    body = <p className="sd-muted">No quarantine has been resolved yet.</p>;
+  } else {
+    const passed = await countPassedRuns(target);
+    body = passed.ok ? (
+      <EmptyState scope={{ noun: "quarantined runs", measuredNoun: passed.data === 1 ? "run" : "runs", measured: passed.data, headline: "Nothing quarantined.", measuredVerb: "passed validation" }} />
+    ) : (
+      <PartialFailureState succeeded={["quarantine list (empty)"]} failed={[{ what: "count of runs that passed validation", why: passed.problem.title }]} />
+    );
+  }
+
+  return (
+    <section aria-labelledby="q-h">
+      <header className="sd-page-head">
+        <h1 id="q-h">{resolved ? "Quarantine decisions" : "Quarantine"}</h1>
+        <p className="sd-lede">
+          {resolved
+            ? "Every promote and discard, with who decided and why."
+            : "Runs the validation gate refused to write. Nothing here reached the lake."}
+          {target !== undefined ? ` Target: ${target}.` : ""}
+        </p>
+        <p><Link href={resolved ? "/quarantine" : "/quarantine?resolved=true"}>{resolved ? "Show unresolved runs" : "Show decision history"}</Link></p>
+      </header>
+      {body}
+    </section>
+  );
+}
+```
+
+```ts
+// web/lib/quality.ts
+import "server-only";
+import { load, type Loaded } from "./api";
+import type { FindingView } from "./types";
+
+export interface Findings {
+  items: FindingView[];
+  more: boolean;
+}
+
+/** One page; `more` says the API holds further findings for this filter. */
+export async function loadFindings(q: { target?: string; run_key?: string }): Promise<Loaded<Findings>> {
+  const r = await load((c) => c.GET("/api/v1/quality", { params: { query: { target: q.target, run_key: q.run_key } } }));
+  return r.ok ? { ok: true, data: { items: r.data.items, more: r.data.next_cursor !== null } } : r;
+}
+```
+
+```tsx
+// web/app/(app)/quality/page.tsx
+import { EmptyState, PartialFailureState, SeverityBadge } from "bok-ui";
+import type { Metadata } from "next";
+import Link from "next/link";
+import type { ReactNode } from "react";
+import { ClaimValue } from "@/components/ClaimValue";
+import { ProblemState } from "@/components/ProblemState";
+import { load } from "@/lib/api";
+import { utcToday, windowOf } from "@/lib/format";
+import { loadFindings } from "@/lib/quality";
+import { loadAllRuns } from "@/lib/runs";
+import { resolveWindow } from "@/lib/window";
+
+export const metadata: Metadata = { title: "Data quality" };
+
+const RUN_KEY = /^[a-z0-9-]{1,63}:\d{1,6}:\d{4}-\d{2}-\d{2}$/; // API contract 4.1
+const RANK = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 } as const;
+
+type Query = Promise<{ target?: string | string[]; run_key?: string | string[] }>;
+
+export default async function QualityPage({ searchParams }: { searchParams: Query }) {
+  const sp = await searchParams;
+  const target = resolveWindow({ target: sp.target }, utcToday()).target;
+  const rawRun = Array.isArray(sp.run_key) ? sp.run_key[0] : sp.run_key;
+  const runKey = rawRun !== undefined && RUN_KEY.test(rawRun) ? rawRun : undefined;
+
+  const [findings, targets] = await Promise.all([loadFindings({ target, run_key: runKey }), load((c) => c.GET("/api/v1/targets"))]);
+  if (!findings.ok) return <ProblemState problem={findings.problem} />;
+  const rows = [...findings.data.items].sort((a, b) => RANK[a.severity] - RANK[b.severity] || windowOf(b.run_key).localeCompare(windowOf(a.run_key)));
+  const names = targets.ok ? targets.data.filter((t) => t.status !== "unscoped").map((t) => t.target) : [];
+
+  let empty: ReactNode = null;
+  if (rows.length === 0) {
+    const checked = runKey !== undefined ? { ok: true as const, data: 1 } : await loadAllRuns({ target }).then((r) => (r.ok ? { ok: true as const, data: r.data.length } : r));
+    empty = checked.ok ? (
+      <EmptyState scope={{ noun: "quality findings", measuredNoun: checked.data === 1 ? "run" : "runs", measured: checked.data, headline: "No quality findings.", measuredVerb: checked.data === 1 ? "was checked" : "were checked" }} />
+    ) : (
+      <PartialFailureState succeeded={["findings (none)"]} failed={[{ what: "count of runs checked", why: checked.problem.title }]} />
+    );
+  }
+
+  return (
+    <section aria-labelledby="quality-h">
+      <header className="sd-page-head">
+        <h1 id="quality-h">Data quality</h1>
+        <p className="sd-lede">Every finding states the threshold it crossed and why that threshold. No bare red badges (brief §8).</p>
+      </header>
+      <form className="sd-filters" method="get" action="/quality" aria-label="Filter findings" data-bok-chrome>
+        <label>
+          Target
+          <select name="target" defaultValue={target ?? ""}>
+            <option value="">All targets</option>
+            {names.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
+        <label>Run key <input name="run_key" defaultValue={runKey ?? ""} placeholder="target:version:YYYY-MM-DD" /></label>
+        <button type="submit" className="sd-quiet">Apply</button>
+      </form>
+      {empty ?? (
+        <table className="sd-table">
+          <caption className="bok-visually-hidden">Quality findings, most severe first</caption>
+          <thead>
+            <tr>
+              <th scope="col">Severity</th><th scope="col">Check</th><th scope="col">Finding</th><th scope="col">Observed</th>
+              <th scope="col">Threshold</th><th scope="col">Why this threshold</th><th scope="col">Run</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((f) => (
+              <tr key={f.id} data-testid="quality-row">
+                <td data-label="Severity"><SeverityBadge severity={f.severity} /></td>
+                <td data-label="Check"><code>{f.check}</code></td>
+                <th scope="row" data-label="Finding">{f.title}</th>
+                <td data-label="Observed"><ClaimValue value={f.observed} rail={f.rail} evidenceHref={`/runs/${encodeURIComponent(f.run_key)}`} /></td>
+                <td data-label="Threshold" data-testid="threshold">{f.threshold}</td>
+                <td data-label="Why this threshold" data-testid="threshold-reason">{f.threshold_reason}</td>
+                <td data-label="Run"><Link href={`/runs/${encodeURIComponent(f.run_key)}`}>{f.run_key}</Link></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {findings.data.more && <p className="sd-muted">More findings exist for this filter; narrow it by run to see them.</p>}
+    </section>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/specs/page.tsx
+import { EmptyState } from "bok-ui";
+import type { Metadata } from "next";
+import Link from "next/link";
+import { ProblemState } from "@/components/ProblemState";
+import { load } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Task specs" };
+
+export default async function SpecsIndex() {
+  const r = await load((c) => c.GET("/api/v1/targets"));
+  if (!r.ok) return <ProblemState problem={r.problem} />;
+  const names = r.data.map((t) => t.target).sort();
+  return (
+    <section aria-labelledby="specs-h">
+      <header className="sd-page-head"><h1 id="specs-h">Task specs</h1></header>
+      {names.length === 0 ? (
+        <EmptyState scope={{ noun: "task specs", measuredNoun: "targets", measured: 0, headline: "No task specs.", measuredVerb: "are configured" }} />
+      ) : (
+        <ul>{names.map((n) => <li key={n}><Link href={`/specs/${encodeURIComponent(n)}`}>{n}</Link></li>)}</ul>
+      )}
+    </section>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/specs/[target]/page.tsx
+import type { Metadata } from "next";
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { ProblemState } from "@/components/ProblemState";
+import { VerdictTable } from "@/components/VerdictTable";
+import { load } from "@/lib/api";
+import { decodeParam } from "@/lib/format";
+
+export const metadata: Metadata = { title: "Task spec" };
+
+/** Screen 2, v1 scope (design 10): read-only YAML plus validation. No editor, no form view. */
+export default async function SpecPage({ params }: { params: Promise<{ target: string }> }) {
+  const target = decodeParam((await params).target);
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(target)) notFound();
+  const r = await load((c) => c.GET("/api/v1/specs/{target}", { params: { path: { target } } }));
+  if (!r.ok) {
+    if (r.problem.status === 404) notFound();
+    return <ProblemState problem={r.problem} />;
+  }
+  const s = r.data;
+  const lines = s.yaml.replace(/\n$/, "").split("\n");
+  return (
+    <section aria-labelledby="spec-h">
+      <header className="sd-page-head">
+        <h1 id="spec-h">Task spec: {s.target}</h1>
+        <p className="sd-lede">Version {s.version}.</p>
+      </header>
+      <p className="sd-notice" role="note" data-testid="read-only-banner">
+        Read-only in v1. Specs are edited in the repository; see the <Link href="/runbook/spec-update">runbook</Link>.
+      </p>
+      <pre className="sd-yaml sd-numbered" tabIndex={0} data-testid="spec-yaml">
+        <code>{lines.map((l, i) => <span key={i} className="sd-line">{l}{"\n"}</span>)}</code>
+      </pre>
+      <VerdictTable verdicts={s.validation} caption="Schema validation" />
+    </section>
+  );
+}
+```
+
+```tsx
+// web/app/(app)/runbook/spec-update/page.tsx
+import { ErrorState } from "bok-ui";
+import type { Metadata } from "next";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
+export const metadata: Metadata = { title: "Runbook: spec update" };
+
+// QuarantineView.runbook_url is a repository path; the browser cannot open it, so the app serves it.
+// In a container, mount or copy docs/ and set SD_DOCS_DIR.
+const DOCS = process.env.SD_DOCS_DIR ?? path.resolve(process.cwd(), "..", "docs");
+
+export default async function RunbookPage() {
+  let text: string;
+  try {
+    text = await readFile(path.join(DOCS, "runbook-spec-update.md"), "utf8");
+  } catch {
+    return <ErrorState title="The runbook could not be read." detail={`Expected runbook-spec-update.md in ${DOCS}.`} />;
+  }
+  return (
+    <article aria-labelledby="runbook-h">
+      <h1 id="runbook-h">Runbook: updating a task spec after a permanent UI change</h1>
+      <pre className="sd-doc" tabIndex={0}>{text}</pre>
+    </article>
+  );
+}
+```
+
+Loading and error files:
+
+```tsx
+// web/app/(app)/quarantine/loading.tsx
+import { Skeleton } from "bok-ui";
+export default function Loading() {
+  return <Skeleton shape="cards" rows={2} />;
+}
+```
+
+```tsx
+// web/app/(app)/quality/loading.tsx
+import { Skeleton } from "bok-ui";
+export default function Loading() {
+  return <Skeleton shape="table" rows={8} />;
+}
+```
+
+```tsx
+// web/app/(app)/specs/[target]/loading.tsx
+import { Skeleton } from "bok-ui";
+export default function Loading() {
+  return <Skeleton shape="text" rows={12} />;
+}
+```
+
+```tsx
+// web/app/(app)/quarantine/error.tsx, web/app/(app)/quality/error.tsx, web/app/(app)/specs/[target]/error.tsx
+"use client";
+
+export { RouteError as default } from "@/components/RouteError";
+```
+
+Append to `web/app/globals.css`:
+
+```css
+.sd-qcard { border: 1px solid var(--bok-neutral-5); border-radius: var(--bok-radius-control); padding: calc(var(--bok-space) * 4); margin-bottom: calc(var(--bok-space) * 6); display: grid; gap: calc(var(--bok-space) * 3); min-width: 0; }
+.sd-qcard-head h2 { margin: 0; font-size: 1.125rem; overflow-wrap: anywhere; }
+.sd-qcard-head p { margin: 0; }
+.sd-actions { display: flex; gap: calc(var(--bok-space) * 2); flex-wrap: wrap; }
+.sd-decision { margin: 0; }
+.sd-remedy { border-inline-start: 3px solid var(--bok-medium-ink); padding-inline-start: calc(var(--bok-space) * 3); }
+.sd-remedy h3 { margin: 0 0 var(--bok-space); font-size: 1rem; }
+.sd-scroll { overflow-x: auto; max-width: 100%; }
+.sd-yaml, .sd-doc { font-size: 0.8125rem; background: var(--bok-neutral-2); border: 1px solid var(--bok-neutral-4); border-radius: var(--bok-radius-cell); padding: calc(var(--bok-space) * 3); overflow-x: auto; white-space: pre; max-width: 100%; }
+.sd-doc { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sd-numbered code { counter-reset: line; }
+.sd-numbered .sd-line { counter-increment: line; }
+.sd-numbered .sd-line::before { content: counter(line); display: inline-block; width: 3ch; margin-inline-end: 2ch; text-align: end; color: var(--bok-neutral-9); user-select: none; }
+```
+
+`docs/runbook-spec-update.md`:
+
+```markdown
+# Runbook: updating a task spec after a permanent UI change
+
+Use this when the same field is quarantined on consecutive runs and the portal really has changed —
+a label renamed for good, a column that moved and will stay moved. The validation gate is doing its
+job: it will keep refusing to write until the spec says what the field now means.
+
+## 1. Confirm the change is permanent
+
+- The same field fails on at least two consecutive runs, with the same failing checks.
+- Open the quarantined run's heal (`/heals/<id>`): the before/after screenshots show a real change in
+  the portal, not a transient error page.
+- If the client announced a release, note its date.
+
+## 2. Edit the spec
+
+In the repository, open `specs/<target>.yaml` and find the failing field under `targets:`. Update the
+field's `description` (and `relation` or `assertions` if the meaning changed, not just the markup).
+A description is the semantic target in plain language — never a DOM path.
+
+## 3. Bump `version`
+
+Increase the spec's `version:` by one. The selector cache is keyed by `(target, field, spec_version)`
+(audit M14), so the bump invalidates every cached selector resolved for the old meaning. Without it
+the next run would take a rung-1 cache hit on a selector that no longer means what the spec says.
+
+## 4. Commit with the reason
+
+    git add specs/<target>.yaml
+    git commit -m "spec(<target>): <field> -- <what changed in the portal>, version <n>"
+
+## 5. Re-run the affected window
+
+Trigger the target's Prefect deployment for the window you want re-extracted (the Prefect UI, or
+`prefect deployment run '<flow>/<deployment>' --param window=YYYY-MM-DD`; `prefect deployment ls`
+lists the names). Re-running a window is idempotent: rows upsert on the natural key.
+
+## 6. Confirm the first heal
+
+The first heal to a new selector completes into quarantine and waits for a human (first-heal
+confirmation). Open `/quarantine`, check the held preview against the portal, and **Promote** with a
+reason. Subsequent heals to the same selector run automatically.
+
+## 7. Check the record
+
+The spec edit is a manual intervention. Confirm it appears in the `interventions` table
+(`kind = spec_edit`): the ninety-day log counts it, which is the honest reading of "zero manual
+selector fixes".
+```
+
+Run: `cd web && npx playwright test e2e/quarantine.spec.ts e2e/quality.spec.ts e2e/specs.spec.ts`
+Expected: PASS, 11 tests (6 quarantine, 3 quality, 2 specs).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add "web/app/(app)/quarantine" "web/app/(app)/quality" "web/app/(app)/specs" "web/app/(app)/runbook" \
+        "web/app/(app)/layout.tsx" web/components/DecisionDialog.tsx web/components/DecisionDialog.module.css \
+        web/components/DecisionDialog.test.tsx web/components/DecisionProvider.tsx web/components/QuarantineActions.tsx \
+        web/components/RemediationPanel.tsx web/components/PreviewTable.tsx web/lib/quality.ts web/app/globals.css \
+        web/e2e/quarantine.spec.ts web/e2e/quality.spec.ts web/e2e/specs.spec.ts docs/runbook-spec-update.md
+git commit -m "feat(web): quarantine with promote/discard dialog and remediation runbook, quality table, read-only specs"
+```
+
+---
+
+### Task 39: Accessibility, keyboard operation and text labels, gated in CI
+
+**Why axe runs in a real browser here, in both densities.** `bok-ui`'s own axe tests run in jsdom,
+which computes no colour, so they cannot see contrast; `check-contrast.mjs` measures the tokens, and
+this task measures the pages. Density changes padding and font size, which moves both target sizes
+and contrast of rendered text, so each screen is scanned twice. `/login` is scanned too: it is the one
+page every operator sees first.
+
+**Why the keyboard test is bounded (audit L3).** An unbounded Tab loop hangs to the suite timeout
+instead of failing with a reason. A hundred stops is well above the quarantine screen's real count
+(nav, the held preview's twenty values, the remediation panel, then the actions).
+
+**Found 2026-09-26: CI cannot install `bok-ui` from `web/package.json` as written.** The specifier is
+an absolute `D:` path (slice spec §2), and both repositories are private until first release. CI checks
+out `backoffice-kit` at `bok-ui-minimal` with a read-only token, builds the package, and rewrites that
+one specifier to the checkout before `npm install` (not `npm ci`, whose lockfile records the local
+path). When `bok-ui` publishes to npm this step disappears.
+
+**Files:**
+- Create: `web/e2e/a11y.spec.ts`, `web/e2e/keyboard.spec.ts`, `web/e2e/labels.spec.ts`
+- Modify: `.github/workflows/ci.yml` (two jobs appended under `jobs:`)
+
+**Interfaces:**
+- Consumes: every screen from Tasks 35–38; `SCREENS`, `screenPath`, `ids` (Task 35); `@axe-core/playwright`.
+- Produces: axe zero serious/critical on the seven screens plus `/login`, in both densities (16 scans); keyboard operability of promote, the dialog and the rail; text labels on every run state, severity and verdict outcome; CI jobs `web` and `e2e` (the `e2e` job is the axe gate).
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// web/e2e/a11y.spec.ts
+import AxeBuilder from "@axe-core/playwright";
+import { expect, test, type Page } from "@playwright/test";
+import { SCREENS, screenPath } from "./fixtures/ids";
+
+async function seriousOrCritical(page: Page): Promise<string[]> {
+  const result = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();
+  return result.violations
+    .filter((v) => v.impact === "serious" || v.impact === "critical")
+    .map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`);
+}
+
+for (const density of ["compact", "comfortable"] as const) {
+  test.describe(`${density} density`, () => {
+    test.beforeEach(async ({ context }) => {
+      await context.addCookies([{ name: "sd_density", value: density, domain: "localhost", path: "/", sameSite: "Strict" }]);
+    });
+
+    for (const screen of SCREENS) {
+      test(`${screen}: zero serious or critical axe violations`, async ({ page }) => {
+        await page.goto(screenPath(screen));
+        await expect(page.locator("html")).toHaveAttribute("data-density", density);
+        expect(await seriousOrCritical(page)).toEqual([]);
+      });
+    }
+
+    test("login: zero serious or critical axe violations", async ({ browser }) => {
+      const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+      await ctx.addCookies([{ name: "sd_density", value: density, domain: "localhost", path: "/", sameSite: "Strict" }]);
+      const page = await ctx.newPage();
+      await page.goto("/login");
+      expect(await seriousOrCritical(page)).toEqual([]);
+      await ctx.close();
+    });
   });
 }
 ```
 
-- [ ] **Step 2: Run them and watch them fail.**
+```ts
+// web/e2e/keyboard.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
 
-- [ ] **Step 3: Build the four pieces.** `ClaimValue` wraps `bok-ui`'s `Claim` and rail; the palette is
-  `cmdk` with the six routes plus promote/discard; `print.css` is the standalone CSS the contract ships
-  in `bok-ui` v0.1 (§6.1), imported not reimplemented.
+test("quarantine promote is reachable and operable by keyboard alone", async ({ page }) => {
+  await page.goto("/quarantine");
+  // L3: bounded. An unbounded Tab loop hangs to the suite timeout instead of failing.
+  let found = false;
+  for (let i = 0; i < 100 && !found; i++) {
+    await page.keyboard.press("Tab");
+    found = await page.evaluate(() => document.activeElement?.textContent?.startsWith("Promote") ?? false);
+  }
+  expect(found, "Promote never received focus within 100 tab stops").toBe(true);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toBeVisible();
+});
 
-- [ ] **Step 4: Add the remediation link the quarantine screen is missing (M11).**
+test("the decision dialog traps focus and returns it on Escape", async ({ page }) => {
+  await page.goto("/quarantine");
+  const promote = page.getByRole("button", { name: `Promote run ${ids().runs.quarantined}` });
+  await promote.focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press("Tab");
+    expect(await page.evaluate(() => document.querySelector("dialog")?.contains(document.activeElement) ?? false)).toBe(true);
+  }
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(promote).toBeFocused();
+});
 
-  After a *permanent* UI change — a label renamed for good — the steady state of this product is a
-  nightly quarantine, because screen 2 is read-only in v1 by design. The operator's only route is
-  editing the spec YAML by hand, and nothing in the UI says so. That is the daily work of the
-  $1–5k/month maintenance retainer, and it currently has no documented path. Add to each quarantined
-  run: the field, the current spec excerpt, and a link to `docs/runbook-spec-update.md` — edit the
-  target's `description`, bump `spec_version` (which invalidates the cache by M14's PK), re-run,
-  confirm the first heal.
+test("the provenance rail opens from the keyboard and Escape returns focus to the value", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  const value = page.getByTestId("claim-value").first().getByRole("button");
+  await value.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Provenance" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("complementary", { name: "Provenance" })).toHaveCount(0);
+  await expect(value).toBeFocused();
+});
+```
 
-- [ ] **Step 5: Run them and make sure they pass.** Run: `cd web && npx playwright test`
+```ts
+// web/e2e/labels.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+test("every run state has a text label", async ({ page }) => {
+  for (const path of ["/runs", `/runs/${encodeURIComponent(ids().runs.failed)}`, "/quarantine"]) {
+    await page.goto(path);
+    for (const el of await page.locator("[data-run-state]").all()) {
+      await expect(el).toContainText(/completed|healed|quarantined|failed|refused/);
+    }
+  }
+});
+
+test("every severity has a glyph and a text label", async ({ page }) => {
+  await page.goto("/quality");
+  const badges = page.locator("[data-severity]");
+  expect(await badges.count()).toBeGreaterThanOrEqual(3);
+  for (const b of await badges.all()) await expect(b).toHaveText(/^[◆▲■●○] (Critical|High|Medium|Low|Info)$/);
+});
+
+test("every verdict outcome has a glyph and a text label", async ({ page }) => {
+  for (const path of [`/heals/${ids().heals.accepted}`, `/heals/${ids().heals.firstHeal}`, "/quarantine"]) {
+    await page.goto(path);
+    for (const o of await page.locator("[data-verdict-outcome]").all()) {
+      await expect(o).toHaveText(/^(✓ Pass|✕ Fail|◌ Insufficient evidence)$/);
+    }
+  }
+});
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `cd web && npx playwright test e2e/a11y.spec.ts e2e/keyboard.spec.ts e2e/labels.spec.ts`
+Expected: FAIL on at least one axe scan. Record each violation id and node in the task log; do not
+suppress a rule. The known candidates are `color-contrast` on `.sd-muted` text in comfortable density
+and `scrollable-region-focusable` on any overflowing region that lacks `tabIndex={0}`.
+
+- [ ] **Step 3: Fix every violation at its source**
+
+Fix in the component or stylesheet that produces the node axe names — never by disabling a rule or
+excluding a selector. The rules for the fix, so a reviewer can check each one: text colour comes from
+an `-ink` token or `--bok-neutral-9` and darker (4.5:1, measured by `check-contrast.mjs`); every
+scrolling region is focusable and named; every landmark and form control has a unique accessible name;
+nothing interactive is smaller than 24×24 CSS px (WCAG 2.2 AA 2.5.8). If a fix needs a new token
+value, it goes into `bok-ui` (Task 34A), is re-measured there, and the proposal file gains a line.
+
+Run: `cd web && npx playwright test e2e/a11y.spec.ts e2e/keyboard.spec.ts e2e/labels.spec.ts`
+Expected: PASS, 22 tests (16 axe, 3 keyboard, 3 labels).
+
+- [ ] **Step 4: Wire the web suites into CI**
+
+Append under `jobs:` in `.github/workflows/ci.yml`:
+
+```yaml
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the bok-ui slice (private until first release)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/backoffice-kit
+          ref: bok-ui-minimal
+          path: backoffice-kit
+          token: ${{ secrets.BOK_READ_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build bok-ui
+        working-directory: backoffice-kit/packages/bok-ui
+        run: npm ci && npm run check
+      - name: Point web at the CI checkout of bok-ui
+        # web/package.json pins an absolute local path (slice spec section 2); CI rewrites that one specifier.
+        run: |
+          npm pkg set "dependencies.bok-ui=file:$GITHUB_WORKSPACE/backoffice-kit/packages/bok-ui"
+          npm install --no-audit --no-fund
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: web
+    defaults:
+      run:
+        working-directory: web
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/backoffice-kit
+          ref: bok-ui-minimal
+          path: backoffice-kit
+          token: ${{ secrets.BOK_READ_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: astral-sh/setup-uv@v5
+      - name: Python environment
+        working-directory: .
+        run: uv sync
+      - name: Build bok-ui and link it
+        run: |
+          (cd "$GITHUB_WORKSPACE/backoffice-kit/packages/bok-ui" && npm ci && npm run build)
+          npm pkg set "dependencies.bok-ui=file:$GITHUB_WORKSPACE/backoffice-kit/packages/bok-ui"
+          npm install --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - name: E2E, including axe (zero serious or critical)
+        run: npx playwright test
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          retention-days: 7
+```
+
+`BOK_READ_TOKEN` is a fine-grained, read-only, single-repository token — $0, and it expires; note its
+expiry date in `docs/security.md` (Task 40).
+
+Run locally what CI runs: `cd web && npx tsc --noEmit && npx vitest run && npx playwright test`
+Expected: `tsc` exits 0; Vitest PASS, 46 tests; Playwright PASS, every spec written so far
+(13 + 6 + 10 + 11 + 22 = 62 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/e2e/a11y.spec.ts web/e2e/keyboard.spec.ts web/e2e/labels.spec.ts .github/workflows/ci.yml web
+git commit -m "test(web): axe in both densities, keyboard operation and text labels, gated in CI"
+```
+
+(`git add web` picks up whichever components Step 3 changed.)
+
+---
+
+### Task 39A: The cross-cutting requirements `00` mandates — R17 (M8, M11)
+
+**Why this task exists.** Five requirements from `00` §5 apply to every product in the programme,
+and none appeared in Tasks 35–39 of the first revision (verified then: `grep -ic` for `cmdk`, `375`,
+`print` returned 0). The provenance rail — the signature element — now lands with the first extracted
+value in Task 37; this task carries the rest: the `cmdk` palette, density, print, 375px, reduced
+motion, and the two product-wide invariants spec §7 adds: **no confidence element anywhere**, and
+**drift indigo only on heal-state elements**, both checked by scanning rendered pages rather than
+trusting review.
+
+| Requirement | Source | Where it is proven |
+|---|---|---|
+| `cmdk` command palette, `Cmd/Ctrl+K` | `00` §5.5; spec §4 | `palette.spec.ts` |
+| Density modes, persisted, server-rendered | `00` §5.2; contract §6.1 | `density.spec.ts` (+ axe in both, Task 39) |
+| Print for the two report views | `00` §5.5; spec §4 | `print.spec.ts` |
+| Responsive to 375px, rail open included | `00` §5.5; spec §4 | `responsive.spec.ts` |
+| Reduced motion: rail, chain, outline to `0s` | spec §4 | `motion.spec.ts` (+ outline in `heallog.spec.ts`) |
+| No confidence element; indigo only on heal state | design §5.4; spec §2 | `invariants.spec.ts` |
+
+**One conflict resolved, found 2026-09-26.** `bok-ui/print.css` expands an open rail inline when
+printing, which suits a report built around one claim. Spec §4 prints the heal log and quality screens
+**without** the rail: the verdict table and both screenshots carry the evidence, and a rail opened on
+one value of a hundred would print as an orphan. `web/app/print.css` hides it and says why.
+
+**Files:**
+- Create: `web/components/CommandPalette.tsx`, `web/components/DensityToggle.tsx`, `web/app/print.css`
+- Modify: `web/app/(app)/layout.tsx` (targets for the palette, density toggle, palette mount), `web/app/layout.tsx` (import `./print.css`), `web/components/Nav.tsx` (palette trigger), `web/app/globals.css` (append)
+- Test: `web/e2e/palette.spec.ts`, `web/e2e/density.spec.ts`, `web/e2e/print.spec.ts`, `web/e2e/responsive.spec.ts`, `web/e2e/motion.spec.ts`, `web/e2e/invariants.spec.ts`
+
+**Interfaces:**
+- Consumes: `cmdk` (`Command.Dialog`, `Command.Input`, `Command.List`, `Command.Group`, `Command.Item`, `Command.Empty`); `useDecision()` (Task 38) for promote/discard; `load` (Task 35) for target names; `sd_density` cookie read by the root layout (Task 35).
+- Produces:
+  - `<CommandPalette targets={string[]} />` (client). Opens on `Ctrl+K`/`Cmd+K` or the `sd:palette` window event. Entries: the five nav screens; `Runs: <target>` and `Spec: <target>` per target; `Promote this run: <run_key>` / `Discard this run: <run_key>` for each quarantined run on screen (the same `DecisionDialog`); `Toggle density`; `Print this report` on `/heals/*` and `/quality` only.
+  - `<PaletteButton />` (opens the palette for pointer users).
+  - `<DensityToggle initial={"comfortable" | "compact"} />`, `toggleDensity()`, `setDensity(d)` — writes `data-density` on `<html>` and the `sd_density` cookie (`Path=/; Max-Age=31536000; SameSite=Strict`).
+  - `web/app/print.css`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// web/e2e/palette.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+test("the command palette navigates by keyboard", async ({ page }) => {
+  await page.goto("/targets");
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("Quarantine");
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\/quarantine$/);
+});
+
+test("the command palette can promote a quarantined run", async ({ page }) => {
+  await page.goto("/quarantine");
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("Promote this run");
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: `Promote run ${ids().runs.quarantined}` });
+  await expect(dialog).toBeVisible();
+});
+
+test("print is offered only on the two report views", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("Print");
+  await expect(page.getByRole("option", { name: "Print this report" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.goto("/targets");
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("Print");
+  await expect(page.getByText("No matching command.")).toBeVisible();
+});
+```
+
+```ts
+// web/e2e/density.spec.ts
+import { expect, test } from "@playwright/test";
+
+test("density toggles, persists across a reload, and is rendered by the server", async ({ page }) => {
+  await page.goto("/runs");
+  const html = page.locator("html");
+  await expect(html).toHaveAttribute("data-density", "compact");
+  const toggle = page.getByRole("button", { name: "Comfortable density" });
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await toggle.click();
+  await expect(html).toHaveAttribute("data-density", "comfortable");
+  await page.reload();
+  await expect(html).toHaveAttribute("data-density", "comfortable");
+  await expect(page.getByRole("button", { name: "Comfortable density" })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("the two densities really change the row height", async ({ page }) => {
+  await page.goto("/runs");
+  const row = () => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--bok-density-row").trim());
+  const compact = await row();
+  await page.getByRole("button", { name: "Comfortable density" }).click();
+  expect(await row()).not.toBe(compact);
+});
+```
+
+```ts
+// web/e2e/print.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+test("the heal log prints without the chrome and keeps the verdicts and both screenshots", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await page.emulateMedia({ media: "print" });
+  await expect(page.getByTestId("nav")).toBeHidden();
+  await expect(page.getByTestId("verdict-row").first()).toBeVisible();
+  await expect(page.locator("#evidence-before img")).toBeVisible();
+  await expect(page.locator("#evidence-after img")).toBeVisible();
+});
+
+test("an open rail does not print, and evidence links print their URL", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await page.getByTestId("claim-value").first().click();
+  await expect(page.getByRole("complementary", { name: "Provenance" })).toBeVisible();
+  await page.emulateMedia({ media: "print" });
+  await expect(page.getByRole("complementary", { name: "Provenance" })).toBeHidden();
+  const after = await page.locator("a[data-evidence-link]").first().evaluate((a) => getComputedStyle(a, "::after").content);
+  expect(after).toMatch(/attr\(href\)|\/api\/v1\/heals\//);
+});
+
+test("the quality screen prints its table without the nav or the filters", async ({ page }) => {
+  await page.goto("/quality");
+  await page.emulateMedia({ media: "print" });
+  await expect(page.getByTestId("nav")).toBeHidden();
+  await expect(page.getByRole("form", { name: "Filter findings" })).toBeHidden();
+  await expect(page.getByTestId("quality-row").first()).toBeVisible();
+});
+```
+
+```ts
+// web/e2e/responsive.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids, SCREENS, screenPath } from "./fixtures/ids";
+
+const noHorizontalScroll = () => document.documentElement.scrollWidth <= window.innerWidth;
+
+test.use({ viewport: { width: 375, height: 800 } });
+
+for (const screen of SCREENS) {
+  test(`${screen} does not scroll horizontally at 375px`, async ({ page }) => {
+    await page.goto(screenPath(screen));
+    expect(await page.evaluate(noHorizontalScroll)).toBe(true);
+  });
+}
+
+test("login does not scroll horizontally at 375px", async ({ browser }) => {
+  const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] }, viewport: { width: 375, height: 800 } });
+  const page = await ctx.newPage();
+  await page.goto("/login");
+  expect(await page.evaluate(noHorizontalScroll)).toBe(true);
+  await ctx.close();
+});
+
+test("375px: the rail goes full width and the page still does not scroll sideways", async ({ page }) => {
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await page.getByTestId("claim-value").first().click();
+  const rail = page.getByRole("complementary", { name: "Provenance" });
+  await expect(rail).toBeVisible();
+  const box = await rail.boundingBox();
+  expect(box?.width ?? 0).toBeGreaterThanOrEqual(374);
+  expect(await page.evaluate(noHorizontalScroll)).toBe(true);
+  await expect(rail.getByRole("button", { name: "Close provenance" })).toBeVisible();
+});
+```
+
+```ts
+// web/e2e/motion.spec.ts
+import { expect, test } from "@playwright/test";
+import { ids } from "./fixtures/ids";
+
+test("under reduced motion the rail slide and the chain stagger are 0s", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await page.getByTestId("claim-value").first().click();
+  await expect(page.locator("[data-bok-rail]")).toHaveCSS("animation-duration", "0s");
+  await expect(page.locator(".bok-rail-item").first()).toHaveCSS("animation-duration", "0s");
+  await expect(page.locator(".bok-rail-item").first()).toHaveCSS("animation-delay", "0s");
+});
+
+test("without that preference the rail does slide, so the test above is not vacuous", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto(`/heals/${ids().heals.accepted}`);
+  await page.getByTestId("claim-value").first().click();
+  await expect(page.locator("[data-bok-rail]")).toHaveCSS("animation-duration", "0.18s");
+});
+```
+
+```ts
+// web/e2e/invariants.spec.ts
+import { expect, test } from "@playwright/test";
+import { SCREENS, screenPath } from "./fixtures/ids";
+
+// Drift indigo, light theme: the base accent and its -ink sibling (bok-ui tokens.css).
+const INDIGO = String.raw`oklch\(0\.5[25] 0\.14 268\)`;
+
+for (const screen of SCREENS) {
+  test(`${screen}: no element is labelled confidence`, async ({ page }) => {
+    // Design 5.4: there is no confidence score in this product, and the UI must not imply one is hidden.
+    await page.goto(screenPath(screen));
+    if (screen === "heal") await page.getByTestId("claim-value").first().click();
+    await expect(page.getByText(/confidence/i)).toHaveCount(0);
+    await expect(page.locator('[data-testid="confidence"], [role="meter"], [aria-label*="confidence" i]')).toHaveCount(0);
+  });
+
+  test(`${screen}: drift indigo appears only on heal-state elements`, async ({ page }) => {
+    await page.goto(screenPath(screen));
+    const offenders = await page.evaluate((pattern) => {
+      const re = new RegExp(pattern);
+      const bad: string[] = [];
+      for (const el of Array.from(document.querySelectorAll("body *"))) {
+        const cs = getComputedStyle(el);
+        const colours = [cs.color, cs.backgroundColor, cs.borderTopColor, cs.borderRightColor, cs.borderBottomColor,
+          cs.borderLeftColor, cs.outlineColor, cs.textDecorationColor, cs.fill, cs.stroke];
+        if (colours.some((c) => re.test(c)) && el.closest('[data-heal-state], [data-run-state="healed"], [data-bok-outline]') === null) {
+          bad.push(`${el.tagName.toLowerCase()}${el.id !== "" ? `#${el.id}` : ""} "${(el.textContent ?? "").trim().slice(0, 40)}"`);
+        }
+      }
+      return bad;
+    }, INDIGO);
+    expect(offenders).toEqual([]);
+  });
+}
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `cd web && npx playwright test e2e/palette.spec.ts e2e/density.spec.ts e2e/print.spec.ts e2e/responsive.spec.ts e2e/motion.spec.ts e2e/invariants.spec.ts`
+Expected: FAIL — no palette (`Control+k` does nothing), no "Comfortable density" button, the nav still
+prints, and the rail still prints (the `bok-ui` sheet expands it). The motion, responsive and invariant
+tests may already pass; they are regression guards for everything above, and each is shown to be
+non-vacuous by its pair (`motion.spec.ts`'s second test, the rail-width assertion, the offender list).
+
+- [ ] **Step 3: Build the palette and the density toggle**
+
+```tsx
+// web/components/DensityToggle.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+
+export type Density = "comfortable" | "compact";
+
+const EVENT = "sd:density";
+
+function current(): Density {
+  return document.documentElement.dataset.density === "comfortable" ? "comfortable" : "compact";
+}
+
+export function setDensity(d: Density): void {
+  document.documentElement.dataset.density = d;
+  document.cookie = `sd_density=${d}; Path=/; Max-Age=31536000; SameSite=Strict`;
+  window.dispatchEvent(new CustomEvent<Density>(EVENT, { detail: d }));
+}
+
+export function toggleDensity(): void {
+  setDensity(current() === "compact" ? "comfortable" : "compact");
+}
+
+/** The root layout renders data-density from the cookie, so the first paint is already right. */
+export function DensityToggle({ initial }: { initial: Density }) {
+  const [density, setLocal] = useState<Density>(initial);
+  useEffect(() => {
+    const onChange = (e: Event) => {
+      if (e instanceof CustomEvent && (e.detail === "comfortable" || e.detail === "compact")) setLocal(e.detail);
+    };
+    window.addEventListener(EVENT, onChange);
+    return () => window.removeEventListener(EVENT, onChange);
+  }, []);
+  return (
+    <button type="button" className="sd-quiet" aria-pressed={density === "comfortable"} onClick={toggleDensity}>
+      Comfortable density
+    </button>
+  );
+}
+```
+
+```tsx
+// web/components/CommandPalette.tsx
+"use client";
+
+import { Command } from "cmdk";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { useDecision } from "./DecisionProvider";
+import { toggleDensity } from "./DensityToggle";
+
+const SCREENS = [
+  ["/targets", "Targets"],
+  ["/runs", "Runs"],
+  ["/quarantine", "Quarantine"],
+  ["/quality", "Data quality"],
+  ["/specs", "Specs"],
+] as const;
+
+const OPEN_EVENT = "sd:palette";
+
+export function PaletteButton() {
+  return (
+    <button type="button" className="sd-quiet" aria-keyshortcuts="Control+K Meta+K" onClick={() => window.dispatchEvent(new Event(OPEN_EVENT))}>
+      Commands <kbd>Ctrl K</kbd>
+    </button>
+  );
+}
+
+/** Full keyboard operation (00 section 5.5). Promote/discard open the same DecisionDialog as the
+ *  card buttons, so there is one audited path, not two. */
+export function CommandPalette({ targets }: { targets: readonly string[] }) {
+  const [open, setOpen] = useState(false);
+  const router = useRouter();
+  const pathname = usePathname();
+  const decision = useDecision();
+  const isReport = pathname.startsWith("/heals/") || pathname === "/quality";
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setOpen((o) => !o);
+      }
+    };
+    const onOpen = () => setOpen(true);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener(OPEN_EVENT, onOpen);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener(OPEN_EVENT, onOpen);
+    };
+  }, []);
+
+  const go = (href: string) => {
+    setOpen(false);
+    router.push(href);
+  };
+
+  return (
+    <Command.Dialog open={open} onOpenChange={setOpen} label="Command palette" className="sd-palette" data-bok-chrome>
+      <Command.Input placeholder="Go to a screen, a target, or an action" />
+      <Command.List>
+        <Command.Empty>No matching command.</Command.Empty>
+        <Command.Group heading="Screens">
+          {SCREENS.map(([href, label]) => (
+            <Command.Item key={href} value={`screen ${label}`} onSelect={() => go(href)}>{label}</Command.Item>
+          ))}
+        </Command.Group>
+        {targets.length > 0 && (
+          <Command.Group heading="Targets">
+            {targets.flatMap((t) => [
+              <Command.Item key={`runs-${t}`} value={`runs ${t}`} onSelect={() => go(`/runs?target=${encodeURIComponent(t)}`)}>Runs: {t}</Command.Item>,
+              <Command.Item key={`spec-${t}`} value={`spec ${t}`} onSelect={() => go(`/specs/${encodeURIComponent(t)}`)}>Spec: {t}</Command.Item>,
+            ])}
+          </Command.Group>
+        )}
+        {decision.onScreen.length > 0 && (
+          <Command.Group heading="This run">
+            {decision.onScreen.flatMap((k) => [
+              <Command.Item key={`promote-${k}`} value={`promote this run ${k}`} onSelect={() => { setOpen(false); decision.open("promote", k); }}>
+                Promote this run: {k}
+              </Command.Item>,
+              <Command.Item key={`discard-${k}`} value={`discard this run ${k}`} onSelect={() => { setOpen(false); decision.open("discard", k); }}>
+                Discard this run: {k}
+              </Command.Item>,
+            ])}
+          </Command.Group>
+        )}
+        <Command.Group heading="View">
+          <Command.Item value="toggle density" onSelect={() => { toggleDensity(); setOpen(false); }}>Toggle density</Command.Item>
+          {isReport && (
+            <Command.Item value="print this report" onSelect={() => { setOpen(false); window.setTimeout(() => window.print(), 0); }}>
+              Print this report
+            </Command.Item>
+          )}
+        </Command.Group>
+      </Command.List>
+    </Command.Dialog>
+  );
+}
+```
+
+Replace `web/components/Nav.tsx` so the shell carries the palette trigger (the `tools` prop stays for
+the density toggle):
+
+```tsx
+import type { ReactNode } from "react";
+import { PaletteButton } from "./CommandPalette";
+import { NavLinks } from "./NavLinks";
+import { SignOutButton } from "./SignOutButton";
+
+export function Nav({ tools }: { tools?: ReactNode }) {
+  return (
+    <header className="sd-top" data-bok-chrome>
+      <a className="sd-skip" href="#main">Skip to content</a>
+      <p className="sd-brand"><span aria-hidden="true">◇</span> Selector Drift</p>
+      <nav aria-label="Primary" data-testid="nav"><NavLinks /></nav>
+      <div className="sd-tools">
+        <PaletteButton />
+        {tools}
+        <SignOutButton />
+      </div>
+    </header>
+  );
+}
+```
+
+Replace `web/app/(app)/layout.tsx`:
+
+```tsx
+import { cookies } from "next/headers";
+import type { ReactNode } from "react";
+import { CommandPalette } from "@/components/CommandPalette";
+import { DecisionProvider } from "@/components/DecisionProvider";
+import { DensityToggle } from "@/components/DensityToggle";
+import { Nav } from "@/components/Nav";
+import { RailRoot } from "@/components/RailRoot";
+import { load } from "@/lib/api";
+
+export default async function AppLayout({ children }: { children: ReactNode }) {
+  const [targets, jar] = await Promise.all([load((c) => c.GET("/api/v1/targets")), cookies()]);
+  const names = targets.ok ? targets.data.map((t) => t.target).sort() : [];
+  const density = jar.get("sd_density")?.value === "comfortable" ? "comfortable" : "compact";
+  return (
+    <RailRoot>
+      <DecisionProvider>
+        <div className="sd-shell">
+          <Nav tools={<DensityToggle initial={density} />} />
+          <main id="main" className="sd-main" tabIndex={-1}>{children}</main>
+        </div>
+        <CommandPalette targets={names} />
+      </DecisionProvider>
+    </RailRoot>
+  );
+}
+```
+
+Append to `web/app/globals.css`:
+
+```css
+/* cmdk palette */
+.sd-palette { position: fixed; inset: 12vh 0 auto; margin: 0 auto; width: min(36rem, calc(100vw - 2rem)); z-index: 60; background: var(--bok-paper); color: var(--bok-ink); border: 1px solid var(--bok-neutral-6); border-radius: var(--bok-radius-control); box-shadow: 0 12px 32px oklch(0.22 0.012 85 / 0.18); }
+.sd-palette [cmdk-input] { width: 100%; font: inherit; padding: calc(var(--bok-space) * 3); border: 0; border-bottom: 1px solid var(--bok-neutral-4); background: transparent; color: inherit; }
+.sd-palette [cmdk-list] { max-height: 50vh; overflow: auto; padding: var(--bok-space); }
+.sd-palette [cmdk-group-heading] { font-size: 0.75rem; color: var(--bok-neutral-9); padding: var(--bok-space) calc(var(--bok-space) * 2); }
+.sd-palette [cmdk-item] { padding: calc(var(--bok-space) * 2); border-radius: var(--bok-radius-cell); cursor: pointer; overflow-wrap: anywhere; }
+.sd-palette [cmdk-item][data-selected="true"] { background: var(--bok-neutral-3); }
+.sd-palette [cmdk-empty] { padding: calc(var(--bok-space) * 3); color: var(--bok-neutral-9); }
+kbd { font-family: var(--bok-font-mono); font-size: 0.75rem; border: 1px solid var(--bok-neutral-6); border-radius: var(--bok-radius-cell); padding: 0 3px; }
+@media (max-width: 639.98px) { .sd-tools kbd { display: none; } }
+```
+
+- [ ] **Step 4: Write the product print sheet and import it**
+
+`web/app/print.css`:
+
+```css
+/* The heal log and the quality table are report views: printed and forwarded to auditors
+   (00 section 5.1). bok-ui/print.css hides [data-bok-chrome] and prints severity glyphs; this
+   sheet adds what is specific to this product. */
+@media print {
+  .sd-top, .sd-skip, .sd-filters, .sd-actions, dialog, .sd-palette, [cmdk-overlay] { display: none !important; }
+  /* bok-ui/print.css expands an open rail inline. Spec section 4 prints without it: the verdict
+     table and both screenshots carry the evidence, and a rail opened on one value of a hundred
+     would print as an orphan. */
+  [data-bok-rail] { display: none !important; }
+  .sd-shell { display: block; min-height: 0; }
+  .sd-main { max-width: none; padding: 0; }
+  .sd-section { break-inside: avoid-page; margin-top: 12pt; }
+  .sd-heal [data-heal-state] { grid-template-columns: 1fr 1fr; }
+  img { max-width: 100%; break-inside: avoid; }
+  a[data-evidence-link]::after { content: " (" attr(href) ")"; font-family: var(--bok-font-mono); font-size: 8pt; overflow-wrap: anywhere; }
+  .sd-table th, .sd-table td { border-bottom: 0.5pt solid #000; }
+}
+```
+
+In `web/app/layout.tsx`, add the import after `./globals.css` so it wins on equal specificity:
+
+```tsx
+import "./globals.css";
+import "./print.css";
+```
+
+- [ ] **Step 5: Run them and make sure they pass**
+
+Run: `cd web && npx playwright test e2e/palette.spec.ts e2e/density.spec.ts e2e/print.spec.ts e2e/responsive.spec.ts e2e/motion.spec.ts e2e/invariants.spec.ts`
+Expected: PASS, 33 tests (3 palette, 2 density, 3 print, 9 responsive, 2 motion, 14 invariants).
+
+Then the whole web suite, as CI runs it:
+
+Run: `cd web && npx tsc --noEmit && npx vitest run && npx playwright test`
+Expected: `tsc` exits 0; Vitest PASS, 46 tests; Playwright PASS, 95 tests (62 through Task 39 + 33).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add web docs/runbook-spec-update.md
-git commit -m "feat(web): provenance rail, print stylesheet, palette, 375px, spec runbook"
+git add web/components/CommandPalette.tsx web/components/DensityToggle.tsx web/components/Nav.tsx \
+        web/app/print.css web/app/layout.tsx "web/app/(app)/layout.tsx" web/app/globals.css \
+        web/e2e/palette.spec.ts web/e2e/density.spec.ts web/e2e/print.spec.ts web/e2e/responsive.spec.ts \
+        web/e2e/motion.spec.ts web/e2e/invariants.spec.ts
+git commit -m "feat(web): cmdk palette, density, print, 375px, reduced motion, and the no-confidence and indigo invariants"
 ```
 
 ---
@@ -3870,69 +21655,584 @@ git commit -m "docs: methodology and security posture"
 ### Task 40A: Publish the heal log — R17 (M9)
 
 **Files:**
-- Create: `selector_drift/heallog/publish.py`, `.github/workflows/publish-heallog.yml`
-- Create: `docs/heallog/index.md`, `docs/disclosure.md`
+- Create: `selector_drift/heallog/publish.py`
+- Create: `docs/heallog/index.md`, `docs/heallog/CHANGELOG.md`, `docs/disclosure.md`
+- Modify: `selector_drift/orchestrate/deployments.py` (register `publish_deployment()`)
 - Test: `tests/heallog/test_publish.py`
+- **Removed from this list (found 2026-09-26): `.github/workflows/publish-heallog.yml`.** A GitHub
+  Actions runner cannot reach a compose-only Postgres on a private VM, so an Actions publisher
+  could never read a single row. The publisher runs where the data is.
 
 **Interfaces:**
-- Consumes: `runs`, `run_attempts`, `resolutions`, `heal_events`, `interventions`, `deploys`, evidence storage.
-- Produces: a static, versioned public artifact — the thing the whole phase exists to produce.
+- Consumes: `derive.stats`, `derive.heal_summary`, `derive.elapsed_days` (Task 34B — **the same
+  module the operator UI uses**, so the public log and the screen cannot disagree, API spec §1);
+  `HealEvent`, `Heartbeat`, `ScopeRecordRow` (Task 3); `read_heal_manifest`, `verified_bytes`,
+  `EvidenceCorrupted`, `HEALS_DIR` (Task 19); `write_guarded`, `Plane`, `Labelled`, `Sensitivity`
+  (`bok_core.boundary`); `get_settings` (Task 33).
+- Produces:
+  - `PUBLISHABLE_TARGETS: frozenset[str]` — the explicit allowlist (H7)
+  - `PublishedHeal`, `PublishedLog` (with `evidence_for(target) -> list[str]`, `counts_for(target) -> StatsView`, `numbers`, `elapsed_days`, `manual_interventions`)
+  - `build(db, *, today: date, publishable: frozenset[str] = PUBLISHABLE_TARGETS) -> PublishedLog`
+  - `render(log: PublishedLog, out: Path, *, evidence_root: Path, docs: Path = Path("docs")) -> list[Path]`
+  - `open_pages_worktree(repo: Path, *, branch: str = "gh-pages", remote: str = "origin") -> Path`, `commit_and_push(work: Path, *, message: str, branch: str = "gh-pages", remote: str = "origin") -> str`, `close_worktree(repo: Path, work: Path) -> None`
+  - `publish_heallog(today: date | None = None, repo: str = ".", docs: str = "docs") -> str` — Prefect flow; returns the pushed commit
+  - `publish_deployment() -> RunnerDeployment` in `orchestrate/deployments.py` — weekly, cron `0 5 * * 1`
 
 **Why this task exists.** DoD 6 is *"ninety-day heal log running since day one, with **published**
 methodology"*, and design §8.2 argues at length about publishability — but **no task produced the
 artifact.** The plan generated the data and stopped. `00` B9 also attaches obligations to publishing
 that only the methodology half was covering.
 
+**Where it runs — corrected 2026-09-26 (design §8.2).** The first revision scheduled the publisher
+as a GitHub Actions workflow. Postgres and the evidence live on the P-4 VM, inside the compose
+network; Actions cannot reach them. The publisher is a **weekly Prefect deployment on the VM**:
+it builds the site into a `git worktree` of the `gh-pages` branch, commits, and pushes with the
+VM's deploy key (configured on the VM as the `origin` remote's credential, never in the repo).
+GitHub Pages serves the branch. No database, no server — design §2.2 Q4's *"a static export with no
+database"*.
+
+**Every figure comes from `derive.py`.** The first revision's `test_every_published_number_is_computed_not_typed`
+compared the log to a `recompute_from_database()` the plan never defined — a second computation that
+could drift from the first. There is now one computation; the test below checks the published
+figures, the rendered `data.json` and `derive.stats()` agree on the same fixture (API spec §9,
+`test_stats_and_the_published_log_agree`).
+
+**Evidence is published from an allowlist AND the derived basis — both, never either (H7).** A
+target's screenshots reach the public site only if it is named in `PUBLISHABLE_TARGETS` *and* its
+latest scope record's basis is `self-owned`. A client target contributes counts only — no
+screenshot, no DOM, ever (design §8.2) — and a target with no scope record is treated as a client
+target: fail closed. Only the two PNGs are published, never the DOM (a DOM snapshot is the richest
+thing in a bundle and nothing on the public page needs it). Every file the publisher writes goes
+through `egress.write_guarded(…, Plane.DEMO)`, so a `CLIENT_CONFIDENTIAL` label reaching this path
+is refused by the library, not by a local `if`.
+
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_the_published_log_contains_no_client_confidential_evidence(published):
-    # Design 8.2, H7. Publication is gated on an explicit allowlist of targets,
-    # NOT on a `sensitivity` string a typo could change. A client target added
-    # later contributes COUNTS ONLY -- no screenshots, no DOM, ever.
+# tests/heallog/test_publish.py
+from __future__ import annotations
+
+import dataclasses
+import datetime as dt
+import inspect
+import json
+import subprocess
+from datetime import UTC, datetime, time
+from pathlib import Path
+
+import pytest
+from sqlalchemy import text
+
+from bok_core.boundary.egress import Plane
+from bok_core.boundary.sensitivity import Sensitivity
+from selector_drift.api import derive
+from selector_drift.config import get_settings
+from selector_drift.db.models import HealEvent, Heartbeat, Intervention, Run, ScopeRecordRow
+from selector_drift.db.session import Session, engine
+from selector_drift.heallog import publish as publish_mod
+from selector_drift.heallog.capture import Evidence
+from selector_drift.heallog.evidence import PiiMasker, redact_evidence, write_heal_bundle
+from selector_drift.heallog.publish import PUBLISHABLE_TARGETS, build, publish_heallog, render
+from selector_drift.orchestrate.deployments import publish_deployment
+
+KEY = b"test-only-redaction-key-not-a-secret!"
+DAY_ONE = dt.date(2026, 9, 1)
+TODAY = dt.date(2026, 9, 11)
+PAGE = "<html><body><table><tr><td data-sd-node='n1'>AB12345678</td></tr></table></body></html>"
+
+
+def _at(day: int) -> datetime:
+    return datetime(2026, 9, day, 4, 12, tzinfo=UTC)
+
+
+def _scope(target: str, basis: str) -> ScopeRecordRow:
+    return ScopeRecordRow(target=target, basis=basis, authorising_party="me",
+                          authorised_on=DAY_ONE, expires_on=dt.date(2027, 9, 1),
+                          evidence_uri=None if basis == "self-owned" else "file:///a.pdf",
+                          evidence_sha256=None if basis == "self-owned" else "0" * 64,
+                          origins=["https://x.example.invalid"],
+                          rate_limit={"requests": 1, "per_seconds": 30},
+                          user_agent_contact="https://example.invalid/contact",
+                          first_heal_policy="required", legal_review="self_drafted",
+                          warmup_runs=30, evidence_retention_days=None
+                          if basis == "self-owned" else 90,
+                          record_sha256="0" * 64, loaded_at=_at(1))
+
+
+@pytest.fixture
+def seeded(tmp_path, monkeypatch):
+    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(tmp_path / "evidence"))
+    monkeypatch.setenv("SD_REDACTION_KEY", KEY.hex())
+    get_settings.cache_clear()
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE runs, run_attempts, resolutions, heal_events, quarantine, "
+                       "interventions, audit_log, heartbeats, scope_records "
+                       "RESTART IDENTITY CASCADE"))
+    heal_ids: dict[str, int] = {}
+    with Session() as s:
+        s.add(_scope("testbench", "self-owned"))
+        s.add(_scope("client-portal", "client-authorised"))
+        for target, sens in (("testbench", Sensitivity.SYNTHETIC),
+                             ("client-portal", Sensitivity.CLIENT_CONFIDENTIAL)):
+            for day in (1, 2, 3):
+                key = f"{target}:1:2026-09-0{day}"
+                s.add(Heartbeat(target=target, scheduled_for=_at(day), fired_at=_at(day),
+                                run_key=key))
+                s.add(Run(run_key=key, target=target, spec_version=1,
+                          window=dt.date(2026, 9, day), first_started_at=_at(day),
+                          state="healed" if day == 2 else "completed"))
+            s.flush()
+            heal = HealEvent(run_key=f"{target}:1:2026-09-02", target=target,
+                             field="claim_number", broke_at=_at(2), winning_rung=3,
+                             confirmer_rung=4, confirmer_family="STRUCTURAL",
+                             selector_after="td", anchor_after={}, trace=[], verdicts=[],
+                             replayed_ok=target != "testbench")    # the bench heal did NOT replay
+            s.add(heal)
+            s.flush()
+            ev = Evidence.from_static(PAGE, run_key=heal.run_key, sensitivity=sens,
+                                      masker=PiiMasker(KEY, sens))
+            heal.evidence_uri = write_heal_bundle(heal.id, target, redact_evidence(ev, key=KEY),
+                                                  Plane.CLIENT)
+            heal_ids[target] = heal.id
+        s.add(Intervention(at=_at(3), actor="op1", kind="spec_edit", target="testbench",
+                           field="claim_number", before={"description": "a"},
+                           after={"description": "b"}, reason="reworded"))
+        s.commit()
+    yield heal_ids
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def published(seeded):
+    with Session() as s:
+        return build(s, today=TODAY)
+
+
+def recompute_from_database(window) -> dict[str, object]:
+    """The ONLY other way to get these numbers is derive.stats -- which is the point."""
+    with Session() as s:
+        return derive.stats(s, None, window,
+                            now=datetime.combine(TODAY, time.max, UTC)).model_dump(mode="json")
+
+
+def actual_days_since(day: dt.date) -> int:
+    return (TODAY - day).days
+
+
+@pytest.mark.integration
+def test_the_published_log_contains_no_client_confidential_evidence(published, seeded, tmp_path):
+    # Design 8.2, H7. Publication is gated on an explicit allowlist of targets AND the
+    # derived basis, NOT on a `sensitivity` string a typo could change. A client target
+    # contributes COUNTS ONLY -- no screenshots, no DOM, ever.
     assert set(published.targets_with_evidence) <= PUBLISHABLE_TARGETS
     for t in published.client_targets:
         assert published.evidence_for(t) == [] and published.counts_for(t)
+    out = tmp_path / "site"
+    render(published, out, evidence_root=get_settings().evidence_root)
+    assert not (out / "evidence" / str(seeded["client-portal"])).exists()
+    assert not list(out.rglob("*.html"))                  # no DOM half is ever published
 
+
+@pytest.mark.integration
 def test_every_published_number_is_computed_not_typed(published):
-    assert published.numbers == recompute_from_database()
+    assert published.numbers == recompute_from_database(published.window)
 
+
+@pytest.mark.integration
+def test_stats_and_the_published_log_agree(published, tmp_path):
+    """API spec 9. derive.stats() vs heallog.publish on the same fixture: the log object,
+    the rendered data.json, and a fresh derive call, whole-log and per target."""
+    out = tmp_path / "site"
+    render(published, out, evidence_root=get_settings().evidence_root)
+    data = json.loads((out / "data.json").read_text())
+    now = datetime.combine(TODAY, time.max, UTC)
+    with Session() as s:
+        assert published.stats == derive.stats(s, None, published.window, now=now)
+        assert data["stats"] == published.stats.model_dump(mode="json")
+        for target, view in published.per_target.items():
+            assert view == derive.stats(s, target, published.window, now=now)
+            assert data["per_target"][target] == view.model_dump(mode="json")
+
+
+@pytest.mark.integration
 def test_the_log_states_its_elapsed_days_not_ninety(published):
     # B10 -- a partial log with an honest start date beats no log, but only if it
     # says which it is.
     assert published.elapsed_days == actual_days_since(DAY_ONE)
 
+
+@pytest.mark.integration
 def test_the_log_states_missed_runs_and_manual_interventions(published):
     assert "missed" in published.summary and published.manual_interventions is not None
+    assert published.manual_interventions == 1
 
-def test_a_non_reproducible_heal_is_published_as_such(published):
+
+@pytest.mark.integration
+def test_a_non_reproducible_heal_is_published_as_such(published, tmp_path):
     # B5. A heal you cannot reproduce is an anecdote; the log says so rather than
     # quietly counting it.
     assert all(h.replayed_ok is not False or h.flagged for h in published.heals)
+    out = tmp_path / "site"
+    render(published, out, evidence_root=get_settings().evidence_root)
+    bench = next(h for h in published.heals if h.target == "testbench")
+    assert "did not reproduce" in (out / "heals" / f"{bench.id}.md").read_text()
 
-def test_results_are_versioned_and_carry_a_changelog(published):
+
+@pytest.mark.integration
+def test_results_are_versioned_and_carry_a_changelog(published, tmp_path):
     assert published.version and Path("docs/heallog/CHANGELOG.md").exists()
+    out = tmp_path / "site"
+    render(published, out, evidence_root=get_settings().evidence_root)
+    assert (out / "CHANGELOG.md").read_text() == Path("docs/heallog/CHANGELOG.md").read_text()
+    assert (out / "disclosure.md").exists() and (out / "methodology.md").exists()
+
+
+@pytest.mark.integration
+def test_every_published_file_goes_through_the_egress_guard(published, tmp_path, monkeypatch):
+    real = publish_mod.write_guarded
+    seen: list[Path] = []
+    monkeypatch.setattr(publish_mod, "write_guarded",
+                        lambda path, payload, plane, *, redaction=None:
+                        (seen.append(path), real(path, payload, plane, redaction=redaction)))
+    out = tmp_path / "site"
+    render(published, out, evidence_root=get_settings().evidence_root)
+    assert sorted(seen) == sorted(p for p in out.rglob("*") if p.is_file())
+
+
+@pytest.mark.integration
+def test_publish_pushes_the_site_to_gh_pages(seeded, tmp_path):
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(bare)], check=True)
+    repo = tmp_path / "checkout"
+    subprocess.run(["git", "clone", "--quiet", str(bare), str(repo)], check=True)
+    sha = publish_heallog.fn(today=TODAY, repo=str(repo))
+    files = subprocess.run(["git", "--git-dir", str(bare), "ls-tree", "-r", "--name-only",
+                            "gh-pages"], check=True, capture_output=True, text=True).stdout
+    assert "index.md" in files and "data.json" in files and len(sha) == 40
+
+
+@pytest.mark.unit
+def test_publish_is_a_weekly_prefect_deployment_on_the_vm_not_an_actions_workflow():
+    dep = publish_deployment()
+    assert dep.name == "publish-heallog"
+    assert dep.schedules[0].schedule.cron == "0 5 * * 1"
+    assert not Path(".github/workflows/publish-heallog.yml").exists()
+    assert "from selector_drift.api import derive" in inspect.getsource(publish_mod)
 ```
 
 - [ ] **Step 2: Run them and watch them fail.**
 
-- [ ] **Step 3: Implement `publish.py`** — reads the tables, renders static HTML/Markdown to
-  `docs/heallog/`, deployed by GitHub Pages (free, already in the template). No database, no server;
-  design §2.2 Q4's *"the published heal log is a static export with no database"*.
+Run: `uv run pytest tests/heallog/test_publish.py -v`
+Expected: FAIL — `ModuleNotFoundError: selector_drift.heallog.publish`.
+
+- [ ] **Step 3: Implement `publish.py`**
+
+```python
+# selector_drift/heallog/publish.py
+"""The public heal log: a static site on the gh-pages branch, built weekly ON THE VM
+(design 8.2). Every figure comes from derive.py -- the module the operator UI uses."""
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import tempfile
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, time
+from pathlib import Path
+
+from prefect import flow
+from sqlalchemy import select
+from sqlalchemy.orm import Session as OrmSession
+
+from bok_core.boundary.egress import Plane, write_guarded
+from bok_core.boundary.sensitivity import Labelled, Sensitivity
+from selector_drift.api import derive
+from selector_drift.api.views import StatsView
+from selector_drift.config import get_settings
+from selector_drift.db.models import HealEvent, Heartbeat, ScopeRecordRow
+from selector_drift.db.session import Session
+from selector_drift.heallog.bundle import (AFTER_PNG, BEFORE_PNG, HEALS_DIR, EvidenceCorrupted,
+                                           read_heal_manifest, verified_bytes)
+
+# H7: an explicit list, reviewed in a PR -- never derived from a string in a YAML file.
+# P-3 renames the two control-arm targets before day one.
+PUBLISHABLE_TARGETS: frozenset[str] = frozenset({"testbench", "agent-perimeter", "ledger-sense"})
+
+
+@dataclass(frozen=True)
+class PublishedHeal:
+    id: int
+    target: str
+    field: str
+    broke_at: datetime
+    summary: str
+    replayed_ok: bool | None
+    flagged: bool                       # True unless the heal is known to reproduce (B5)
+    evidence: tuple[str, ...]           # published PNG names; empty for client targets
+
+
+@dataclass(frozen=True)
+class PublishedLog:
+    version: str
+    generated_at: datetime
+    window: tuple[date, date]
+    stats: StatsView
+    per_target: dict[str, StatsView]
+    heals: list[PublishedHeal]
+    targets_with_evidence: frozenset[str]
+    client_targets: frozenset[str]
+    summary: str
+    _evidence: dict[str, list[str]] = field(default_factory=dict)
+
+    @property
+    def numbers(self) -> dict[str, object]:
+        return self.stats.model_dump(mode="json")
+
+    @property
+    def elapsed_days(self) -> int:
+        return self.stats.elapsed_days
+
+    @property
+    def manual_interventions(self) -> int:
+        return self.stats.manual_interventions
+
+    def evidence_for(self, target: str) -> list[str]:
+        return list(self._evidence.get(target, []))
+
+    def counts_for(self, target: str) -> StatsView:
+        return self.per_target[target]
+
+
+def _bases(db: OrmSession) -> dict[str, str]:
+    latest: dict[str, str] = {}
+    for row in db.scalars(select(ScopeRecordRow).order_by(ScopeRecordRow.loaded_at)):
+        latest[row.target] = row.basis
+    return latest
+
+
+def _sentence(s: StatsView, start: date) -> str:
+    refused = ("no answer key" if s.quarantines_refused_correctly is None
+               else f"{s.quarantines_refused_correctly} correctly refused on the bench")
+    return (f"{s.elapsed_days} days since {start.isoformat()}. {s.scheduled_runs} scheduled runs, "
+            f"{s.missed_runs} missed, {s.fired_without_attempt} fired without an attempt. "
+            f"Run success {s.run_success_rate:.1%}. {s.heals} heals, {s.quarantines} quarantines "
+            f"({refused}). {s.manual_interventions} manual interventions. "
+            f"Rung 5: {s.rung_shares['rung5']:.1%} of resolutions.")
+
+
+def build(db: OrmSession, *, today: date,
+          publishable: frozenset[str] = PUBLISHABLE_TARGETS) -> PublishedLog:
+    first = db.scalar(select(Heartbeat.fired_at).order_by(Heartbeat.fired_at).limit(1))
+    start = first.astimezone(UTC).date() if first is not None else today
+    window = (start, today)
+    now = datetime.combine(today, time.max, UTC)
+    bases = _bases(db)
+    targets = sorted(set(bases) | set(db.scalars(select(Heartbeat.target).distinct())))
+    # No record, or anything but self-owned, is a client target: counts only (fail closed).
+    clients = frozenset(t for t in targets if bases.get(t) != "self-owned")
+    with_evidence = frozenset(t for t in targets if t in publishable and t not in clients)
+    heals: list[PublishedHeal] = []
+    evidence: dict[str, list[str]] = {}
+    for h in db.scalars(select(HealEvent).order_by(HealEvent.broke_at, HealEvent.id)):
+        names = (BEFORE_PNG, AFTER_PNG) if h.target in with_evidence else ()
+        heals.append(PublishedHeal(id=h.id, target=h.target, field=h.field, broke_at=h.broke_at,
+                                   summary=derive.heal_summary(h), replayed_ok=h.replayed_ok,
+                                   flagged=h.replayed_ok is not True, evidence=names))
+        evidence.setdefault(h.target, []).extend(f"{h.id}/{n}" for n in names)
+    stats = derive.stats(db, None, window, now=now)
+    return PublishedLog(version=f"{today:%Y.%m.%d}", generated_at=datetime.now(UTC),
+                        window=window, stats=stats,
+                        per_target={t: derive.stats(db, t, window, now=now) for t in targets},
+                        heals=heals, targets_with_evidence=with_evidence, client_targets=clients,
+                        summary=_sentence(stats, start),
+                        _evidence={t: v for t, v in evidence.items() if t in with_evidence})
+
+
+def _emit(path: Path, data: bytes, sensitivity: Sensitivity) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_guarded(path, Labelled(value=data, sensitivity=sensitivity), Plane.DEMO)
+    return path
+
+
+def _heal_page(h: PublishedHeal, published: list[str]) -> str:
+    lines = [f"# Heal {h.id} — {h.target} · {h.field}", "", h.summary, ""]
+    if h.replayed_ok is False:
+        lines += ["> **This heal did not reproduce from stored evidence.** It is counted as "
+                  "non-reproducible (design §6, B5).", ""]
+    elif h.replayed_ok is None:
+        lines += ["> Not yet replayed from stored evidence.", ""]
+    lines += [f"![{n}](../evidence/{h.id}/{n})" for n in published]
+    if not h.evidence:
+        lines.append("Counts only: evidence for this target is never published (design §8.2).")
+    return "\n".join(lines) + "\n"
+
+
+def render(log: PublishedLog, out: Path, *, evidence_root: Path,
+           docs: Path = Path("docs")) -> list[Path]:
+    written: list[Path] = []
+    text = Sensitivity.PUBLIC           # figures and sentences: aggregates, no client content
+    for h in log.heals:
+        copied: list[str] = []
+        bundle = evidence_root / HEALS_DIR / str(h.id)
+        if h.evidence:
+            try:
+                manifest = read_heal_manifest(bundle)
+                for name in h.evidence:
+                    if name in manifest.files:        # a first heal has no before.png
+                        png = verified_bytes(bundle, manifest.files, name)
+                        written.append(_emit(out / "evidence" / str(h.id) / name, png,
+                                             Sensitivity.SYNTHETIC))
+                        copied.append(name)
+            except EvidenceCorrupted:
+                copied = []                           # never publish a file we cannot vouch for
+        written.append(_emit(out / "heals" / f"{h.id}.md", _heal_page(h, copied).encode(), text))
+    figures = "\n".join(f"| {k} | {v} |" for k, v in log.numbers.items())
+    index = (f"# Selector Drift — heal log v{log.version}\n\n{log.summary}\n\n"
+             f"| Figure | Value |\n|---|---|\n{figures}\n\n"
+             "How each figure is computed: [methodology](methodology.md#published-figures). "
+             "Disclosure and right of reply: [disclosure](disclosure.md). "
+             "Changes: [changelog](CHANGELOG.md).\n\n## Heals\n\n"
+             + "\n".join(f"- [{h.broke_at:%Y-%m-%d %H:%M} · {h.target} · {h.field}]"
+                         f"(heals/{h.id}.md){' — non-reproducible' if h.flagged else ''}"
+                         for h in log.heals) + "\n")
+    written.append(_emit(out / "index.md", index.encode(), text))
+    data = {"version": log.version, "window": [d.isoformat() for d in log.window],
+            "stats": log.stats.model_dump(mode="json"),
+            "per_target": {t: v.model_dump(mode="json") for t, v in log.per_target.items()},
+            "heals": [{"id": h.id, "target": h.target, "field": h.field,
+                       "broke_at": h.broke_at.isoformat(), "summary": h.summary,
+                       "replayed_ok": h.replayed_ok, "flagged": h.flagged} for h in log.heals]}
+    written.append(_emit(out / "data.json",
+                         json.dumps(data, indent=2, sort_keys=True).encode(), text))
+    for src, name in ((docs / "heallog" / "CHANGELOG.md", "CHANGELOG.md"),
+                      (docs / "disclosure.md", "disclosure.md"),
+                      (docs / "methodology.md", "methodology.md")):
+        written.append(_emit(out / name, src.read_bytes(), text))
+    written.append(_emit(out / ".nojekyll", b"", text))
+    return written
+
+
+def _git(where: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(where), *args], check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def open_pages_worktree(repo: Path, *, branch: str = "gh-pages",
+                        remote: str = "origin") -> Path:
+    work = Path(tempfile.mkdtemp(prefix="heallog-")) / "site"
+    exists = subprocess.run(["git", "-C", str(repo), "ls-remote", "--exit-code", "--heads",
+                             remote, branch], capture_output=True).returncode == 0
+    if exists:
+        _git(repo, "fetch", "--quiet", remote, branch)
+        _git(repo, "worktree", "add", "--force", "-B", branch, str(work), f"{remote}/{branch}")
+        _git(work, "rm", "-r", "--quiet", "--ignore-unmatch", ".")   # each publish is whole
+    else:
+        # First publish: an empty orphan worktree (git >= 2.42; the VM image pins a newer git).
+        _git(repo, "worktree", "add", "--quiet", "--orphan", "-b", branch, str(work))
+    return work
+
+
+def commit_and_push(work: Path, *, message: str, branch: str = "gh-pages",
+                    remote: str = "origin") -> str:
+    _git(work, "add", "-A")
+    _git(work, "-c", "user.name=selector-drift publisher",
+         "-c", "user.email=publisher@selector-drift.invalid",
+         "commit", "--quiet", "--allow-empty", "-m", message)
+    _git(work, "push", "--quiet", remote, f"HEAD:{branch}")
+    return _git(work, "rev-parse", "HEAD")
+
+
+def close_worktree(repo: Path, work: Path) -> None:
+    _git(repo, "worktree", "remove", "--force", str(work))
+    shutil.rmtree(work.parent, ignore_errors=True)
+
+
+@flow(name="publish_heallog")
+def publish_heallog(today: date | None = None, repo: str = ".", docs: str = "docs") -> str:
+    today = today or datetime.now(UTC).date()
+    with Session() as s:
+        log = build(s, today=today)
+    root = Path(repo)
+    work = open_pages_worktree(root)
+    try:
+        render(log, work, evidence_root=get_settings().evidence_root, docs=Path(docs))
+        return commit_and_push(work, message=f"heallog: publish v{log.version}")
+    finally:
+        close_worktree(root, work)
+```
+
+In `selector_drift/orchestrate/deployments.py`:
+
+```python
+from selector_drift.heallog.publish import publish_heallog
+
+PUBLISH_CRON = "0 5 * * 1"            # Mondays 05:00 UTC, after the 04:12 run has landed
+
+
+def publish_deployment() -> RunnerDeployment:
+    return publish_heallog.to_deployment(name="publish-heallog", cron=PUBLISH_CRON,
+                                         parameters={"repo": "/srv/selector-drift",
+                                                     "docs": "/srv/selector-drift/docs"},
+                                         job_variables={"mem_limit": "512m"})
+```
+
+and the module's `serve(...)` call gains `publish_deployment()`. `/srv/selector-drift` is the VM's
+checkout (P-4); its `origin` pushes with the VM's deploy key.
 
 - [ ] **Step 4: Write `docs/disclosure.md`** — `00` B9: a published artifact making claims about
-  software needs a stated sample and population, a coordinated-disclosure route, a right of reply, and
-  versioned results with a changelog. The bench is ours and `agent-perimeter` / `ledger-sense` are
-  ours, so the right-of-reply surface is small — which is the argument for writing it now, while it
-  costs nothing, rather than after a client target joins.
+  software needs a stated sample and population, a coordinated-disclosure route, a right of reply,
+  and versioned results with a changelog. The bench is ours and the two control targets are ours,
+  so the right-of-reply surface is small — which is the argument for writing it now, while it
+  costs nothing, rather than after a client target joins:
 
-- [ ] **Step 5: Schedule it weekly** and re-run at day 90.
+```markdown
+# Disclosure, sample and right of reply
 
-- [ ] **Step 6: Commit**
+**Sample.** Every scheduled run of the targets listed in `data.json` since each target's first
+heartbeat — no run is excluded, and missed runs are counted, not hidden.
+**Population.** The claims describe these targets only. The bench is a deliberately mutating
+application we built; the two control targets are applications we own. Nothing here is a claim
+about any third party's software.
+**Client targets** contribute counts only. No screenshot, DOM or value from a client portal is
+ever published.
+**Coordinated disclosure.** Report a flaw in selector-drift, or in how this log is computed, via
+the security contact in the repository (`SECURITY.md`). We acknowledge within 5 working days.
+**Right of reply.** If a published figure concerns software you maintain, contact the address in
+`SECURITY.md`; a reply is published beside the figure, unedited, within 10 working days.
+**Versioning.** Each weekly publish carries a version (`YYYY.MM.DD`). Changes to method, not just
+to data, are recorded in `CHANGELOG.md` with the date and the figures they affect.
+```
+
+- [ ] **Step 5: Write `docs/heallog/index.md` and `docs/heallog/CHANGELOG.md`** — `index.md`
+  states that the log is built weekly on the VM from the same `derive.py` the operator UI uses and
+  is published on the `gh-pages` branch; `CHANGELOG.md` opens with the day-one entry
+  (`<day one UTC> — log started; figures: run success, rung shares, missed runs, heals,
+  quarantines, manual interventions`).
+
+- [ ] **Step 6: Register the deployment and verify it on the VM**
 
 ```bash
-git add selector_drift/heallog/publish.py docs/heallog docs/disclosure.md .github/workflows
-git commit -m "feat(heallog): published static heal log with disclosure policy"
+uv run python -m selector_drift.orchestrate.deployments
+uv run prefect deployment ls | grep -E "publish-heallog|evidence-retention"
+uv run prefect deployment run 'publish_heallog/publish-heallog'
+git ls-remote origin gh-pages
+```
+
+Expected: both deployments listed; the manual run pushes a commit to `gh-pages`; GitHub Pages
+serves `index.md` at the repo's Pages URL. Re-run at day 90.
+
+- [ ] **Step 7: Run the tests**
+
+Run: `uv run pytest tests/heallog/test_publish.py -v`
+Expected: PASS, 10 tests.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add selector_drift/heallog/publish.py selector_drift/orchestrate/deployments.py \
+        docs/heallog docs/disclosure.md tests/heallog/test_publish.py
+git commit -m "feat(heallog): weekly VM-side publish of the heal log to gh-pages, figures from derive.py"
 ```
 
 ---
@@ -4068,6 +22368,21 @@ gh repo edit --visibility public --accept-visibility-change-consequences  # firs
 - **`PageSource` (Task 13) comes before any rung.** It is not tidiness. It is what makes replay legal under the import contracts, what lets the mutation suite run without a browser, and what turns hundreds of CDP round-trips per run into one snapshot. Retrofitting it after Tasks 14–17 means rewriting all four rungs.
 - **Task 26A is not optional and has no substitute.** Before it, nothing connects resolve → gate → land. Every assertion in Task 41 reads a table that only the assembled pipeline fills.
 - **Task 26B measures the half that decides whether the product works.** Task 26 shows the resolver can heal and the gate can refuse. 26B shows the gate does not refuse everything. A system that quarantines every legitimate heal passes 26 and fails the customer.
+- **Execution order is not numeric order — corrected 2026-09-26.** Task numbers are identifiers
+  referenced across the plan, the specs and the audit, so they are not renumbered. The sections of this
+  document are now in this order, which is the execution order:
+
+  ```
+  1 2 3 4 5 6 | 7 8 9 10 11 11A 12 | 13 14 15 16 17 18 19 | 20 21 22 23 24 25 27 26 |
+  28 29 30 29A | 31 32 33 26A 26B 26C | 34A 34 34B 34C 35 36 37 38 39 39A | 40 40A 41
+  ```
+
+  Each move was verified against the tasks' own `Consumes:` lines. **26A** consumes `extract.read`
+  (27), `land.write` (28), `quality.evaluate` (29) and `heallog.store` (33), so it cannot run before
+  33 — the audit inserted it "between Task 25 and Task 26" without checking. **27** must precede **26**,
+  whose suites call `extract`. **26B** calls `run_pipeline_on`, i.e. 26A. **26C** scores heals that 26A
+  records. **34A** (the `bok-ui` slice) must precede **35**; **34B** (`derive.py`) must precede **34C**,
+  whose `/stats` route returns it.
 
 ## Revision log
 
