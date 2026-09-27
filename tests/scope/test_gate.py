@@ -1,6 +1,8 @@
+import dataclasses
 import datetime as dt
 import hashlib
 import inspect
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -203,3 +205,128 @@ def test_record_sha256_is_the_canonical_json_of_the_record():
         == record_sha256(r)
     )
     assert record_sha256(rec(authorising_party="someone else")) != record_sha256(r)
+
+
+# --- Fix round 1 ------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_mutating_a_scope_record_after_construction_is_rejected():
+    """I-1. `ScopeRecord` is frozen: attribute assignment must fail, not silently mutate a
+    validated record into an unvalidated one in place."""
+    r = rec()
+    with pytest.raises(Exception):  # noqa: B017 -- pydantic raises ValidationError here,
+        # not a plain assertion the test needs to name; any raise proves assignment failed.
+        r.basis = Basis.CLIENT_AUTHORISED  # type: ignore[misc]
+
+
+@pytest.mark.unit
+def test_model_construct_bypass_with_invalid_basis_is_refused_by_authorise():
+    """I-1. `model_construct()` skips validation entirely, so a `ScopeRecord` with a `basis`
+    outside the v1 enum is constructible. `authorise()` must still refuse it via
+    re-validation, not mint from whatever it was handed."""
+    r = ScopeRecord.model_construct(
+        target="testbench",
+        basis="public-permissive",
+        authorising_party="me",
+        authorised_on=dt.date(2026, 9, 1),
+        expires_on=dt.date(2027, 9, 1),
+        evidence_uri=None,
+        evidence_sha256=None,
+        origins=["https://bench.example.invalid"],
+        rate_limit={"requests": 1, "per_seconds": 30},
+        user_agent_contact="https://example.invalid/contact",
+        first_heal_policy="required",
+        legal_review="self_drafted",
+        warmup_runs=30,
+        evidence_retention_days=None,
+    )
+    with pytest.raises(ScopeRefusal):
+        authorise(r, today=TODAY)
+
+
+@pytest.mark.unit
+def test_model_construct_bypass_with_bad_rate_limit_dict_is_refused_not_attributeerror():
+    """I-1. `model_construct()` does not coerce a dict into `RateLimit`, so `record.rate_limit`
+    is a plain dict here. Without re-validation, `record.rate_limit.requests` inside
+    `authorise()` would raise `AttributeError`; with it, the malformed shape is caught as a
+    `ScopeRefusal` before any attribute access on it happens."""
+    r = ScopeRecord.model_construct(
+        target="testbench",
+        basis=Basis.SELF_OWNED,
+        authorising_party="me",
+        authorised_on=dt.date(2026, 9, 1),
+        expires_on=dt.date(2027, 9, 1),
+        evidence_uri=None,
+        evidence_sha256=None,
+        origins=["https://bench.example.invalid"],
+        rate_limit={"per_seconds": 30},  # missing "requests" -- not a RateLimit
+        user_agent_contact="https://example.invalid/contact",
+        first_heal_policy="required",
+        legal_review="self_drafted",
+        warmup_runs=30,
+        evidence_retention_days=None,
+    )
+    with pytest.raises(ScopeRefusal):
+        authorise(r, today=TODAY)
+
+
+@pytest.mark.unit
+def test_dataclasses_replace_on_an_authorised_target_is_refused():
+    """I-2. `dataclasses.replace()` passes the already-minted `_MINT` token straight back
+    through `__init__`, so an identity-only check would let it re-mint outside the gate.
+    The minting context flag must also be required, and it is unset once `authorise()` has
+    returned."""
+    target = authorise(rec(), today=TODAY)
+    with pytest.raises(ScopeRefusal, match="mint"):
+        dataclasses.replace(target, origins=("*",))
+
+
+@pytest.mark.unit
+def test_no_module_outside_scope_references_the_mint_internals():
+    """I-2. The identity check plus the minting context flag, and the import-linter
+    contract, are the only paths to `_MINT`/`_MINTING`. Nothing outside `selector_drift.scope`
+    should even textually mention them -- a module that does is either working around the
+    gate or about to."""
+    offenders = []
+    for path in Path("selector_drift").rglob("*.py"):
+        parts = path.relative_to("selector_drift").parts
+        if parts and parts[0] == "scope":
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "_MINT" in text or "_MINTING" in text:
+            offenders.append(str(path))
+    assert not offenders, offenders
+
+
+@pytest.mark.unit
+def test_evidence_uri_with_embedded_null_byte_is_refused_not_crashed(tmp_path):
+    """M-4. `url2pathname`'s percent-decoding can produce a path containing an embedded
+    null byte, which raises `ValueError` deep inside `Path.read_bytes()`. That must surface
+    as a `ScopeRefusal`, never an uncaught `ValueError`."""
+    with pytest.raises(ScopeRefusal):
+        authorise(
+            rec(
+                basis=Basis.CLIENT_AUTHORISED,
+                evidence_uri="file:///a%00b",
+                evidence_sha256="0" * 64,
+                evidence_retention_days=90,
+            ),
+            today=TODAY,
+        )
+
+
+@pytest.mark.unit
+def test_evidence_uri_naming_a_host_is_refused():
+    """M-4. A `file://` URI with a non-empty, non-`localhost` netloc names a remote or
+    UNC-style host; the gate must not attempt to read it."""
+    with pytest.raises(ScopeRefusal):
+        authorise(
+            rec(
+                basis=Basis.CLIENT_AUTHORISED,
+                evidence_uri="file://example.invalid/etc/passwd",
+                evidence_sha256="0" * 64,
+                evidence_retention_days=90,
+            ),
+            today=TODAY,
+        )
