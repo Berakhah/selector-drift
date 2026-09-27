@@ -48,5 +48,24 @@ type = forbidden
 source_modules = selector_drift
 forbidden_modules = testbench.answers
 
+[importlinter:contract:only-the-gate-mints]
+name = Only scope.gate may reach the mint token
+type = forbidden
+source_modules =
+    selector_drift.browser
+    selector_drift.resolve
+    selector_drift.validate
+    selector_drift.extract
+    selector_drift.land
+    selector_drift.orchestrate
+    selector_drift.heallog
+    selector_drift.api
+forbidden_modules = selector_drift.scope._token
+# Indirect imports are allowed ON PURPOSE (found 2026-09-26): orchestrate -> scope.gate ->
+# scope._token is the one legitimate path, and forbidden contracts count indirect imports by
+# default, so without this line the contract breaks on the only caller it exists to permit.
+# What is forbidden is a DIRECT import of _token from any of these packages.
+allow_indirect_imports = True
+
 # NO no-model-calls stanza here -- see "Replaced 2026-09-26" below. It is enforced by
 # tests/test_bok_core_allowlist.py instead.
