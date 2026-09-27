@@ -11,6 +11,12 @@ license = "Apache-2.0"
 # Using an editable path dependency into the sibling backoffice-kit repo's own
 # .worktrees/bok-core-minimal worktree instead -- sidesteps git-URL parsing entirely and
 # needs no pinned ref, at the cost of depending on a worktree that lives outside this repo.
+# The path below is ABSOLUTE, not relative, on purpose (code review finding): a relative
+# path is resolved from pyproject.toml's own directory, so `../../../../` only lands on
+# `backoffice-kit/` from inside this nested .claude/worktrees/ checkout -- from the real
+# repo root after this branch merges, the same `../../../../` overshoots past the repo's
+# drive root. An absolute path is correct from any checkout of this repo but is NOT
+# portable across machines (it hardcodes this machine's path to the sibling repo).
 # Unblocked by either: the bok-core-minimal branch merging to backoffice-kit's main, or a
 # real PyPI release -- switch this source back to a normal PyPI dependency at that point.
 dependencies = [
@@ -49,8 +55,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# testbench.portal is a Next.js app, not a Python package -- excluded on purpose (L8: grimp
-# must never be given a reason to walk node_modules).
+# testbench.portal is a Python package (server-rendered FastAPI + Jinja2, bench spec §1) as
+# of 2026-09-26 -- no exclusion here; it packages normally under testbench.
 packages = ["selector_drift", "testbench"]
 
 [tool.ruff]
@@ -66,7 +72,8 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # tests/test_import_contracts.py is copied verbatim from the plan (already audited) --
 # SIM115 (context manager for open()) is a style nit, not worth diverging from that text.
-"tests/**" = ["SIM115"]
+# Narrowed to this one file (not "tests/**") since no other test file uses bare open().
+"tests/test_import_contracts.py" = ["SIM115"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -75,6 +82,7 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--strict-markers"
 markers = [
     "unit: no external dependencies -- no browser, no Postgres, no network",
     "integration: may touch Postgres, the lake, or a local bench fixture",
@@ -89,4 +97,4 @@ markers = [
 playwright_chromium_revision = "1234"
 
 [tool.uv.sources]
-bok-core = { path = "../../../../backoffice-kit/.worktrees/bok-core-minimal", editable = true }
+bok-core = { path = "D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-core-minimal", editable = true }
