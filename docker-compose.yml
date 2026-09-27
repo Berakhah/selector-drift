@@ -16,7 +16,33 @@ services:
       timeout: 5s
       retries: 10
 
-# Task 4 adds the `worker` service (Playwright, containerised) here -- not this task's job.
+  # The browser worker (Task 4, B8). Declared, not started: `build: .` needs the repo-root
+  # Dockerfile Task 6 creates, and Task 6 replaces this block with its superset (command,
+  # restart policy, init, the escalation-corpus volume, depends_on prefect-server).
+  # Limits must match selector_drift/browser/limits.py.
+  #
+  # Seccomp (H1): option 2 of the Task 4 brief, chosen deliberately. Docker's DEFAULT seccomp
+  # profile applies -- there is no `seccomp=` line, and never `seccomp=unconfined`, which would
+  # remove the filter on the one container that renders hostile HTML. The default profile
+  # denies what Chromium's own sandbox needs, so Chromium runs with --no-sandbox
+  # (SD_CHROMIUM_NO_SANDBOX=1, read by browser/driver.py), leaning on the container boundary:
+  # cap_drop ALL, no-new-privileges, read-only rootfs, non-root uid, and a single-purpose
+  # container whose egress the driver's allowlist confines to the scope record's origins.
+  worker:
+    build: .
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ ALL ]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs: [ "/tmp", "/home/app/.cache" ]
+    shm_size: 1g              # Chromium's default /dev/shm in Docker is 64 MB
+    mem_limit: 2g
+    pids_limit: 512
+    environment:
+      PLAYWRIGHT_BROWSERS_PATH: /opt/pw-browsers   # baked at build, readable by uid 10001
+      SD_CHROMIUM_NO_SANDBOX: "1"
+    depends_on: [ postgres ]
 
 volumes:
   postgres_data:
