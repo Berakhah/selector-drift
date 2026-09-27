@@ -366,6 +366,22 @@ _BAD_ORIGINS = [
     "http://[::1",
     "http://[not-an-ip]",
     "http://[127.0.0.1]",
+    "http://[::1%,*]",  # round 2: IPv6 zone id smuggles a comma into the bypass list
+    "http://[fe80::1%eth0]",
+    "http://[::1%;*]",
+    "http://[::1%<-loopback>]",
+    "http://[::1% x]",
+    "http://[::1%a,*,b]",
+    "http://[::1%25x]",
+    "http://[::FFFF:1]",  # upper-case hex
+    "http://0x7f.1",  # numeric/hex forms browsers read as 127.0.0.1
+    "http://2130706433",
+    "http://127.000.0.1",
+    "http://127.0.0.01",
+    "http://a.0x1",
+    "http://a.example:" + chr(0xFF18) + chr(0xFF10),  # full-width digits
+    "http://a.example:080",  # leading zero
+    "http://a." + chr(0xE9) + "xample",
 ]
 
 
@@ -399,7 +415,11 @@ def test_a_malformed_origin_smuggled_past_construction_is_refused_by_the_gate(or
         "http://127.0.0.1:5000",
         "https://10.0.0.7",
         "http://[::1]:8000",
+        "http://[::1]",
+        "http://127.0.0.1:8080",
+        "http://1.2.3.4",
         "https://localhost",
+        "https://a1.example",
     ],
 )
 def test_a_well_formed_origin_is_accepted(origin):
