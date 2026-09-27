@@ -9,9 +9,11 @@ contract.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
+from urllib.parse import urlsplit
 
 from bok_core.boundary.sensitivity import Sensitivity
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -38,6 +40,13 @@ class Basis(StrEnum):
 class FirstHealPolicy(StrEnum):
     REQUIRED = "required"
     AUTO_PROMOTE = "auto_promote"
+
+
+_TARGET_SLUG = re.compile(r"^[a-z0-9-]{1,64}$")
+# No whitespace, angle brackets, or other characters a browser would reject or mis-parse in a
+# URL -- deliberately excludes '<' and '>' so an unresolved `<REAL-ACCOUNT>`-style placeholder
+# (ruling 3, deferred Task 2 finding) fails here rather than loading as a plausible URL.
+_URL_UNSAFE_CHARS = re.compile(r"[\s<>\"^`{|}\\]")
 
 
 @dataclass(frozen=True)
@@ -75,6 +84,32 @@ class ScopeRecord(BaseModel):
     # quietly lower lives on the scope record, next to the authorisation basis.
     warmup_runs: int = Field(default=30, ge=1)
     evidence_retention_days: int | None = Field(default=None, ge=1)
+
+    @field_validator("target")
+    @classmethod
+    def _target_is_a_slug(cls, target: str) -> str:
+        """Deferred Task 2 finding (ruling 3, 2026-09-28): the target names a scope file
+        (`scopes/<target>.yaml`), a spec file, and a heartbeat key (Task 6). Anything outside
+        `^[a-z0-9-]{1,64}$` -- spaces, uppercase, an unresolved `<placeholder>` -- is a mistake
+        that should refuse at load rather than surface later as a path or key that never
+        matches what another file expects."""
+        if not _TARGET_SLUG.fullmatch(target):
+            raise ValueError(f"target must match ^[a-z0-9-]{{1,64}}$, got {target!r}")
+        return target
+
+    @field_validator("user_agent_contact")
+    @classmethod
+    def _contact_is_a_working_https_url(cls, value: str) -> str:
+        """Deferred Task 2 finding (ruling 3). Brief 3.3 requires a contact URL that resolves;
+        an unresolved `<REAL-ACCOUNT>`-style placeholder is not a URL that could ever resolve,
+        so it is refused here rather than loading as a plausible one (consistent with the
+        placeholder test in tests/scope/test_records_load.py)."""
+        if _URL_UNSAFE_CHARS.search(value):
+            raise ValueError(f"user_agent_contact is not a well-formed https:// URL: {value!r}")
+        parts = urlsplit(value)
+        if parts.scheme != "https" or not parts.netloc:
+            raise ValueError(f"user_agent_contact must be an https:// URL, got {value!r}")
+        return value
 
     @field_validator("origins")
     @classmethod

@@ -1,0 +1,14 @@
+version: 1
+scope_ref: scopes/agent-perimeter.yaml
+schedule: "17 4 * * *"                 # UTC, five minutes after the bench -- never the same minute
+row_scope: the landing page
+natural_key: [ page_heading ]
+expected_schema:
+  page_heading: string
+navigate:
+  - { step: goto, path: / }
+targets:
+  - name: page_heading
+    description: the main heading of the landing page
+    assertions:
+      - { type: format, pattern: '^\S.{0,119}$' }

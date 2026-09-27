@@ -1,0 +1,13 @@
+target: agent-perimeter
+basis: self-owned
+authorising_party: <AUTHORISING-PARTY>
+authorised_on: <DAY-ONE-UTC>
+expires_on: <DAY-ONE-UTC-PLUS-ONE-YEAR>
+evidence_uri: null
+evidence_sha256: null
+origins: [ "https://<CONTROL-1-HOST>" ]  # P-3: a self-owned deployment whose deploy history we can read
+rate_limit: { requests: 1, per_seconds: 30 }
+user_agent_contact: https://github.com/<REAL-ACCOUNT>/selector-drift
+first_heal_policy: required
+warmup_runs: 30                          # explicit, so the value is visible in review
+legal_review: self_drafted

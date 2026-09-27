@@ -1,0 +1,14 @@
+version: 1
+scope_ref: scopes/ledger-sense.yaml
+schedule: "22 4 * * *"                 # UTC
+row_scope: the landing page
+natural_key: [ page_heading ]
+expected_schema:
+  page_heading: string
+navigate:
+  - { step: goto, path: / }
+targets:
+  - name: page_heading
+    description: the main heading of the landing page
+    assertions:
+      - { type: format, pattern: '^\S.{0,119}$' }

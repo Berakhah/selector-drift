@@ -1,0 +1,20 @@
+version: 1
+scope_ref: scopes/testbench.yaml
+schedule: "12 4 * * *"                 # UTC. The mutation seed, the run window and the
+                                       # expiry check must all agree on one calendar (M20)
+row_scope: each row of the results table
+natural_key: [ claim_number ]
+expected_schema:
+  claim_number: string
+navigate:
+  - { step: goto, path: /login }
+  - { step: fill, field: username, value_from: credentials.username }
+  - { step: fill, field: password, value_from: credentials.password }
+  - { step: click, role: button, name: Sign in }
+  - { step: goto, path: /results }
+targets:
+  - name: claim_number
+    description: the claim number cell in the results table
+    relation: right_of
+    assertions:
+      - { type: format, pattern: '^[A-Z]{2}\d{8}$' }

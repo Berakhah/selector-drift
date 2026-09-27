@@ -1,0 +1,15 @@
+target: testbench
+basis: self-owned
+authorising_party: <AUTHORISING-PARTY>
+authorised_on: <DAY-ONE-UTC>             # the date this record is signed -- never a future date (B4)
+expires_on: <DAY-ONE-UTC-PLUS-ONE-YEAR>
+evidence_uri: null
+evidence_sha256: null
+origins: [ "https://<BENCH-HOST>" ]      # H2: the browser may reach nothing else
+rate_limit: { requests: 1, per_seconds: 30 }
+user_agent_contact: https://github.com/<REAL-ACCOUNT>/selector-drift   # P-2: must resolve
+first_heal_policy: auto_promote
+warmup_runs: 5
+legal_review: self_drafted
+# no `sensitivity:` -- it is derived from `basis` and cannot be authored (R4/H7)
+# no `evidence_retention_days:` -- self-owned evidence is kept for the life of the log
