@@ -80,6 +80,14 @@ python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 
+[[tool.mypy.overrides]]
+# bok-core is the sibling editable path dependency described above (P-1) -- it ships no
+# py.typed marker yet, so mypy --strict cannot see its inline types at all without this.
+# Scoped to the package, not a blanket ignore_missing_imports, so a typo in an unrelated
+# import still fails loudly.
+module = "bok_core.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers"
