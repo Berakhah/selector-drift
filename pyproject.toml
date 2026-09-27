@@ -28,7 +28,7 @@ dependencies = [
     "httpx>=0.28.1",
     "lxml>=6.1.2",
     "numpy>=2.5.2",
-    "playwright>=1.62.0",
+    "playwright==1.62.0",  # B8: exact, with the chromium revision below; see tests/test_pins.py
     "prefect>=3.8.4",
     "psycopg[binary]>=3.3.4",
     "pyarrow>=25.0.1",
@@ -42,6 +42,7 @@ dev = [
     "hypothesis>=6.165.10",
     "import-linter>=2.14",
     "mypy>=2.3.1",
+    "pre-commit>=4.6.2",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
@@ -68,12 +69,6 @@ extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-
-[tool.ruff.lint.per-file-ignores]
-# tests/test_import_contracts.py is copied verbatim from the plan (already audited) --
-# SIM115 (context manager for open()) is a style nit, not worth diverging from that text.
-# Narrowed to this one file (not "tests/**") since no other test file uses bare open().
-"tests/test_import_contracts.py" = ["SIM115"]
 
 [tool.mypy]
 python_version = "3.12"
