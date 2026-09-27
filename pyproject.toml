@@ -83,10 +83,12 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 # bok-core is the sibling editable path dependency described above (P-1) -- it ships no
 # py.typed marker yet, so mypy --strict cannot see its inline types at all without this.
-# Scoped to the package, not a blanket ignore_missing_imports, so a typo in an unrelated
-# import still fails loudly.
+# `follow_untyped_imports` (not `ignore_missing_imports`, fix round 1, I-3): the latter makes
+# every name imported from bok_core resolve to `Any`, silently defeating strict checking on
+# anything that touches `Sensitivity`. `follow_untyped_imports` instead has mypy read
+# bok_core's own (fully annotated, just unmarked) source and use its real types.
 module = "bok_core.*"
-ignore_missing_imports = true
+follow_untyped_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
