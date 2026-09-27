@@ -48,21 +48,5 @@ type = forbidden
 source_modules = selector_drift
 forbidden_modules = testbench.answers
 
-# DEFERRED (not one of the "5 kept" this task verifies -- see task-1-report.md).
-# import-linter 2.14's ForbiddenContract hard-refuses any forbidden_modules entry that is
-# a *subpackage* of an external package -- only the bare top-level name is a valid
-# forbidden-module value when include_external_packages = True (see
-# importlinter.contracts.forbidden.ForbiddenContract._check_external_forbidden_modules,
-# which raises unconditionally for "bok_core.gateway", independent of whether bok_core is
-# even installed). bok_core is also not installed right now (Task 1's git-dependency
-# blocker -- see the report). Re-enable once bok_core is a real dependency, as:
-#   forbidden_modules = bok_core
-#   ignore_imports =
-#       selector_drift.** -> bok_core.provenance.**
-#       selector_drift.** -> bok_core.boundary.**
-#   unmatched_ignore_imports_alerting = none   # until every module that needs it exists
-# [importlinter:contract:no-model-calls]
-# name = v1 makes zero model calls
-# type = forbidden
-# source_modules = selector_drift
-# forbidden_modules = bok_core.gateway
+# NO no-model-calls stanza here -- see "Replaced 2026-09-26" below. It is enforced by
+# tests/test_bok_core_allowlist.py instead.
