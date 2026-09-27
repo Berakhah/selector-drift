@@ -17,6 +17,7 @@ import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from urllib.parse import urljoin
 
@@ -28,6 +29,7 @@ from playwright.async_api import Page, async_playwright
 # bind the original at import time and make every one of those patches vacuous.
 from selector_drift.browser import allowlist, ratelimit, registry
 from selector_drift.browser.allowlist import OffScopeNavigation, RequestLedger
+from selector_drift.scope.errors import ScopeRefusal
 from selector_drift.scope.record import AuthorisedTarget
 
 _NO_SANDBOX_ENV = "SD_CHROMIUM_NO_SANDBOX"
@@ -160,6 +162,10 @@ async def open(target: AuthorisedTarget) -> AsyncIterator[Session]:
     No credentials parameter yet -- `Credentials` arrives with Task 31."""
     if not isinstance(target, AuthorisedTarget):
         raise TypeError("open() takes an AuthorisedTarget minted by scope.gate.authorise()")
+    # Authorised yesterday is not authorised today: a long-lived orchestrator may hold a
+    # target past its expiry, so check again here, before anything is launched (fails closed).
+    if target.expires_on < datetime.now(UTC).date():
+        raise ScopeRefusal(f"authorisation for {target.target!r} expired on {target.expires_on}")
     base = registry.url_for(target.target)
     if not allowlist.is_allowed(base, target):
         raise OffScopeNavigation(f"registry URL for {target.target!r} is outside its origins")

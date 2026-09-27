@@ -7,6 +7,12 @@ A stdlib `http.server` on 127.0.0.1:<random port> stands in for an authorised po
                 origin string* from the authorised ``http://127.0.0.1:<port>``, so it is off
                 scope. Nothing needs to answer there: the driver must never send the request.
 - ``/results``  a page embedding an off-origin ``<img src="http://localhost:<port>/x.png">``
+- ``/framed``   a page embedding an off-origin ``<iframe src="http://localhost:<port>/widget">``
+                -- a sub-frame navigation, aborted and recorded, but not the run leaving scope
+
+The target is named ``driver-fixture``, deliberately NOT one of the registry's real targets:
+``registry.url_for`` is monkeypatched for it, and the autouse limiter cleanup below deletes only
+this name's ``audit_log`` rows, so it can never touch a real target's rate-limit history.
 
 The server records every request line it receives (with its Host header) so a test can prove
 an off-scope request never reached the wire, not merely that the driver says it blocked it.
@@ -25,7 +31,7 @@ import pytest
 from selector_drift.scope.gate import authorise
 from selector_drift.scope.record import AuthorisedTarget, Basis, ScopeRecord
 
-TARGET = "testbench"
+TARGET = "driver-fixture"
 
 
 @dataclass
@@ -73,6 +79,14 @@ def _handler(bench: Bench) -> type[BaseHTTPRequestHandler]:
                     + f'<img src="{bench.off_origin}/x.png" alt="">'.encode()
                     + b"</body></html>",
                 )
+            elif self.path == "/framed":
+                self._send(
+                    200,
+                    b"<!doctype html><html><head><title>framed</title></head><body>"
+                    b"<p>host page</p>"
+                    + f'<iframe src="{bench.off_origin}/widget"></iframe>'.encode()
+                    + b"</body></html>",
+                )
             else:
                 self._send(404, b"not found", "text/plain")
 
@@ -112,6 +126,7 @@ def authorised_testbench(bench: Bench, monkeypatch: pytest.MonkeyPatch) -> Autho
         first_heal_policy="required",
         legal_review="self_drafted",
     )
+    # Covers "driver-fixture", which is deliberately absent from registry._URLS.
     monkeypatch.setattr("selector_drift.browser.registry.url_for", lambda _target: bench.base_url)
     return authorise(record, today=today)
 

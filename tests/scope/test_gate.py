@@ -288,9 +288,14 @@ def test_no_module_outside_scope_references_the_mint_internals():
     contract, are the only paths to `_MINT`/`_MINTING`. Nothing outside `selector_drift.scope`
     should even textually mention them -- a module that does is either working around the
     gate or about to."""
+    package = Path(__file__).resolve().parents[2] / "selector_drift"
+    sources = sorted(package.rglob("*.py"))
+    # From this file, not the cwd: a cwd-relative glob run from elsewhere finds nothing.
+    assert len(sources) > 10, f"scanned {len(sources)} files under {package} -- vacuous"
+    assert any(p.parent.name == "browser" for p in sources), "browser/ not scanned"
     offenders = []
-    for path in Path("selector_drift").rglob("*.py"):
-        parts = path.relative_to("selector_drift").parts
+    for path in sources:
+        parts = path.relative_to(package).parts
         if parts and parts[0] == "scope":
             continue
         text = path.read_text(encoding="utf-8")

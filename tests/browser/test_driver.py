@@ -1,3 +1,4 @@
+import datetime as dt
 import inspect
 import os
 import subprocess
@@ -9,6 +10,9 @@ import pytest
 
 from selector_drift import browser
 from selector_drift.browser import ratelimit
+from selector_drift.scope.errors import ScopeRefusal
+from selector_drift.scope.gate import authorise
+from selector_drift.scope.record import Basis, ScopeRecord
 
 
 @pytest.mark.unit
@@ -65,6 +69,72 @@ async def test_a_subresource_from_another_origin_is_aborted(authorised_testbench
         )
         assert session.blocked_urls, "nothing was blocked -- the assertion above is vacuous"
     assert not [s for s in bench.seen if s[0].startswith("localhost")], bench.seen
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_off_origin_iframe_is_aborted_but_is_not_a_scope_violation(
+    authorised_testbench, bench
+):
+    """An iframe's navigation is a sub-frame navigation: it is aborted and recorded like any
+    subresource, but the page the run is on is still the authorised one, so the driver must
+    not raise OffScopeNavigation -- neither on the goto that loads it nor afterwards."""
+    widget = f"{bench.off_origin}/widget"
+    async with browser.driver.open(authorised_testbench) as session:
+        await session.page.goto_step({"step": "goto", "path": "/framed"})
+        assert "host page" in await session.page.content()
+        assert widget in session.blocked_urls, session.blocked_urls
+    assert (f"127.0.0.1:{bench.port}", "/framed") in bench.seen
+    assert not [s for s in bench.seen if s[0].startswith("localhost")], bench.seen
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_landing_page_with_an_off_origin_iframe_opens(
+    authorised_testbench, bench, monkeypatch
+):
+    monkeypatch.setattr(
+        "selector_drift.browser.registry.url_for", lambda _target: f"{bench.base_url}framed"
+    )
+    async with browser.driver.open(authorised_testbench) as session:
+        assert "host page" in await session.page.content()
+        assert f"{bench.off_origin}/widget" in session.blocked_urls, session.blocked_urls
+    assert not [s for s in bench.seen if s[0].startswith("localhost")], bench.seen
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_open_refuses_an_expired_target_before_launching_anything(monkeypatch):
+    """A target authorised on a date in the past and held past its expiry (a long-lived
+    orchestrator) must be refused by the driver itself. Nothing is launched: the registry
+    lookup and Playwright are both booby-trapped."""
+    past = dt.date(2026, 1, 10)
+    target = authorise(
+        ScopeRecord(
+            target="driver-fixture",
+            basis=Basis.SELF_OWNED,
+            authorising_party="selector-drift test suite",
+            authorised_on=past - dt.timedelta(days=5),
+            expires_on=past,
+            evidence_uri=None,
+            evidence_sha256=None,
+            origins=["http://127.0.0.1:1"],
+            rate_limit={"requests": 1, "per_seconds": 30},
+            user_agent_contact="https://example.invalid/contact",
+            first_heal_policy="required",
+            legal_review="self_drafted",
+        ),
+        today=past,
+    )
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("open() went past the expiry check")
+
+    monkeypatch.setattr("selector_drift.browser.registry.url_for", _boom)
+    monkeypatch.setattr("selector_drift.browser.driver.async_playwright", _boom)
+    with pytest.raises(ScopeRefusal, match="expired"):
+        async with browser.driver.open(target):
+            pass
 
 
 @pytest.mark.integration
@@ -127,7 +197,7 @@ _SECOND_PROCESS = textwrap.dedent(
     today = datetime.now(UTC).date()
     target = authorise(
         ScopeRecord(
-            target="testbench",
+            target="driver-fixture",
             basis="self-owned",
             authorising_party="selector-drift test suite",
             authorised_on=today - timedelta(days=1),

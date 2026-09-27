@@ -18,8 +18,10 @@ origins. Two layers, because neither is sufficient alone:
    `ERR_PROXY_CONNECTION_FAILED` -- before any byte leaves for the off-scope host.
 
 A `context.on("request")` listener sees the redirect hops the route handler cannot, so they
-are still recorded (as requested if in scope, as blocked if not) and an off-scope *navigation*
-is still reported to the driver, which raises `OffScopeNavigation` on the next operation.
+are still recorded (as requested if in scope, as blocked if not) and an off-scope *main-frame*
+navigation is still reported to the driver, which raises `OffScopeNavigation` on the next
+operation. An off-scope iframe is aborted and recorded in `blocked_urls` like any subresource,
+but does not mark the run off-scope: the page the run is on is still the authorised one.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from playwright.async_api import BrowserContext, ProxySettings, Request, Route
+from playwright.async_api import Error as PlaywrightError
 
 from selector_drift.scope.origin import origin_of_url, parse_origin
 from selector_drift.scope.record import AuthorisedTarget
@@ -77,8 +80,8 @@ def proxy_for(target: AuthorisedTarget) -> ProxySettings:
 @dataclass
 class RequestLedger:
     """What the page asked for during one run. `requested_urls` were allowed through;
-    `blocked_urls` were refused. `off_scope_navigation` holds the first refused navigation,
-    for the driver to raise on."""
+    `blocked_urls` were refused. `off_scope_navigation` holds the first refused main-frame
+    navigation, for the driver to raise on."""
 
     requested_urls: list[str] = field(default_factory=list)
     blocked_urls: list[str] = field(default_factory=list)
@@ -102,6 +105,20 @@ class RequestLedger:
             raise error
 
 
+def is_main_frame_navigation(request: Request) -> bool:
+    """True only for a navigation of the page's top-level frame. An aborted iframe or
+    subresource is refused and recorded, but it is not the *run* leaving scope -- the page the
+    run is on is still the authorised one. `request.frame` raises for a service-worker
+    request, which has no frame; that is never a main-frame navigation."""
+    if not request.is_navigation_request():
+        return False
+    try:
+        frame = request.frame
+    except PlaywrightError:  # "Service Worker requests do not have an associated frame"
+        return False
+    return frame.parent_frame is None
+
+
 async def install(
     context: BrowserContext, target: AuthorisedTarget, ledger: RequestLedger | None = None
 ) -> None:
@@ -118,7 +135,7 @@ async def install(
             ledger.requested_urls.append(request.url)
             await route.continue_()
         else:
-            ledger.refuse(request.url, navigation=request.is_navigation_request())
+            ledger.refuse(request.url, navigation=is_main_frame_navigation(request))
             await route.abort("blockedbyclient")
 
     def _on_request(request: Request) -> None:
@@ -128,7 +145,7 @@ async def install(
         if origin_of(request.url) in allowed:
             ledger.requested_urls.append(request.url)
         else:
-            ledger.refuse(request.url, navigation=request.is_navigation_request())
+            ledger.refuse(request.url, navigation=is_main_frame_navigation(request))
 
     context.on("request", _on_request)
     await context.route("**/*", _route)

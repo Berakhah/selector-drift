@@ -1,0 +1,9 @@
+# Secret scanning before every commit (`00`: no secrets in the repo, including fixtures).
+# Install once per clone: `uv run pre-commit install`. Full scan: `uv run pre-commit run
+# gitleaks --all-files`. The hook builds gitleaks from source, so the first run needs Go and
+# network access; later runs use pre-commit's cache.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
