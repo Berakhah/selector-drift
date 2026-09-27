@@ -42,7 +42,15 @@ class FirstHealPolicy(StrEnum):
     AUTO_PROMOTE = "auto_promote"
 
 
-_TARGET_SLUG = re.compile(r"^[a-z0-9-]{1,64}$")
+TARGET_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+# M-3 (final review): this used to be a laxer `^[a-z0-9-]{1,64}$`, defined separately from --
+# and disagreeing with -- orchestrate.run_record's run-key target pattern, which never allowed
+# a leading hyphen and capped length at 63. A target could pass this validator (a leading
+# hyphen, or exactly 64 characters) and then raise ValueError, uncaught, in run_key() after the
+# heartbeat had already been written -- a crash with no refusal and no alert. One pattern, the
+# stricter of the two, defined here (in `scope`, which `orchestrate.run_record` already imports
+# from) and reused by both.
+_TARGET_SLUG = TARGET_SLUG  # internal alias kept for readability at each call site below
 # No whitespace, angle brackets, or other characters a browser would reject or mis-parse in a
 # URL -- deliberately excludes '<' and '>' so an unresolved `<REAL-ACCOUNT>`-style placeholder
 # (ruling 3, deferred Task 2 finding) fails here rather than loading as a plausible URL.
@@ -90,11 +98,12 @@ class ScopeRecord(BaseModel):
     def _target_is_a_slug(cls, target: str) -> str:
         """Deferred Task 2 finding (ruling 3, 2026-09-28): the target names a scope file
         (`scopes/<target>.yaml`), a spec file, and a heartbeat key (Task 6). Anything outside
-        `^[a-z0-9-]{1,64}$` -- spaces, uppercase, an unresolved `<placeholder>` -- is a mistake
-        that should refuse at load rather than surface later as a path or key that never
-        matches what another file expects."""
+        `^[a-z0-9][a-z0-9-]{0,62}$` -- spaces, uppercase, a leading hyphen, an unresolved
+        `<placeholder>` -- is a mistake that should refuse at load rather than surface later
+        as a path or key that never matches what another file expects. This is the same
+        pattern `orchestrate.run_record.run_key()` requires (M-3, final review)."""
         if not _TARGET_SLUG.fullmatch(target):
-            raise ValueError(f"target must match ^[a-z0-9-]{{1,64}}$, got {target!r}")
+            raise ValueError(f"target must match ^[a-z0-9][a-z0-9-]{{0,62}}$, got {target!r}")
         return target
 
     @field_validator("user_agent_contact")
