@@ -14,7 +14,7 @@ from datetime import date
 from enum import StrEnum
 
 from bok_core.boundary.sensitivity import Sensitivity
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Aliased (not `from ... import _MINT`), so this module's own namespace never re-exports the
 # mint token or the minting flag -- see fix round 1, I-2. Aliased to a name distinct from the
@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # (`_token_module._ScopeToken`) unambiguous for a static type checker.
 from selector_drift.scope import _token as _token_module
 from selector_drift.scope.errors import ScopeRefusal
+from selector_drift.scope.origin import parse_origin
 
 
 class Basis(StrEnum):
@@ -74,6 +75,16 @@ class ScopeRecord(BaseModel):
     # quietly lower lives on the scope record, next to the authorisation basis.
     warmup_runs: int = Field(default=30, ge=1)
     evidence_retention_days: int | None = Field(default=None, ge=1)
+
+    @field_validator("origins")
+    @classmethod
+    def _origins_are_exactly_scheme_host_port(cls, origins: list[str]) -> list[str]:
+        """I-1. Each origin becomes a Chromium proxy-bypass rule, where `*`, `,` and `;` widen
+        the allowlist. Validated, not rewritten: the authored value is what `record_sha256`
+        hashes, and `scope.origin.parse_origin` canonicalises it wherever it is used."""
+        for origin in origins:
+            parse_origin(origin)
+        return origins
 
     @property
     def sensitivity(self) -> Sensitivity:

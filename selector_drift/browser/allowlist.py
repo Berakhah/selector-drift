@@ -26,16 +26,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Final
-from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, ProxySettings, Request, Route
 
+from selector_drift.scope.origin import origin_of_url, parse_origin
 from selector_drift.scope.record import AuthorisedTarget
 
 # RFC 6761: `.invalid` never resolves. Nothing can be listening at this address, so a request
 # routed to it cannot succeed, and Chromium does not fall back to DIRECT for an explicit proxy.
 _DEAD_PROXY: Final = "http://egress-denied.invalid:1"
-_DEFAULT_PORTS: Final = {"http": 80, "https": 443}
 
 
 class OffScopeNavigation(RuntimeError):
@@ -46,25 +45,14 @@ class OffScopeNavigation(RuntimeError):
 def origin_of(url: str) -> str | None:
     """`scheme://host:port`, lower-cased, with the default port made explicit, so
     `https://A.example` and `https://a.example:443/x` compare equal. None for anything that is
-    not an absolute http(s) URL -- which is never in scope."""
-    try:
-        parts = urlsplit(url)
-        port = parts.port
-    except ValueError:
-        return None
-    scheme = parts.scheme.lower()
-    host = parts.hostname
-    if scheme not in _DEFAULT_PORTS or not host:
-        return None
-    if port is None:
-        port = _DEFAULT_PORTS[scheme]
-    if ":" in host:  # IPv6 literal
-        host = f"[{host}]"
-    return f"{scheme}://{host}:{port}"
+    not an absolute http(s) URL with a strict host (I-1: no `*`, `,`, `;`, whitespace, `<...>`
+    or userinfo) -- which is never in scope. One rule, shared with the scope record."""
+    return origin_of_url(url)
 
 
 def allowed_origins(target: AuthorisedTarget) -> frozenset[str]:
-    return frozenset(o for o in (origin_of(x) for x in target.origins) if o is not None)
+    """Canonical origins. `authorise()` has already validated every one of them."""
+    return frozenset(parse_origin(o) for o in target.origins)
 
 
 def is_allowed(url: str, target: AuthorisedTarget) -> bool:
@@ -101,11 +89,17 @@ class RequestLedger:
         if navigation and self.off_scope_navigation is None:
             self.off_scope_navigation = url
 
+    def off_scope_error(self) -> OffScopeNavigation | None:
+        if self.off_scope_navigation is None:
+            return None
+        return OffScopeNavigation(
+            f"navigation to {self.off_scope_navigation!r} is outside the authorised origins"
+        )
+
     def raise_if_off_scope(self) -> None:
-        if self.off_scope_navigation is not None:
-            raise OffScopeNavigation(
-                f"navigation to {self.off_scope_navigation!r} is outside the authorised origins"
-            )
+        error = self.off_scope_error()
+        if error is not None:
+            raise error
 
 
 async def install(

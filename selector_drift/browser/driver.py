@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from urllib.parse import urljoin
 
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page, async_playwright
 
 # Module attributes, never bound names (found 2026-09-26): tests and Tasks 6, 12 and 26A patch
@@ -47,9 +48,27 @@ def _user_agent(target: AuthorisedTarget) -> str:
 
 
 def _launch_args() -> list[str]:
+    # WebRTC UDP bypasses both the egress proxy and the route handler (H2): allow only
+    # proxied UDP, which with a dead proxy is none.
+    args = ["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
     # Only inside the worker container (docker-compose sets it), where Docker's default seccomp
     # profile denies what Chromium's own sandbox needs; see the compose `worker` comment.
-    return ["--no-sandbox"] if os.environ.get(_NO_SANDBOX_ENV) == "1" else []
+    if os.environ.get(_NO_SANDBOX_ENV) == "1":
+        args.append("--no-sandbox")
+    return args
+
+
+async def _navigate(page: Page, url: str, ledger: RequestLedger) -> None:
+    """I-2. An off-scope redirect hop fails at the dead proxy with a generic Playwright net
+    error; report it as the scope violation it is, so an orchestrator refuses, not retries."""
+    try:
+        await page.goto(url)
+    except PlaywrightError as exc:
+        error = ledger.off_scope_error()
+        if error is not None:
+            raise error from exc
+        raise
+    ledger.raise_if_off_scope()
 
 
 def _resolve_step_path(base: str, step_path: object, target: AuthorisedTarget) -> str:
@@ -100,8 +119,14 @@ class PageHandle:
         authorised origins, this raises `OffScopeNavigation`."""
         self._ledger.raise_if_off_scope()
         await asyncio.to_thread(ratelimit.acquire, self._target)
-        await self._page.click(selector)
-        await self._page.wait_for_load_state("load")
+        try:
+            await self._page.click(selector)
+            await self._page.wait_for_load_state("load")
+        except PlaywrightError as exc:
+            error = self._ledger.off_scope_error()
+            if error is not None:
+                raise error from exc
+            raise
         self._ledger.raise_if_off_scope()
 
     async def goto_step(self, step: Mapping[str, object]) -> None:
@@ -111,8 +136,7 @@ class PageHandle:
             raise ValueError(f"not a goto step: {step!r}")
         resolved = _resolve_step_path(self._base, step.get("path"), self._target)
         await asyncio.to_thread(ratelimit.acquire, self._target)
-        await self._page.goto(resolved)
-        self._ledger.raise_if_off_scope()
+        await _navigate(self._page, resolved, self._ledger)
 
 
 @dataclass(frozen=True)
@@ -156,8 +180,7 @@ async def open(target: AuthorisedTarget) -> AsyncIterator[Session]:
                 page = await context.new_page()
                 handle = PageHandle(page, target, base, ledger)
                 await asyncio.to_thread(ratelimit.acquire, target)
-                await page.goto(base)
-                ledger.raise_if_off_scope()
+                await _navigate(page, base, ledger)
                 yield Session(page=handle, _ledger=ledger)
             finally:
                 await context.close()

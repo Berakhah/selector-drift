@@ -84,6 +84,29 @@ async def test_a_goto_step_off_the_authorised_origin_is_refused_before_any_reque
 
 
 @pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_goto_step_that_redirects_off_origin_raises_off_scope(authorised_testbench, bench):
+    """I-2. The redirect hop fails at the dead proxy with a generic net error; it must surface
+    as OffScopeNavigation so an orchestrator refuses rather than retries."""
+    async with browser.driver.open(authorised_testbench) as session:
+        with pytest.raises(browser.OffScopeNavigation):
+            await session.page.goto_step({"step": "goto", "path": "/evil"})
+    assert not [s for s in bench.seen if s[0].startswith("localhost")], bench.seen
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_landing_page_that_redirects_off_origin_raises_off_scope(
+    authorised_testbench, evil_redirect, bench, monkeypatch
+):
+    monkeypatch.setattr("selector_drift.browser.registry.url_for", lambda _target: evil_redirect)
+    with pytest.raises(browser.OffScopeNavigation):
+        async with browser.driver.open(authorised_testbench):
+            pass
+    assert not [s for s in bench.seen if s[0].startswith("localhost")], bench.seen
+
+
+@pytest.mark.integration
 def test_the_rate_limit_comes_from_the_target_and_not_from_config(
     authorised_testbench, monkeypatch
 ):

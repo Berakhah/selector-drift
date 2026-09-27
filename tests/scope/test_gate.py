@@ -330,3 +330,77 @@ def test_evidence_uri_naming_a_host_is_refused():
             ),
             today=TODAY,
         )
+
+
+_BAD_ORIGINS = [
+    "http://*",  # becomes Chromium's `*:80` bypass wildcard
+    "http://a.example,*",  # a comma splits the bypass list
+    "http://a.example;*",  # so may a semicolon
+    "http://*.example",
+    "http://<local>",
+    "<-loopback>",
+    "http://a.example/",  # a path, even "/"
+    "http://a.example/x",
+    "http://a.example?q=1",
+    "http://a.example#f",
+    "http://user@a.example",
+    "http://user:pw@a.example",
+    "http://a example",
+    " http://a.example",
+    "http://a.example ",
+    "http://A.example",  # not lower-case
+    "HTTP://a.example",
+    "ftp://a.example",
+    "a.example",
+    "//a.example",
+    "http://",
+    "http://-a.example",
+    "http://a-.example",
+    "http://a..example",
+    "http://a_b.example",
+    "http://a.example:0",
+    "http://a.example:65536",
+    "http://a.example:",
+    "http://a.example:80x",
+    "http://::1",  # IPv6 must be bracketed
+    "http://[::1",
+    "http://[not-an-ip]",
+    "http://[127.0.0.1]",
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("origin", _BAD_ORIGINS)
+def test_a_malformed_origin_is_refused(origin):
+    """I-1. An origin that is not exactly scheme://host[:port] could widen the browser's
+    egress allowlist (`http://*` is a Chromium proxy-bypass wildcard)."""
+    with pytest.raises(ValidationError):
+        rec(origins=[origin])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("origin", _BAD_ORIGINS)
+def test_a_malformed_origin_smuggled_past_construction_is_refused_by_the_gate(origin):
+    """authorise() re-validates, so a model_construct()-built record cannot carry one."""
+    good = rec()
+    forged = ScopeRecord.model_construct(**(good.model_dump() | {"origins": [origin]}))
+    with pytest.raises(ScopeRefusal):
+        authorise(forged, today=TODAY)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://a.example",
+        "https://a.example",
+        "http://a.example:8080",
+        "https://portal.client-1.example:8443",
+        "http://127.0.0.1:5000",
+        "https://10.0.0.7",
+        "http://[::1]:8000",
+        "https://localhost",
+    ],
+)
+def test_a_well_formed_origin_is_accepted(origin):
+    assert authorise(rec(origins=[origin]), today=TODAY).origins == (origin,)
