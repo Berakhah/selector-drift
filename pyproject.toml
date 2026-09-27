@@ -34,6 +34,7 @@ dependencies = [
     "pyarrow>=25.0.1",
     "pydantic>=2.13.5",
     "pyyaml>=6.0.3",
+    "regex>=2026.7.19",
     "sqlalchemy>=2.0.52",
 ]
 
@@ -49,6 +50,8 @@ dev = [
     "pytest-httpx>=0.36.2",
     "pytest-xdist>=3.8.0",
     "ruff>=0.16.5",
+    "types-pyyaml>=6.0.12.20260906",
+    "types-regex>=2026.9.10.20260911",
 ]
 
 [build-system]
