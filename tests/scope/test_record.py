@@ -32,14 +32,24 @@ def rec(**kw: object) -> ScopeRecord:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("target", ["testbench", "agent-perimeter", "a", "a" * 64])
+@pytest.mark.parametrize("target", ["testbench", "agent-perimeter", "a", "a" * 63])
 def test_a_slug_shaped_target_is_accepted(target: str) -> None:
     assert rec(target=target).target == target
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "target", ["Testbench", "agent_perimeter", "agent perimeter", "<real-account>", "", "a" * 65]
+    "target",
+    [
+        "Testbench",
+        "agent_perimeter",
+        "agent perimeter",
+        "<real-account>",
+        "",
+        "a" * 65,
+        "a" * 64,  # M-3: the stricter shared TARGET_SLUG pattern caps length at 63
+        "-leading-hyphen",  # M-3: run_key()'s regex never allowed a leading hyphen either
+    ],
 )
 def test_a_non_slug_target_is_refused(target: str) -> None:
     with pytest.raises(ValidationError, match="target"):

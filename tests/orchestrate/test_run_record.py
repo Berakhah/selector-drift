@@ -17,6 +17,8 @@ from selector_drift.orchestrate.run_record import (
 from selector_drift.spec.loader import load_spec
 from selector_drift.spec.schema import SpecError
 
+AlertCall = tuple[str, str, str | None, str]
+
 REPO = Path(__file__).resolve().parents[2]
 # A failing test must not sleep through two 300 s retries. The retry policy itself is pinned
 # in test_deployments.py.
@@ -181,3 +183,87 @@ def test_every_authorised_run_mirrors_its_scope_record(prefect_api, db, local_si
     assert mirror is not None and mirror.record_sha256 == attempt.scope_record_sha256
     assert mirror.warmup_runs >= 1 and mirror.loaded_at is not None
     assert mirror.credential_posture == "session_injection"
+
+
+@pytest.mark.integration
+def test_a_spec_whose_scope_ref_names_another_target_is_refused(
+    prefect_api, db, mismatch_spec, monkeypatch
+) -> None:
+    """I-1 (final review): the stem-mismatch refusal branch (flows.py) is the only thing that
+    stops a spec for one target running under another target's authorisation -- CLAUDE.md rule 1.
+    `mismatch_spec` is named "mismatch" but its scope_ref names "testbench"."""
+    opened: list[int] = []
+    monkeypatch.setattr("selector_drift.browser.driver.open", lambda *a, **k: opened.append(1))
+    key = ONCE(mismatch_spec)
+    with Session() as s:
+        run = s.get(Run, key)
+        assert run.state == "refused"
+        assert "testbench" in (run.error or "")
+        assert s.query(RunAttempt).filter_by(run_key=key).count() == 0
+    assert opened == []
+
+
+@pytest.mark.integration
+def test_a_refusal_posts_an_alert(prefect_api, db, expired_spec, monkeypatch) -> None:
+    """M-5 (final review): a later rewrite that drops the post_alert call at the refusal branch
+    must go red here, not silently alert nobody for 90 days."""
+    calls: list[AlertCall] = []
+    monkeypatch.setattr(
+        "selector_drift.orchestrate.flows.post_alert",
+        lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
+    )
+    key = ONCE(expired_spec)
+    assert len(calls) == 1
+    kind, target, alerted_key, _summary = calls[0]
+    assert (kind, target, alerted_key) == ("refused", "expired", key)
+
+
+@pytest.mark.integration
+def test_a_failure_posts_an_alert(prefect_api, db, dead_site, monkeypatch) -> None:
+    """M-5 (final review): same as above, for the post-authorisation failure branch."""
+    calls: list[AlertCall] = []
+    monkeypatch.setattr(
+        "selector_drift.orchestrate.flows.post_alert",
+        lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
+    )
+    with pytest.raises(Exception, match=r"\S"):
+        ONCE("specs/testbench.yaml")
+    assert len(calls) == 1
+    kind, target, alerted_key, _summary = calls[0]
+    assert (kind, target, alerted_key) == ("failed", "testbench", _bench_key())
+
+
+@pytest.mark.integration
+def test_the_failure_alert_never_carries_page_content(
+    prefect_api, db, local_site, monkeypatch
+) -> None:
+    """I-2 (final review): a Playwright locator timeout's "Call log:" section quotes the DOM
+    content it was matching against -- here, a claim number cell. That must never reach the
+    third-party alert webhook (CLAUDE.md rule 6), only run_attempts.error / runs.error."""
+
+    class BoomError(RuntimeError):
+        pass
+
+    def boom(*a: object, **k: object) -> None:
+        raise BoomError(
+            "Timeout 5000ms exceeded.\nCall log:\n  - locator resolved to <td>AB12345678</td>\n"
+        )
+
+    monkeypatch.setattr("selector_drift.browser.driver.open", boom)
+    calls: list[AlertCall] = []
+    monkeypatch.setattr(
+        "selector_drift.orchestrate.flows.post_alert",
+        lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
+    )
+    with pytest.raises(BoomError):
+        ONCE("specs/testbench.yaml")
+    assert len(calls) == 1
+    _kind, _target, _key, summary = calls[0]
+    assert "<td" not in summary
+    assert "AB12345678" not in summary
+    assert "Call log" not in summary
+    assert "BoomError" in summary
+    # The full text is still recorded inside the boundary.
+    with Session() as s:
+        run = s.get(Run, _bench_key())
+        assert run is not None and run.error is not None and "<td" in run.error

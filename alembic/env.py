@@ -1,17 +1,19 @@
-"""Alembic environment. Reads the database URL the same way `selector_drift.db.session` does
--- `SD_DATABASE_URL`, with the same password-less default -- so there is exactly one source of
-the URL from day one. Task 5 Step 4 switches `session.py` to `get_settings().database_url`;
-this file follows suit at the same time so the two never diverge.
+"""Alembic environment. Reads the database URL through `selector_drift.config.get_settings()`,
+the one place configuration is read (M-2, final review): `db/session.py` already reads
+`database_url` from there, and this file used to keep its own `SD_DATABASE_URL` reader with its
+own default, which disagreed with `Settings`' default and meant `SD_DATABASE_URL=` (set but
+empty, exactly what a bare `KEY=` line in `.env.example` produces once sourced) crashed alembic
+while `session.py` fell back cleanly. One reader now, so the two can never diverge.
 """
 
 from __future__ import annotations
 
-import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
+from selector_drift.config import get_settings
 from selector_drift.db.models import Base
 
 # this is the Alembic Config object, which provides access to the values within the .ini file.
@@ -23,11 +25,9 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-_DEFAULT_DATABASE_URL = "postgresql+psycopg://selector_drift@localhost:5432/selector_drift"
-
 
 def _database_url() -> str:
-    return os.environ.get("SD_DATABASE_URL", _DEFAULT_DATABASE_URL)
+    return get_settings().database_url
 
 
 def run_migrations_offline() -> None:

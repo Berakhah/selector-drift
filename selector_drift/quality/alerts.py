@@ -25,9 +25,28 @@ def webhook_url() -> str | None:
     return get_settings().alert_webhook_url
 
 
+def sanitize_for_alert(exc: BaseException) -> str:
+    """The exception type plus a sanitised first line of its message -- never the full text
+    (I-2, final review). The alert channel (SD_ALERT_WEBHOOK_URL, typically Slack or another
+    third party) is outside the client boundary (CLAUDE.md rule 6); a Playwright locator
+    timeout's "Call log:" section routinely quotes the DOM content it was matching against, e.g.
+    "locator resolved to <td>AB12345678</td>". The full text stays only in run_attempts.error /
+    runs.error, inside the boundary.
+
+    Two cuts, both defensive: everything after the first newline is dropped (where Playwright's
+    call log lives), and everything from the first '<' onward is dropped too, in case markup
+    ever appears on the first line itself."""
+    first_line = str(exc).split("\n", 1)[0]
+    first_line = first_line.split("<", 1)[0].rstrip()
+    kind = type(exc).__name__
+    return f"{kind}: {first_line}" if first_line else kind
+
+
 def post_alert(kind: AlertKind, target: str, run_key: str | None, summary: str) -> bool:
-    """True when the webhook accepted the alert. Never raises: a broken channel must not turn a
-    refusal into a crash -- it is logged at ERROR instead."""
+    """True when the webhook accepted the alert. Never raises (M-1, final review): a broken
+    channel -- a dead webhook, a malformed URL httpx itself refuses to construct -- must not
+    turn a refusal or failure into a crash. Logged at ERROR instead, without the webhook URL
+    (which may carry a secret path)."""
     url = webhook_url()
     if url is None:
         _log.error("ALERT NOT SENT (%s is unset): %s %s %s", WEBHOOK_ENV, kind, target, summary)
@@ -41,7 +60,12 @@ def post_alert(kind: AlertKind, target: str, run_key: str | None, summary: str) 
     }
     try:
         httpx.post(url, json=payload, timeout=TIMEOUT_SECONDS).raise_for_status()
-    except httpx.HTTPError as exc:
+    except Exception as exc:
+        # M-1: was `except httpx.HTTPError`, which does not cover httpx.InvalidURL (raised by
+        # httpx.post() itself, before any request is sent, for a URL it cannot construct at
+        # all -- a plain Exception subclass) or any other surprise from the http client. The
+        # webhook URL itself is never logged: it is exactly the kind of thing that carries a
+        # secret path.
         _log.error("alert webhook failed (%s): %s %s", type(exc).__name__, kind, target)
         return False
     return True

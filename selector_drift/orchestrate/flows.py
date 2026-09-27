@@ -6,7 +6,10 @@ pipeline.run_once(); the heartbeat prologue stays first.
 from __future__ import annotations
 
 import asyncio
+import logging
+from contextvars import ContextVar
 from datetime import UTC, date, datetime
+from typing import TYPE_CHECKING, Any
 
 from prefect import flow
 from prefect.runtime import flow_run
@@ -23,14 +26,29 @@ from selector_drift.orchestrate.run_record import (
     run_key,
     window_for,
 )
-from selector_drift.quality.alerts import post_alert
+from selector_drift.quality.alerts import post_alert, sanitize_for_alert
 from selector_drift.scope.errors import ScopeRefusal
 from selector_drift.scope.gate import authorise
 from selector_drift.scope.record import AuthorisedTarget
 from selector_drift.spec.loader import load_scope, load_spec, scope_file, spec_file, target_of
 
+if TYPE_CHECKING:
+    from prefect.client.schemas.objects import FlowRun, State
+    from prefect.flows import Flow
+
 RETRIES = 2
 RETRY_DELAY_SECONDS = 300
+
+_log = logging.getLogger(__name__)
+
+# Plus item (final review): set just before the flow body's own `except Exception` branch posts
+# its alert and re-raises, so `alert_on_flow_failure` (the on_failure hook, below) can tell "the
+# flow body already alerted for this exact failure" from "the flow failed before reaching that
+# branch at all" (a SpecError loading the spec, a DB outage during the heartbeat or authorisation
+# bookkeeping, an invalid run key) and only alert in the latter case. A ContextVar, not a plain
+# module global: Prefect gives each flow run its own copy of the current context, so concurrent
+# flow runs (three targets, each on its own schedule) never see each other's flag.
+_ALERTED_IN_FLOW: ContextVar[bool] = ContextVar("_ALERTED_IN_FLOW", default=False)
 
 
 class StartPageError(RuntimeError):
@@ -58,11 +76,44 @@ async def load_start_page(target: AuthorisedTarget) -> int:
     return len(html)
 
 
+def alert_on_flow_failure(flow: Flow[Any, Any], flow_run: FlowRun, state: State[Any]) -> None:
+    """Prefect `on_failure` hook (plus item, final review): catches every failure path the flow
+    body's own `except Exception` block does not wrap -- a `SpecError` loading the spec, a DB
+    outage before or during the heartbeat or authorisation bookkeeping, or an invalid run key.
+    Deferred Task 6 finding: on these paths, the only alert channel stayed silent, leaving a gap
+    in the 90-day log with nobody told.
+
+    Skips alerting when `_ALERTED_IN_FLOW` is set: the flow body's own post-authorisation
+    `except Exception` branch already posted an alert for this exact failure before re-raising,
+    and posting again here would be a second alert for one event (M-8 already flags alert
+    volume as a separate concern; this hook must not add to it for the common case).
+
+    Best-effort and defensive: this must never itself raise into Prefect's state machine, so
+    any failure while building or sending the alert is only logged.
+    """
+    if _ALERTED_IN_FLOW.get():
+        return
+    spec_path = flow_run.parameters.get("spec_path")
+    stem = target_of(spec_path) if isinstance(spec_path, str) and spec_path else "unknown"
+    try:
+        exc = state.result(raise_on_failure=False)
+    except Exception:  # pragma: no cover -- state.result() itself should not raise here
+        exc = None
+    summary = sanitize_for_alert(exc) if isinstance(exc, BaseException) else "flow failed"
+    try:
+        # run_key is not known here (the whole point of this hook is failures where the flow
+        # body's own bookkeeping never got that far) -- None, per the plus item's instructions.
+        post_alert("failed", stem, None, summary)
+    except Exception:
+        _log.error("on_failure alert hook itself failed for target %s", stem)
+
+
 @flow(
     name="extraction",
     retries=RETRIES,
     retry_delay_seconds=RETRY_DELAY_SECONDS,
     timeout_seconds=FLOW_TIMEOUT_SECONDS,
+    on_failure=[alert_on_flow_failure],
 )
 def extraction_flow(spec_path: str) -> str:
     slot = scheduled_slot()
@@ -105,7 +156,12 @@ def extraction_flow(spec_path: str) -> str:
         record_run(
             key, target=stem, spec_version=spec.version, window=day, state="failed", error=error
         )
-        post_alert("failed", stem, key, error)
+        # I-2 (final review): the alert webhook is third-party and outside the client boundary
+        # (CLAUDE.md rule 6) -- `error` (raw `str(exc)`) is what stays in run_attempts.error /
+        # runs.error, but the alert body carries only the sanitised summary. A Playwright locator
+        # timeout's "Call log:" section routinely quotes DOM content.
+        post_alert("failed", stem, key, sanitize_for_alert(exc))
+        _ALERTED_IN_FLOW.set(True)  # tells alert_on_flow_failure not to alert a second time
         raise  # Prefect's retry policy applies
     record_attempt(key, attempt, "completed", None, target.record_sha256)
     record_run(key, target=stem, spec_version=spec.version, window=day, state="completed")

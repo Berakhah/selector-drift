@@ -108,6 +108,12 @@ def scope_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
 
 @pytest.fixture
 def local_site(tmp_path: Path, scope_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    # M-4 (final review): tests calling ONCE("specs/testbench.yaml") resolve that path under
+    # SD_SPEC_DIR, which defaults to the relative Path("specs") -- cwd-dependent. Point it at the
+    # repo's real specs/ absolutely, so these tests pass regardless of where pytest is invoked
+    # from.
+    monkeypatch.setenv("SD_SPEC_DIR", str(REPO / "specs"))
+    get_settings.cache_clear()
     root = tmp_path / "site"
     root.mkdir()
     (root / "index.html").write_text(PAGE, encoding="utf-8")
@@ -127,6 +133,9 @@ def local_site(tmp_path: Path, scope_dir: Path, monkeypatch: pytest.MonkeyPatch)
 
 @pytest.fixture
 def dead_site(scope_dir: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    # M-4 (final review): same cwd-independence fix as local_site, above.
+    monkeypatch.setenv("SD_SPEC_DIR", str(REPO / "specs"))
+    get_settings.cache_clear()
     with socket.socket() as s:  # a port that was free a moment ago, now closed
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -154,3 +163,20 @@ def expired_spec(tmp_path: Path, scope_dir: Path) -> str:
         ),
     )
     return str(specs / "expired.yaml")
+
+
+@pytest.fixture
+def mismatch_spec(tmp_path: Path, scope_dir: Path) -> str:
+    """I-1 (final review): a spec named for one target (`mismatch`) whose `scope_ref` names a
+    different, validly-authorised target's scope record (`testbench`). This is the only thing
+    that stops a spec for target A running under target B's authorisation -- CLAUDE.md rule 1,
+    the spine of the whole system. Same pattern as `expired_spec`, above."""
+    specs = tmp_path / "specs"
+    specs.mkdir(exist_ok=True)
+    body = (REPO / "specs" / "testbench.yaml").read_text(encoding="utf-8")
+    # scope_ref stays "scopes/testbench.yaml" -- unchanged from the real spec -- while the file
+    # itself is named "mismatch.yaml", so target_of(spec_path) == "mismatch" but the scope record
+    # it loads names "testbench".
+    (specs / "mismatch.yaml").write_text(body, encoding="utf-8")
+    write_scope(scope_dir, scope_record("testbench", "https://testbench.example.invalid"))
+    return str(specs / "mismatch.yaml")

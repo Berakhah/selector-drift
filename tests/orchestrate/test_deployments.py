@@ -51,7 +51,9 @@ def test_the_container_enforces_the_limits_the_deployment_declares() -> None:
     assert worker["pids_limit"] == JOB_LIMITS["pids_limit"]
     assert all(d.job_variables == JOB_LIMITS for d in extraction_deployments())
     assert worker["init"] is True  # reaps zombie Chromiums (B8)
-    assert "seccomp=unconfined" not in worker["security_opt"]  # H1
+    # M-6 (final review): "seccomp=unconfined" is one of two Docker-accepted spellings;
+    # "seccomp:unconfined" also disables the seccomp profile and must be rejected too.
+    assert not any("unconfined" in opt for opt in worker["security_opt"])  # H1
 
 
 @pytest.mark.unit
