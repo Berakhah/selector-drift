@@ -10,16 +10,38 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-selector_drift}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  # The browser worker (Task 4, B8). Declared, not started: `build: .` needs the repo-root
-  # Dockerfile Task 6 creates, and Task 6 replaces this block with its superset (command,
-  # restart policy, init, the escalation-corpus volume, depends_on prefect-server).
-  # Limits must match selector_drift/browser/limits.py.
+  # Prefect's own state (schedules, flow-run history) lives in the same Postgres instance, in
+  # its own database (created by docker/postgres-init/10-prefect-database.sql), so a host
+  # restart loses no schedule (design 9.2, B3).
+  prefect-server:
+    image: prefecthq/prefect:3.8.4-python3.12      # matches pyproject's prefect pin; multi-arch
+    restart: unless-stopped
+    command: [ "prefect", "server", "start", "--host", "0.0.0.0" ]
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://${POSTGRES_USER:-selector_drift}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env -- see .env.example}@postgres:5432/prefect
+      PREFECT_SERVER_ANALYTICS_ENABLED: "false"
+      PREFECT_UI_API_URL: http://127.0.0.1:4200/api
+      TZ: UTC
+    ports: [ "127.0.0.1:4200:4200" ]                # UI over an SSH tunnel only
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4200/api/health')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # The browser worker (Task 4, B8). `serve()` -- a process runner, not a Docker work pool -- so
+  # the enforcement lives on THIS container (mem_limit/pids_limit) and is also declared as
+  # job_variables on each deployment (Task 6, deployments.py): test_deployments pins that the
+  # two never disagree. Limits must match selector_drift/browser/limits.py.
   #
   # Seccomp (H1): option 2 of the Task 4 brief, chosen deliberately. Docker's DEFAULT seccomp
   # profile applies -- there is no `seccomp=` line, and never `seccomp=unconfined`, which would
@@ -30,6 +52,9 @@ services:
   # container whose egress the driver's allowlist confines to the scope record's origins.
   worker:
     build: .
+    restart: unless-stopped
+    command: [ "python", "-m", "selector_drift.orchestrate.deployments" ]
+    init: true                # PID 1 reaps zombie Chromium processes (B8)
     read_only: true
     user: "10001:10001"
     cap_drop: [ ALL ]
@@ -39,10 +64,28 @@ services:
     shm_size: 1g              # Chromium's default /dev/shm in Docker is 64 MB
     mem_limit: 2g
     pids_limit: 512
+    volumes:
+      # The one writable path on a read-only rootfs (found 2026-09-26: rung 5's escalation
+      # corpus, the lake, evidence and injected sessions had nowhere to go). Owned by uid 10001.
+      - sd_data:/data
     environment:
       PLAYWRIGHT_BROWSERS_PATH: /opt/pw-browsers   # baked at build, readable by uid 10001
       SD_CHROMIUM_NO_SANDBOX: "1"
-    depends_on: [ postgres ]
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PREFECT_HOME: /tmp/prefect                 # the rootfs is read-only
+      SD_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-selector_drift}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env -- see .env.example}@postgres:5432/${POSTGRES_DB:-selector_drift}
+      SD_SPEC_DIR: /app/specs
+      SD_SCOPE_DIR: /app/scopes
+      SD_LAKE_ROOT: /data/lake
+      SD_EVIDENCE_ROOT: /data/evidence
+      SD_SESSION_DIR: /data/sessions
+      SD_ESCALATION_CORPUS: /data/corpus/escalations
+      SD_ALERT_WEBHOOK_URL: ${SD_ALERT_WEBHOOK_URL:-}
+      TZ: UTC
+    depends_on:
+      postgres: { condition: service_healthy }
+      prefect-server: { condition: service_healthy }
 
 volumes:
   postgres_data:
+  sd_data:

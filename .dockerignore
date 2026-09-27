@@ -1,0 +1,16 @@
+.git
+.venv
+.env
+.env.*
+!.env.example
+evidence
+lake
+web
+docs
+tests
+**/__pycache__
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.import_linter_cache
+.claude
