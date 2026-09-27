@@ -206,7 +206,7 @@ Unknown target → refuse. Expired authorisation → refuse. Basis not in the v1
 | 1 `cache` | Stored selector **+ stored anchor evidence**, both re-verified; must match exactly one **visible** element and satisfy assertions | — | — | nothing changing |
 | 2 `axtree` | ARIA role + accessible name + relationship | text-semantic | label rewording (**fails**, does not mis-resolve) | restyling, DOM restructure, class churn, id churn |
 | 3 `anchors` | Text anchor + structural relation | text-semantic | label rewording (**fails**); layout inversion (**mis-resolves**) | class renames, id churn, framework swap, table→div |
-| 4 `heuristics` | `data-testid`, id patterns, header position, column index **with header verification** | structural | column reorder (**mis-resolves**) | label rewording, restyling |
+| 4 `heuristics` | `data-testid`, id patterns, header position, column index **with header verification** | structural | label rewording together with a class rename on the same day (**fails**; see the note below) | label rewording alone, restyling, **column reorder** — it re-reads *today's* header, so a moved column is followed, not mis-resolved |
 | 5 `visual` | v1: records the case with full evidence, raises `EscalateToHuman` | — | — | — |
 
 **"Defeated by" now distinguishes *fails* from *mis-resolves*, and the distinction is load-bearing**
@@ -217,6 +217,16 @@ confirmer left. See §5.6a.
 
 Rung 1's "**exactly one**" is load-bearing. A selector matching two elements after a change is a
 failure, not a first match.
+
+**Column reorder, as built (corrected 2026-09-26).** An earlier text of this table had rung 4
+*mis-resolving* on a column reorder. It does not: header verification reads the header row as it is
+today, so rung 4 follows a moved column. The reorder hazard is **rung 1's** — a cached positional
+selector still matches one plausible cell — and the protection is rung 1's anchor re-verification
+(§5.2), which fails the hit so a heal is recorded. A rung-2 heal after a reorder is then confirmed by
+rung 4 (`STRUCTURAL`). On the bench rung 4 finds a column by its `col-<field>` class or its header
+position (the bench carries no `data-testid`), so a class rename and a label rewording on the same
+day leave it nothing to read for that field: it escalates, and `docs/methodology.md` states this as a
+known limit.
 
 **Every rung filters candidates through a visibility precondition** — non-zero box, no `aria-hidden`,
 no `display:none` ancestor (audit H9). Without it a hidden element carrying `aria-label="Claim
@@ -281,7 +291,7 @@ Family matters, not rung number. Rungs 2 and 3 both key off text, so a label rew
 | 4 (structural) | 2 or 3 (text-semantic) |
 | 1 | n/a — rung 1 is never a valid confirmer; it is what broke |
 
-This is the direct answer to §5's "most common and most dangerous silent failure," and unlike the distributional check it **needs no history and works on run one.** A column reorder fools rung 4; rungs 2 and 3 disagree. A label rewording fools rung 3; rung 4's header-verified position disagrees.
+This is the direct answer to §5's "most common and most dangerous silent failure," and unlike the distributional check it **needs no history and works on run one.** A decoy column that lands a text rung on the wrong cell is contradicted by rung 4's header-verified position, and vice versa. (A column reorder is *not* such a case: rung 4 follows the moved header, and the reorder's danger is rung 1's stale positional selector, which §5.2's anchor re-verification refuses — corrected 2026-09-26.)
 
 If no cross-family confirmer can resolve at all, the verdict is `INSUFFICIENT`, never `PASS` — which under §5.7 quarantines the heal. Conservative and correct: that *is* the adjacent-column scenario.
 
@@ -311,7 +321,7 @@ The fix is a third signal family, and the brief already asked for it:
 | Mutation | Text | Structural | `VALUE` | Outcome |
 |---|---|---|---|---|
 | label reword | fails | heals | values unchanged, **confirms** | accepted |
-| column reorder | heals | fails | values unchanged, confirms | accepted |
+| column reorder | heals | **confirms** — rung 4 re-reads today's header and lands on the same node | values unchanged | accepted (rung 1's anchor re-verification is what forced the heal) |
 | decoy adjacent column | → Amount | → Prior Amount | values differ, **refuses** | quarantined |
 | value swap between same-format columns | agrees | agrees | **refuses — the only check that sees it** | quarantined |
 
@@ -339,6 +349,15 @@ This single decision makes B7 tractable. The distributional check — the one th
 
 Warm-up falls out for free: with no history, `DistributionalAssertion` returns `INSUFFICIENT`, so **any heal during warm-up quarantines** — correct, because there is no basis to trust it yet.
 
+**One steady-state `FAIL` exists, by decision (2026-09-26): the row-key collapse floor.** On a cache
+hit, `RowKeyContinuity` still compares the field with the previous accepted run on the natural key:
+at or above 0.95 agreement it is `INSUFFICIENT` (nothing healed, nothing to confirm); between 0.50
+and 0.95 it is `INSUFFICIENT` **plus an alert** — ordinary churn, tolerated but reported; **below
+0.50 (`COLLAPSE_FLOOR`) it is `FAIL`**, because no overnight business change moves half a column's
+values while every key stays, and without it a value swap between two same-format columns under
+unchanged markup would be written nightly on a rung-1 hit. On a heal, anything below 0.95 is `FAIL`
+as before.
+
 **Two corrections of 2026-08-29 (audit M17, M18).**
 
 - **Persistence-across-runs governs alerting, not blocking.** Requiring two consecutive breaches
@@ -359,6 +378,12 @@ Putting the policy on the scope record, next to the authorisation basis, means i
 ### 5.9 Quarantine
 
 Keeps data, evidence and diff. One-click promote or discard, audited with actor, timestamp and reason. Promotion re-runs the gate. There is no code path turning a `QuarantinedRun` into a written row without `validate/` minting the result.
+
+**What a human's confirmation supplies (stated 2026-09-26).** Promotion re-runs the gate with
+`human_confirmed=True`, which **tolerates `INSUFFICIENT` on a heal — never a `FAIL`**: a person can
+supply the evidence that was missing (a first heal, a warm-up, a confirmer that did not resolve), but
+not overrule a check that found evidence against the heal. The promotion is recorded only after its
+rows have landed, so a run is never marked promoted with nothing written.
 
 Empty state reads *"Nothing quarantined"* with the count of runs that passed validation — not a celebration.
 
@@ -481,7 +506,10 @@ field on `TaskSpec`.*
 
 ### 9.2 Orchestration
 
-Prefect 3, one deployment per `(target, spec)`, Postgres shared with the application on a separate schema.
+Prefect 3, one deployment per `(target, spec)`, Postgres shared with the application — the same
+instance, in a **separate database** (`prefect`), created by an init script on first start (plan
+Task 6; corrected 2026-09-26 from "a separate schema"). A host restart loses no schedule either way;
+a separate database keeps Prefect's migrations out of the application's.
 
 Playwright per B8: pinned browser version, **one context per run**, hard memory and pid limits and a
 timeout set at the deployment level, non-root, read-only rootfs, tmpfs scratch, **seccomp default —

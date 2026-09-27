@@ -178,6 +178,9 @@ def test_the_page_a_browser_sees_is_what_the_engine_produced(bench_server, brows
 
 `mutate_html` is exactly what the response hook calls: `apply_all(mutations_for(day, target), html)`
 plus the `sd-mutation-seed` tag. Comparing against `apply_all` alone would fail on the tag.
+`render_results` is the portal's renderer, **`testbench.portal.render.render_results`** —
+`testbench/portal/data.py` holds the dataset (`dataset_for`, `COLUMNS`), never the rendering
+(stated 2026-09-26, after test code imported it from the wrong module).
 
 It compares **the DOM after load in a real browser**, not the HTTP body. The first draft's test
 compared bodies, which is exactly the comparison hydration defeats. Both sides go through a browser so
