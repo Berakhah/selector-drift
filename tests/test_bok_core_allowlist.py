@@ -8,6 +8,10 @@ import pytest
 # Task 33 adds "bok_core.boundary.redact" and "bok_core.boundary.egress".
 ALLOWED = {"bok_core.boundary.sensitivity", "bok_core.provenance"}
 
+# From this file, never the cwd: run from anywhere else, a cwd-relative glob finds nothing and
+# the test passes vacuously.
+PACKAGE = Path(__file__).resolve().parents[1] / "selector_drift"
+
 
 def _imports(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -22,9 +26,11 @@ def _imports(path: Path) -> set[str]:
 
 @pytest.mark.unit
 def test_selector_drift_imports_only_allow_listed_bok_core_modules() -> None:
+    sources = sorted(PACKAGE.rglob("*.py"))
+    assert len(sources) > 10, f"scanned {len(sources)} files under {PACKAGE} -- vacuous"
     offenders = {
         f"{p}: {m}"
-        for p in Path("selector_drift").rglob("*.py")
+        for p in sources
         for m in _imports(p)
         if not any(m == a or m.startswith(a + ".") for a in ALLOWED)
     }

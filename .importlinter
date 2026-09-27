@@ -8,8 +8,8 @@
 root_packages =
     selector_drift
     testbench
-# REQUIRED (M21). Without it the bok_core.gateway contract names a module outside the graph,
-# matches nothing, and reports "kept" — a green tick with no test behind it.
+# Keeps third-party packages (bok_core included) in the graph, so a future contract naming an
+# external module matches real imports instead of reporting "kept" over an empty graph.
 include_external_packages = True
 
 [importlinter:contract:resolver-cannot-write]
@@ -67,5 +67,5 @@ forbidden_modules = selector_drift.scope._token
 # What is forbidden is a DIRECT import of _token from any of these packages.
 allow_indirect_imports = True
 
-# NO no-model-calls stanza here -- see "Replaced 2026-09-26" below. It is enforced by
+# There is no no-model-calls contract here: the bok_core import allow-list is enforced by
 # tests/test_bok_core_allowlist.py instead.

@@ -29,6 +29,8 @@ class _ScopeToken:
     __slots__ = ()
 
 
+# The mint guards against accidents, not adversarial in-process code: copy.copy, deepcopy or
+# pickle can rebuild an AuthorisedTarget without ever calling __init__/__post_init__.
 _MINT = _ScopeToken()  # the only instance the gate will accept
 
 # Set to True only within gate.authorise()'s own construction of an AuthorisedTarget, reset in
