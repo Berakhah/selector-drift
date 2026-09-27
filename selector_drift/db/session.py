@@ -1,8 +1,10 @@
-"""The one place a database URL is read from the environment.
+"""The engine and sessionmaker, built from `config.get_settings()`.
 
-Task 3 predated `config.py` (Task 5) and read `SD_DATABASE_URL` directly. Task 5 Step 4 switches
-this to `get_settings().database_url`, so from day one on there is exactly one source of the
-URL. The compose password reaches a local `uv run` only through the exported `SD_DATABASE_URL`
+`selector_drift.config` is the one place a database URL (or any other setting) is read from the
+environment (fix round 1, minor 3). Task 3 predated `config.py` (Task 5) and read
+`SD_DATABASE_URL` directly with its own default; Task 5 Step 4 replaced that with
+`get_settings().database_url`, so this module no longer reads the environment itself. The
+compose password reaches a local `uv run` only through the exported `SD_DATABASE_URL`
 environment variable -- it never appears as a literal in this file.
 """
 

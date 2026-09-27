@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from selector_drift.config import ConfigError, get_settings
+from selector_drift.config import DEFAULT_DATABASE_URL, ConfigError, get_settings
 
 VARS = (
     "SD_ENV",
@@ -95,3 +95,33 @@ def test_a_short_redaction_key_is_refused(monkeypatch: pytest.MonkeyPatch) -> No
 def test_a_32_byte_hex_key_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SD_REDACTION_KEY", "ab" * 32)  # test-only, not a secret
     assert get_settings().redaction_key == bytes.fromhex("ab" * 32)
+
+
+@pytest.mark.unit
+def test_non_hex_redaction_key_is_a_config_error_not_a_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix round 1, minor 5. `bytes.fromhex` itself raises ValueError; every SD_REDACTION_KEY
+    failure must surface as ConfigError, and the message must not repeat the bad key."""
+    secret = "zz" * 32  # not valid hex; must never appear in the raised message
+    monkeypatch.setenv("SD_REDACTION_KEY", secret)
+    with pytest.raises(ConfigError) as exc_info:
+        _ = get_settings().redaction_key
+    assert secret not in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_a_set_but_empty_variable_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix round 1, minor 6. `.env.example` sourced verbatim sets bare `KEY=` lines to the empty
+    string, not unset; SD_DATABASE_URL='' must not crash db/session and SD_PUBLIC_BASE_URL=''
+    must not silently become the empty string -- both fall back to their real defaults, exactly
+    as if the variable were never set."""
+    monkeypatch.setenv("SD_DATABASE_URL", "")
+    monkeypatch.setenv("SD_PUBLIC_BASE_URL", "")
+    monkeypatch.setenv("SD_SPEC_DIR", "")
+    s = get_settings()
+    assert s.database_url == DEFAULT_DATABASE_URL
+    assert s.public_base_url == "https://selector-drift.invalid"
+    assert s.spec_dir == Path("specs")

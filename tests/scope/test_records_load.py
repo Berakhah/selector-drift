@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import re
 from pathlib import Path
 
 import pytest
@@ -10,23 +9,8 @@ import yaml
 from selector_drift.scope.errors import ScopeRefusal
 from selector_drift.scope.gate import authorise
 from selector_drift.spec.loader import load_scope, load_scope_text
-
-REPO = Path(__file__).resolve().parents[2]
-SCOPES = sorted((REPO / "scopes").glob("*.yaml"))
-PLACEHOLDER = re.compile(r"<[A-Z0-9][A-Z0-9-]*>|\bUSER\b")
-
-# Ruling 2 (controller, 2026-09-28): Step 8's day-one values (GitHub account, control-arm
-# hosts, bench host, day-one date, authorising party) have not been supplied. Every scope
-# record therefore still carries an <UPPER-CASE> placeholder, and any test below that must
-# load the real records to make a claim about them cannot pass honestly until those values
-# land -- see test_no_scope_record_carries_an_unresolved_placeholder, which stays red on
-# purpose as the signal that they are missing. This mark disappears on its own once every
-# placeholder is replaced.
-_blocked_on_day_one_values = pytest.mark.skipif(
-    any(PLACEHOLDER.search(p.read_text(encoding="utf-8")) for p in SCOPES),
-    reason="blocked on day-one values (P-2/P-3/P-4) -- "
-    "see test_no_scope_record_carries_an_unresolved_placeholder",
-)
+from tests._day_one import PLACEHOLDER, SCOPES
+from tests._day_one import blocked_on_day_one_values as _blocked_on_day_one_values
 
 
 @pytest.mark.unit
