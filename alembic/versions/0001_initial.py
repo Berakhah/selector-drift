@@ -88,8 +88,8 @@ def upgrade() -> None:
         "runs",
         sa.Column("run_key", sa.Text(), nullable=False),
         sa.Column("target", sa.Text(), nullable=False),
-        sa.Column("spec_version", sa.Text(), nullable=False),
-        sa.Column("window", sa.Text(), nullable=False),
+        sa.Column("spec_version", sa.Integer(), nullable=False),
+        sa.Column("window", sa.Date(), nullable=False),
         sa.Column("first_started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("last_finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("state", sa.Text(), nullable=False),
@@ -125,7 +125,7 @@ def upgrade() -> None:
         "selector_cache",
         sa.Column("target", sa.Text(), nullable=False),
         sa.Column("field", sa.Text(), nullable=False),
-        sa.Column("spec_version", sa.Text(), nullable=False),
+        sa.Column("spec_version", sa.Integer(), nullable=False),
         sa.Column("selector", sa.Text(), nullable=False),
         sa.Column("anchor", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("node_id", sa.Text(), nullable=True),
@@ -200,6 +200,7 @@ def upgrade() -> None:
             ["runs.run_key"],
         ),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("run_key", "attempt", name="uq_run_attempts_run_key_attempt"),
     )
     op.create_index("ix_run_attempts_run_key", "run_attempts", ["run_key"], unique=False)
     op.create_table(
@@ -219,7 +220,7 @@ def upgrade() -> None:
         "heal_events",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("run_key", sa.Text(), nullable=False),
-        sa.Column("resolution_id", sa.Integer(), nullable=False),
+        sa.Column("resolution_id", sa.Integer(), nullable=True),
         sa.Column("target", sa.Text(), nullable=False),
         sa.Column("field", sa.Text(), nullable=False),
         sa.Column("broke_at", sa.DateTime(timezone=True), nullable=False),
