@@ -22,6 +22,6 @@ def _database_url() -> str:
     return os.environ.get("SD_DATABASE_URL", _DEFAULT_DATABASE_URL)
 
 
-engine: Engine = create_engine(_database_url(), future=True)
+engine: Engine = create_engine(_database_url())
 
-Session = sessionmaker(bind=engine, future=True)
+Session = sessionmaker(bind=engine)
