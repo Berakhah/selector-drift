@@ -51,6 +51,15 @@ def _target(*origins):
         "",
         "http:///x",
         "http://a.example:99999/",
+        "http://[::1%,*]/",
+        "http://[fe80::1%eth0]/",
+        "http://[::1%;*]/",
+        "http://[::1%25,*]/",
+        "http://0x7f.1/",
+        "http://2130706433/",
+        "http://127.000.0.1/",
+        "http://a.example:" + chr(0xFF18) + chr(0xFF10) + "/",  # full-width digits
+        "http://a.example:080/",
     ],
 )
 def test_origin_of_refuses_anything_that_is_not_a_plain_http_origin(url):
