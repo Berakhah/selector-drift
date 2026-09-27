@@ -9,14 +9,18 @@ contract.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 
 from bok_core.boundary.sensitivity import Sensitivity
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from selector_drift.scope._token import _MINT, _ScopeToken
+# Aliased (not `from ... import _MINT`), so this module's own namespace never re-exports the
+# mint token or the minting flag -- see fix round 1, I-2. Aliased to a name distinct from the
+# `_token` dataclass field below, to keep that field's forward-referenced annotation
+# (`_token_module._ScopeToken`) unambiguous for a static type checker.
+from selector_drift.scope import _token as _token_module
 from selector_drift.scope.errors import ScopeRefusal
 
 
@@ -43,7 +47,16 @@ class RateLimit:
 
 class ScopeRecord(BaseModel):
     """Author-facing. One per target. `sensitivity` is deliberately NOT a field here --
-    see the derived property below (R4/H7)."""
+    see the derived property below (R4/H7).
+
+    `frozen=True` blocks attribute assignment after construction (fix round 1, I-1): without
+    it, `record.basis = "client-authorised"` mutates a validated record into an unvalidated
+    one in place, and `authorise()` would mint from whatever it was handed. `extra="forbid"`
+    closes the matching hole on the input side -- an unexpected field is a typo, not silently
+    ignored data.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     target: str
     basis: Basis
@@ -85,9 +98,16 @@ class AuthorisedTarget:
     a leading underscore on `_ScopeToken` is a convention, not a control, so someone WILL
     import it directly -- only identity against the one instance `gate.py` mints catches
     that.
+
+    Identity on `_MINT` alone is not sufficient (fix round 1, I-2):
+    `dataclasses.replace(an_authorised_target, origins=("*",))` passes the already-minted
+    `_MINT` instance straight back through `__init__`, so re-minting via `replace()` outside
+    the gate would otherwise succeed. `__post_init__` additionally requires the module-private
+    `_MINTING` flag to be set, which only `gate.authorise()` ever sets, and only for the
+    duration of its own `AuthorisedTarget(...)` call.
     """
 
-    _token: _ScopeToken
+    _token: _token_module._ScopeToken = field(repr=False, compare=False)
     target: str
     basis: Basis
     rate_limit: RateLimit
@@ -101,5 +121,8 @@ class AuthorisedTarget:
     evidence_retention_days: int | None = None
 
     def __post_init__(self) -> None:
-        if self._token is not _MINT:  # identity, not isinstance (M29)
+        # Identity, not isinstance (M29), AND the minting flag (fix round 1, I-2): identity
+        # alone lets dataclasses.replace() re-mint outside the gate by passing the already
+        # -minted token straight back through __init__.
+        if self._token is not _token_module._MINT or not _token_module._MINTING.get():
             raise ScopeRefusal("not minted by the scope gate")
