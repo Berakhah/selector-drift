@@ -5,7 +5,6 @@ Separate from flows.py so that pipeline.py (Task 26A), which flows.py imports, c
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, date, datetime
 from typing import Literal
 
@@ -13,14 +12,17 @@ from sqlalchemy import func, select
 
 from selector_drift.db.models import AuditLog, Heartbeat, Run, RunAttempt, ScopeRecordRow
 from selector_drift.db.session import Session
-from selector_drift.scope.record import ScopeRecord
+from selector_drift.scope.record import TARGET_SLUG, ScopeRecord
 
 TerminalState = Literal["completed", "healed", "quarantined", "failed", "refused"]
 AttemptState = Literal["started", "completed", "healed", "quarantined", "failed"]
 
 NO_TERMINAL_STATE = "attempt started; no terminal state was recorded (crash, kill or timeout)"
 MAX_ERROR = 2000
-_TARGET = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+# M-3 (final review): shared with scope.record.ScopeRecord's target validator, so a target that
+# passes the scope gate can never fail here with an uncaught ValueError after the heartbeat has
+# already been written.
+_TARGET = TARGET_SLUG
 
 
 def run_key(target: str, spec_version: int, window: str) -> str:
