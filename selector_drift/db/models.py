@@ -177,9 +177,15 @@ class Quarantine(Base):
 
 
 class AuditLog(Base):
-    """Append-only. Every gate refusal, promotion, discard and manual action is a row here."""
+    """Append-only. Every gate refusal, promotion, discard and manual action is a row here.
+
+    `ix_audit_log_action_subject_at` (fix wave, Important 3) serves
+    `browser/ratelimit.py`'s window query, which filters on `action` and `subject` and orders
+    by `at` on every `acquire()` call -- a query that runs on the hot path of every navigation
+    against every target, so an unindexed scan here would get slower as the log grows."""
 
     __tablename__ = "audit_log"
+    __table_args__ = (Index("ix_audit_log_action_subject_at", "action", "subject", "at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
     at: Mapped[dt.datetime] = mapped_column(_TZ, nullable=False)
