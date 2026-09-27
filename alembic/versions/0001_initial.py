@@ -34,6 +34,12 @@ def upgrade() -> None:
         sa.Column("detail", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
+    op.create_index(
+        "ix_audit_log_action_subject_at",
+        "audit_log",
+        ["action", "subject", "at"],
+        unique=False,
+    )
     op.create_table(
         "deploys",
         sa.Column("target", sa.Text(), nullable=False),
@@ -278,5 +284,6 @@ def downgrade() -> None:
     op.drop_table("heartbeats")
     op.drop_index("ix_deploys_target_deployed_at", table_name="deploys")
     op.drop_table("deploys")
+    op.drop_index("ix_audit_log_action_subject_at", table_name="audit_log")
     op.drop_table("audit_log")
     # ### end Alembic commands ###

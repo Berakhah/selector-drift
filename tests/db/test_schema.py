@@ -89,6 +89,9 @@ def test_the_indexes_the_timeline_and_rung_stats_need_exist():
             "ix_heal_events_target_broke_at": ["target", "broke_at"],
         },
         "deploys": {"ix_deploys_target_deployed_at": ["target", "deployed_at"]},
+        "audit_log": {
+            "ix_audit_log_action_subject_at": ["action", "subject", "at"],
+        },
     }
     for table, indexes in expected.items():
         by_name = {i["name"]: i["column_names"] for i in insp.get_indexes(table)}
