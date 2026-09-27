@@ -40,6 +40,7 @@ needs two modules, not the whole substrate.
 | # | Status | How it was resolved, or what remains |
 |---|---|---|
 | P-1 | **Resolved by a ruling, not by publication** | `bok-core` is hand-built as a minimal slice in `backoffice-kit` (branch `bok-core-minimal`) and consumed as an **absolute-path editable dependency**. A `git+file://` dependency hit a reproducible `uv 0.11.21` panic (`AmbiguousAuthority`). Re-pointing at PyPI later is one line in `pyproject.toml` |
+| **P-1b** | **Open — blocks Task 6 Step 11 (the image build and first deploy)** | Found 2026-09-26. The ruling above works on the laptop only: `pyproject.toml`'s `bok-core` source is an absolute Windows path, so `uv sync --frozen` fails inside the Docker build on the VM. Before Step 11, **either** publish `bok-core` 0.0.1 to PyPI and re-point the one line, **or** vendor the slice into the image build context (e.g. `vendor/bok-core/`, referenced by a relative path) and commit the lock that resolves it. Tasks 1–6 Steps 1–10 do not need it |
 | P-2 | **Half resolved** | The repo was hand-scaffolded instead of running `copier` (Task 1). **The real GitHub account still has to replace `<real-account>`** before Task 5 — the contact URL must resolve |
 | P-3 | **Open — blocks Task 5** | Two self-owned deployed applications for the control arm are still unnamed |
 | P-4 | **Open — blocks Task 6 Step 5** | The VM is not yet provisioned |
@@ -268,7 +269,14 @@ mkdir -p testbench/{portal,mutations,mutations/adversarial,answers}
 for d in $(find selector_drift testbench -type d -not -path '*/templates*' -not -path '*/static*'); do
   touch "$d/__init__.py"
 done
+# tests/ is a package too (found 2026-09-26): Tasks 26, 26A, 26C and 34 import
+# `tests.testbench.conftest` / `tests.testbench.helpers`, which needs an __init__.py at every level.
+mkdir -p tests/{scope,db,browser,spec,orchestrate,quality,testbench,resolve,heallog,validate,extract,suite,land,credentials,api,docs}
+find tests -type d -not -path '*/__pycache__*' -exec touch {}/__init__.py \;
 ```
+
+A test directory a later task adds (none is planned beyond this list) gets its own `__init__.py` in
+the same commit.
 
 - [ ] **Step 7: Run the tests and make sure they pass**
 
@@ -328,6 +336,11 @@ gh repo create selector-drift --private --source=. --push
         selector_drift.heallog
         selector_drift.api
     forbidden_modules = selector_drift.scope._token
+    # Indirect imports are allowed ON PURPOSE (found 2026-09-26): orchestrate -> scope.gate ->
+    # scope._token is the one legitimate path, and forbidden contracts count indirect imports by
+    # default, so without this line the contract breaks on the only caller it exists to permit.
+    # What is forbidden is a DIRECT import of _token from any of these packages.
+    allow_indirect_imports = True
     ```
   - `authorise(record: ScopeRecord, *, today: date) -> AuthorisedTarget` — raises `ScopeRefusal`
   - `ScopeRefusal(Exception)` with `.reason: str`
@@ -468,15 +481,40 @@ class AuthorisedTarget:
 |---|---|
 | `expires_on < today` | brief §3.1 |
 | `authorised_on > expires_on` | — |
+| `authorised_on > today` — reason `"authorised_on is in the future"` (a record signed tomorrow authorises nothing today; added 2026-09-26) | B4 |
 | `basis` outside the v1 enum | design §4.2 |
 | `basis is CLIENT_AUTHORISED and evidence_uri is None` | design §4.2 |
 | `evidence_uri` set and its bytes do not hash to `evidence_sha256` | R3/H10 |
 | `origins` empty | R8/H2 |
 | `rate_limit.requests < 1 or per_seconds < 1` | H4 |
 
-On success it returns `AuthorisedTarget(_MINT, ..., record_sha256=sha256(yaml_bytes))`. Every run
+On success it returns `AuthorisedTarget(_MINT, ..., record_sha256=record_sha256(record))`. Every run
 writes that hash to `audit_log`, so "which authorisation was in force when we accessed this system"
 is answerable from the database rather than from the working tree.
+
+**The hash is of the record, not of the YAML bytes (found 2026-09-26).** `authorise(record)` never
+receives the file's bytes, so `sha256(yaml_bytes)` could not be computed where it was promised. The
+hash is taken over the record's canonical JSON — every field, keys sorted, no whitespace — so two
+files that differ only in comments or key order hash the same, and any change to a value does not:
+
+```python
+# selector_drift/scope/gate.py  (the hash authorise() mints with)
+import hashlib
+import json
+
+
+def record_sha256(record: ScopeRecord) -> str:
+    canonical = json.dumps(record.model_dump(mode="json"), sort_keys=True,
+                           separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+```
+
+and, in `authorise()` directly after the `authorised_on > expires_on` check:
+
+```python
+    if record.authorised_on > today:
+        raise ScopeRefusal("authorised_on is in the future")
+```
 
 - [ ] **Step 4: Run the tests and make sure they pass**
 
@@ -576,10 +614,29 @@ def test_retention_days_must_be_positive_when_set(bad):
 def test_warmup_defaults_to_thirty_and_reaches_the_authorised_target():
     assert rec().warmup_runs == 30
     assert authorise(rec(warmup_runs=5), today=TODAY).warmup_runs == 5
+
+
+@pytest.mark.unit
+def test_a_record_signed_in_the_future_is_refused():
+    """B4. A record dated tomorrow authorises nothing today."""
+    with pytest.raises(ScopeRefusal, match="future"):
+        authorise(rec(authorised_on=TODAY + dt.timedelta(days=1)), today=TODAY)
+
+
+@pytest.mark.unit
+def test_record_sha256_is_the_canonical_json_of_the_record():
+    """The hash authorise() mints is over the record's values, key order and comments aside."""
+    import json
+    from selector_drift.scope.gate import record_sha256
+    r = rec()
+    canonical = json.dumps(r.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    assert authorise(r, today=TODAY).record_sha256 == \
+        hashlib.sha256(canonical.encode("utf-8")).hexdigest() == record_sha256(r)
+    assert record_sha256(rec(authorising_party="someone else")) != record_sha256(r)
 ```
 
 Every existing test in `tests/scope/test_gate.py` also gains `@pytest.mark.unit`. Step 4's expected
-count becomes **PASS, 17 tests**.
+count becomes **PASS, 19 tests**.
 
 **Task 5 follow-on (same change, three YAML lines).** `scopes/testbench.yaml` gains
 `warmup_runs: 5`; the two control-arm records gain `warmup_runs: 30` explicitly (so the value is
@@ -619,7 +676,7 @@ Column list, fixed now:
 | `quarantine` | `run_key` FK, `reason`, `verdicts` (JSONB), `data_uri`, `resolved_as` (`promoted`/`discarded`/null), `actor`, `resolved_at` |
 | `audit_log` | `id`, `at`, `actor`, `action`, `subject`, `detail` (JSONB) |
 | `scope_records` | mirror of `ScopeRecord` fields plus `record_sha256`, `loaded_at` |
-| **`deploys`** | `target`, `deployed_at`, `source` (`self-host`/`gh-actions`/`manual`), `ref`, `ingested_at`. **New (R17/M10)** — the control arm's ground truth |
+| **`deploys`** | `target`, `deployed_at`, `source` (`self-host`/`gh-actions`/`manual`), `ref`, `ingested_at`; **PK `(target, deployed_at, ref)`** — two deploys of one target in the same second with different refs are two deploys (found 2026-09-26: the table had no key, so a re-ingested feed duplicated rows). **New (R17/M10)** — the control arm's ground truth |
 | **`interventions`** | `id`, `at`, `actor`, `kind` (`spec_edit`/`cache_edit`/`manual_promote`), `target`, `field`, `before` (JSONB), `after` (JSONB), `reason`. **New (R17/M1)** |
 
 **Four tables were added here rather than later, and the reason is the rule this task already
@@ -652,6 +709,26 @@ log.
 **Indexes, also frozen now (M15/P3):** `runs(first_started_at)`, `run_attempts(run_key)`,
 `resolutions(run_key)`, `resolutions(target, field, at)`, `heal_events(run_key)`,
 `heal_events(target, broke_at)`, `deploys(target, deployed_at)`.
+
+**Nullability of `runs`, declared explicitly (found 2026-09-26).** Tests and Task 6's
+`record_attempt()` create a `runs` row before the run has finished, so the columns a finished run
+fills are nullable and the rest are not — the model says so with `nullable=` on every column rather
+than leaving it to SQLAlchemy's default:
+
+| `runs` column | Nullable |
+|---|---|
+| `run_key`, `target`, `spec_version`, `window`, `first_started_at`, `state` | no |
+| `last_finished_at`, `rows_written`, `error` | **yes** |
+
+`window` is a reserved word in Postgres. The ORM quotes it; **every hand-written SQL string in the
+plan (`seed.sql`, `derive.py`, `testbench/score.py`, the `psql` checks) must write `"window"`.**
+
+**`db/session.py` reads one URL, with no password in the source (found 2026-09-26).** Task 3 predates
+`config.py` (Task 5), so its `session.py` reads `os.environ["SD_DATABASE_URL"]` with the same
+password-less default Task 5 uses (`postgresql+psycopg://selector_drift@localhost:5432/selector_drift`);
+**Task 5 Step 4 then switches it to `get_settings().database_url`**, so from day one on there is one
+source. The compose password reaches a local `uv run` only through the exported `SD_DATABASE_URL` —
+never as a literal in `session.py`, `config.py` or a test.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -794,10 +871,25 @@ def test_the_scope_mirror_carries_warmup_and_retention():
     cols = {c["name"]: c for c in inspect(engine).get_columns("scope_records")}
     assert cols["warmup_runs"]["nullable"] is False
     assert cols["evidence_retention_days"]["nullable"] is True
+
+
+@pytest.mark.integration
+def test_a_run_row_may_exist_before_it_finishes():
+    cols = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("runs")}
+    assert {k: cols[k] for k in ("last_finished_at", "rows_written", "error")} == \
+        {"last_finished_at": True, "rows_written": True, "error": True}
+    assert not any(cols[k] for k in ("run_key", "target", "spec_version", "window",
+                                     "first_started_at", "state"))
+
+
+@pytest.mark.integration
+def test_deploys_are_keyed_by_target_time_and_ref():
+    pk = inspect(engine).get_pk_constraint("deploys")["constrained_columns"]
+    assert set(pk) == {"target", "deployed_at", "ref"}
 ```
 
 Every existing test in `tests/db/test_schema.py` also gains `@pytest.mark.integration` (one marker
-per test — they read Postgres). Step 4's expected count becomes **PASS, 11 tests**.
+per test — they read Postgres). Step 4's expected count becomes **PASS, 13 tests**.
 
 ---
 
@@ -885,7 +977,72 @@ Expected: FAIL — `AttributeError: module 'selector_drift.browser' has no attri
 
 `open()` reads the URL via `registry.url_for(target.target)`, applies `target.rate_limit` (the limit comes from the `AuthorisedTarget`, never from config), sets the user agent to include `target.user_agent_contact`, launches **one browser context per run**, and tears it down in `__aexit__`.
 
-`limits.py` holds the container limits applied at the Prefect deployment level in Task 6.
+**`driver.py` calls the module attribute, never a bound name (found 2026-09-26):** `from
+selector_drift.browser import registry` and `registry.url_for(target.target)` inside `open()`.
+Tasks 6, 12 and 26A point the product at a local server by patching
+`selector_drift.browser.registry.url_for`; a `from ...registry import url_for` in `driver.py` would
+bind the original at import and make every one of those patches vacuous.
+
+`registry.py` maps exactly the three day-one targets (Task 5's scope records). The host tokens are
+the same `<UPPER-CASE>` tokens `scopes/*.yaml` carries and are replaced in the same commit that
+replaces them there (P-3, P-4):
+
+```python
+# selector_drift/browser/registry.py
+"""The only place a URL string lives. A target with no entry has no URL, so it cannot be opened."""
+from __future__ import annotations
+
+from typing import Final
+
+_URLS: Final[dict[str, str]] = {
+    "testbench": "https://<BENCH-HOST>/",
+    "agent-perimeter": "https://<CONTROL-1-HOST>/",
+    "ledger-sense": "https://<CONTROL-2-HOST>/",
+}
+
+
+class UnknownTarget(LookupError):
+    pass
+
+
+def url_for(target: str) -> str:
+    try:
+        return _URLS[target]
+    except KeyError:
+        raise UnknownTarget(f"no URL registered for target {target!r}") from None
+```
+
+`limits.py` names the container limits — the one definition Task 6's `JOB_LIMITS` and the compose
+`worker` block must agree with (Task 6's `test_the_container_enforces_the_limits_the_deployment_declares`
+compares them):
+
+```python
+# selector_drift/browser/limits.py
+"""Container limits for the browser worker (B8). Enforced by docker-compose's `worker` service;
+declared on the Prefect deployment (Task 6) so a move to a Docker work pool keeps them."""
+from __future__ import annotations
+
+from typing import Final
+
+MEM_LIMIT: Final = "2g"
+PIDS_LIMIT: Final = 512
+SHM_SIZE: Final = "1g"                # Chromium's default /dev/shm in Docker is 64 MB
+FLOW_TIMEOUT_SECONDS: Final = 600     # B8: ten minutes, then Prefect cancels the run
+```
+
+Task 6's `deployments.py` builds `JOB_LIMITS = {"mem_limit": MEM_LIMIT, "pids_limit": PIDS_LIMIT}`
+from these names and `flows.py` imports `FLOW_TIMEOUT_SECONDS` from here.
+
+Add to `tests/browser/test_driver.py`:
+
+```python
+@pytest.mark.unit
+def test_the_registry_knows_exactly_the_three_day_one_targets():
+    from selector_drift.browser import registry
+    assert set(registry._URLS) == {"testbench", "agent-perimeter", "ledger-sense"}
+    with pytest.raises(registry.UnknownTarget):
+        registry.url_for("anything-else")
+```
 
 - [ ] **Step 4: Add the worker service to compose**
 
@@ -907,6 +1064,12 @@ Expected: FAIL — `AttributeError: module 'selector_drift.browser' has no attri
     depends_on: [ postgres, prefect-server ]
 ```
 
+**Task 6 owns two things this block names (found 2026-09-26).** `build: .` needs the repo-root
+`Dockerfile` and `depends_on: prefect-server` needs that service; **Task 6 creates both**, and replaces
+this block with its superset (command, restart policy, `init`, environment, and the writable
+escalation-corpus volume the read-only rootfs otherwise forbids). Until Task 6 lands, this service is
+declared, not started — Task 4's tests do not start it.
+
 **The first draft of this block read `security_opt: [ "seccomp=unconfined" ]` (H1).** `00` §8 and
 design §9.2 both require *"seccomp default"*; `unconfined` **removes** the filter — the opposite of
 the requirement — on the one container in the system that renders hostile HTML while holding session
@@ -925,7 +1088,7 @@ service runs as `10001:10001`.
 - [ ] **Step 5: Run the tests and make sure they pass**
 
 Run: `uv run pytest tests/browser -v`
-Expected: PASS, 2 tests.
+Expected: PASS, 3 tests (the registry test is the third).
 
 - [ ] **Step 6: Commit**
 
@@ -946,14 +1109,16 @@ deliberate: a scope record with an invented date or a 404 contact is a complianc
 the first time anyone checks it (B4, B5).
 
 **Files:**
-- Create: `selector_drift/config.py` — the minimal settings module. **Task 33 extends it** (Step 3
-  there replaces this file with its superset; the seven names here keep their meaning)
+- Create: `selector_drift/config.py` — **the one `Settings` definition in the plan** (decided
+  2026-09-26: Task 28 and Task 33 each carried their own copy; both now consume this file unchanged)
 - Create: `selector_drift/spec/schema.py`, `selector_drift/spec/loader.py`
 - Create: `scopes/testbench.yaml`, `scopes/agent-perimeter.yaml`, `scopes/ledger-sense.yaml`
 - Create: `specs/testbench.yaml`, `specs/agent-perimeter.yaml`, `specs/ledger-sense.yaml`
-- Modify: `.env.example`, `pyproject.toml` + `uv.lock` (dev dependency `types-PyYAML`)
-- Test: `tests/test_config.py`, `tests/spec/test_spec_schema.py`, `tests/spec/test_loader.py`,
-  `tests/scope/test_records_load.py`
+- Modify: `selector_drift/db/session.py` (Task 3) — reads `get_settings().database_url`
+- Modify: `.env.example`, `pyproject.toml` + `uv.lock` (`regex`; dev dependencies `types-PyYAML`,
+  `types-regex`)
+- Test: `tests/test_config.py`, `tests/spec/test_spec_schema.py`, `tests/spec/test_matcher.py`,
+  `tests/spec/test_loader.py`, `tests/scope/test_records_load.py`
 
 **Interfaces:**
 - Consumes: `ScopeRecord`, `Basis`, `FirstHealPolicy` (`selector_drift.scope.record`),
@@ -963,25 +1128,38 @@ the first time anyone checks it (B4, B5).
   - `selector_drift/config.py`: `Settings` (frozen dataclass) with fields `env: str` (`SD_ENV`),
     `database_url: str` (`SD_DATABASE_URL`), `spec_dir: Path` (`SD_SPEC_DIR`, default `specs`),
     `scope_dir: Path` (`SD_SCOPE_DIR`, default `scopes`), `evidence_root: Path`
-    (`SD_EVIDENCE_ROOT`), `lake_root: Path` (`SD_LAKE_ROOT`), and the property
-    `redaction_key -> bytes` (`SD_REDACTION_KEY`, hex, ≥ 32 bytes, raises `ConfigError` when unset —
-    no secret has a default); `get_settings() -> Settings` (`lru_cache`d — tests call
-    `get_settings.cache_clear()` after changing the environment); `ConfigError(RuntimeError)`
+    (`SD_EVIDENCE_ROOT`), `lake_root: Path` (`SD_LAKE_ROOT`), `fixture_mode: bool`
+    (`SD_FIXTURE_MODE`), `fixture_evidence_root: Path` (`SD_FIXTURE_EVIDENCE_ROOT`),
+    `web_origin: str` (`SD_WEB_ORIGIN`), `public_base_url: str` (`SD_PUBLIC_BASE_URL`),
+    `alert_webhook_url: str | None` (`SD_ALERT_WEBHOOK_URL`), `session_dir: Path`
+    (`SD_SESSION_DIR`, default `sessions`), `escalation_corpus: Path` (`SD_ESCALATION_CORPUS`,
+    default `/data/corpus/escalations`), the properties `redaction_key -> bytes`
+    (`SD_REDACTION_KEY`, hex, ≥ 32 bytes, raises `ConfigError` when unset — no secret has a
+    default) and `evidence_read_root -> Path`, and `Settings.for_typegen()`; `get_settings() -> Settings`
+    (`lru_cache`d — tests call `get_settings.cache_clear()` after changing the environment);
+    `ConfigError(RuntimeError)`
   - `selector_drift/spec/schema.py`:
     - `SpecError(ValueError)`
     - `Relation` — `StrEnum`: `RIGHT_OF = "right_of"`, `BELOW = "below"`, `WITHIN = "within"`
     - `FieldType` — `StrEnum`: `STRING = "string"`, `INTEGER = "integer"`, `DECIMAL = "decimal"`, `DATE = "date"`
     - `DomainRule` — `TypedDict(total=False)`: `min: float`, `max: float`, `enum: list[str]`,
-      `date_after: str`, `date_before: str` (ISO `YYYY-MM-DD`); unknown keys refused
+      `date_after: str`, `date_before: str` (ISO `YYYY-MM-DD`), `currency: str` (ISO 4217 code,
+      for Task 21's currency-sanity rule — the one `DomainRule` in the plan, 2026-09-26); unknown
+      keys refused
     - `AssertionSpec(type: Literal["format", "domain", "cross_field"], pattern: str | None = None, rule: DomainRule | None = None, expression: str | None = None)` — exactly the payload its `type` names
-    - `FieldTarget(name: str, description: str, relation: Relation | None = None, assertions: list[AssertionSpec], distributional: bool = False)` — `description` is the semantic target in plain language, never a DOM path
+    - `FieldTarget(name: str, description: str, label: str | None = None, relation: Relation | None = None, assertions: list[AssertionSpec], distributional: bool = False)` — `description` is the semantic target in plain language, never a DOM path; `label` is the portal's visible label when it differs from the humanised field name; every rung reads it through Task 14's `resolve.labels.expected_label(target)`, which returns `normalise(target.label or target.name.replace("_", " "))` (added 2026-09-26: the bench's `amount` column is labelled "Amount" but a client portal's may read "Claim Amount (USD)")
     - `NavStep(step: Literal["goto", "fill", "click"], path: str | None = None, field: str | None = None, value_from: Literal["credentials.username", "credentials.password"] | None = None, role: str | None = None, name: str | None = None)` — exactly as Task 26A Step 3 pins it, validated per step kind
     - `TaskSpec(version: int, scope_ref: str, schedule: str, row_scope: str, natural_key: list[str], expected_schema: dict[str, FieldType], navigate: list[NavStep], targets: list[FieldTarget])`
-    - `MAX_MATCH_LENGTH: int = 512`
+    - `MAX_MATCH_LEN: Final = 256`, `MATCH_TIMEOUT_S: Final = 0.05`,
+      `MatchResult = Literal["match", "no_match", "too_long", "timeout"]`
+    - `compile_pattern(pattern: str) -> regex.Pattern[str]` (raises `SpecError`),
+      `match_value(pattern: str, value: str) -> MatchResult`
     - `matches(target: FieldTarget, value: str) -> bool` — **the format matcher lives here, in
       `spec/` (R13/M23).** Task 17's rung 1 must check format assertions and Task 1's contract
       forbids `resolve` → `validate`, so the matcher cannot live in `validate/assertions/format.py`.
-      Both packages import it from `spec/`.
+      Both packages import it from `spec/`. **Moved here from Task 21 on 2026-09-26** with the
+      `regex` dependency: Task 5 had its own unbounded-by-time `MAX_MATCH_LENGTH = 512` matcher and
+      Task 21 replaced it, so two tasks defined one function; now one does, and Task 21 consumes it.
   - `selector_drift/spec/loader.py` — **`yaml.safe_load` only** (R13/H5):
     - `load_spec_text(text: str) -> TaskSpec` — raises `yaml.YAMLError` for a YAML tag that would construct an object, `SpecError` for anything else
     - `load_spec(path: Path) -> TaskSpec` — loads exactly `path`; raises `SpecError` (message names the file)
@@ -993,10 +1171,14 @@ the first time anyone checks it (B4, B5).
 **Why `config.py` is created here and not in Task 33.** Task 33 was the first task to write
 `config.py`, but Task 26A's bench fixtures, Task 34B's `derive` fixture and this task's loader all
 need `SD_SCOPE_DIR` / `SD_SPEC_DIR` honoured, and the loader is the first code that reads a
-directory. The minimal module holds only the seven names the rest of the plan already uses, in the
-shape Task 33 gives them (`redaction_key` is a property over the hex string, so a missing key is an
-error at use, never a silent default). Task 3's `db/session.py` predates this module and keeps
-reading `SD_DATABASE_URL` itself; both must use the same default.
+directory. **It holds every setting the plan reads — one definition, the union (decided 2026-09-26).**
+Task 28 and Task 33 each carried a verbatim copy of a `Settings` class, and three copies of one
+dataclass drift; so the fields Task 33 needs (fixture mode, web origin, public base URL, typegen),
+the alert webhook Task 6 read straight from `os.environ`, the session directory Task 31 derived from
+`evidence_root.parent`, and the escalation corpus Task 18 read from the environment all live here,
+and later tasks consume this file without modifying it. `redaction_key` is a property over the hex
+string, so a missing key is an error at use, never a silent default. Task 3's `db/session.py`
+predates this module; Step 4 switches it to `get_settings().database_url`.
 
 **Three fields added over the first draft, each because something downstream needs them and has no
 other source:**
@@ -1016,8 +1198,9 @@ field's checks without a trace — the green tick `00` §7 calls a lie. The load
 
 **The natural key is checked at load, not only by a repo test (M5).** A spec whose `natural_key`
 names a column outside `expected_schema`, or a column no target extracts, cannot be deduplicated
-(Task 28) and is refused as a `SpecError`. Task 38's `NaturalKeyInSchema` verdict therefore reports
-`PASS` for every spec that loads; a violating file is reported by its `SpecSchema` verdict instead.
+(Task 28) and is refused as a `SpecError`. The spec view's `NaturalKeyInSchema` verdict (Task 34C's
+`specs.py`, shown by Task 38) is therefore judged on the **raw YAML**, so on a refused file it names
+the reason the loader refused it, instead of a check that could never fail on a spec that loaded.
 
 **A `goto` step takes a same-origin path, never a URL (R8/H2).** The route-handler allowlist
 (Task 4) aborts off-origin requests, but a spec that names `https://elsewhere/` is wrong before it
@@ -1051,7 +1234,9 @@ import pytest
 from selector_drift.config import ConfigError, get_settings
 
 VARS = ("SD_ENV", "SD_DATABASE_URL", "SD_SPEC_DIR", "SD_SCOPE_DIR", "SD_EVIDENCE_ROOT",
-        "SD_LAKE_ROOT", "SD_REDACTION_KEY")
+        "SD_LAKE_ROOT", "SD_REDACTION_KEY", "SD_FIXTURE_MODE", "SD_FIXTURE_EVIDENCE_ROOT",
+        "SD_WEB_ORIGIN", "SD_PUBLIC_BASE_URL", "SD_ALERT_WEBHOOK_URL", "SD_SESSION_DIR",
+        "SD_ESCALATION_CORPUS")
 
 
 @pytest.fixture(autouse=True)
@@ -1086,6 +1271,26 @@ def test_every_directory_is_overridable_from_the_environment(
 
 
 @pytest.mark.unit
+def test_the_one_settings_class_carries_every_later_tasks_field(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """One definition (2026-09-26): Tasks 6, 18, 28, 31 and 33 read these and define none."""
+    s = get_settings()
+    assert s.alert_webhook_url is None and s.fixture_mode is False
+    assert s.session_dir == Path("sessions")
+    assert s.escalation_corpus == Path("/data/corpus/escalations")
+    assert s.evidence_read_root == s.evidence_root
+    monkeypatch.setenv("SD_ALERT_WEBHOOK_URL", "  https://hooks.example.invalid/x ")
+    monkeypatch.setenv("SD_SESSION_DIR", str(tmp_path / "sess"))
+    monkeypatch.setenv("SD_ESCALATION_CORPUS", str(tmp_path / "corpus"))
+    monkeypatch.setenv("SD_FIXTURE_MODE", "1")
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.alert_webhook_url == "https://hooks.example.invalid/x"
+    assert s.session_dir == tmp_path / "sess" and s.escalation_corpus == tmp_path / "corpus"
+    assert s.evidence_read_root == s.fixture_evidence_root
+
+
+@pytest.mark.unit
 def test_a_missing_redaction_key_is_an_error_not_a_default() -> None:
     with pytest.raises(ConfigError, match="SD_REDACTION_KEY"):
         _ = get_settings().redaction_key
@@ -1105,6 +1310,40 @@ def test_a_32_byte_hex_key_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
 ```
 
 ```python
+# tests/spec/test_matcher.py  (moved from Task 21 on 2026-09-26, with the matcher)
+import pytest
+
+from selector_drift.spec.schema import (MAX_MATCH_LEN, FieldTarget, SpecError, compile_pattern,
+                                        match_value, matches)
+
+CLAIM = r"^[A-Z]{2}\d{8}$"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("value", "expected"), [("AB12345678", "match"),
+                                                 ("12345678", "no_match"),
+                                                 ("A" * (MAX_MATCH_LEN + 1), "too_long")])
+def test_match_value_classifies_every_outcome(value, expected):
+    assert match_value(CLAIM, value) == expected
+
+
+@pytest.mark.unit
+def test_rung_one_and_the_gate_share_one_bounded_matcher():
+    # M23: spec.matches() is what rung 1 calls; it must carry the same cap as the gate.
+    target = FieldTarget.model_validate({"name": "claim_number", "description": "d",
+                                         "relation": None,
+                                         "assertions": [{"type": "format", "pattern": CLAIM}]})
+    assert matches(target, "AB12345678")
+    assert not matches(target, "AB" + "1" * MAX_MATCH_LEN)
+
+
+@pytest.mark.unit
+def test_a_broken_pattern_is_a_spec_error_not_a_nightly_crash():
+    with pytest.raises(SpecError, match="invalid format pattern"):
+        compile_pattern("(unclosed")
+```
+
+```python
 # tests/spec/test_spec_schema.py
 from __future__ import annotations
 
@@ -1113,7 +1352,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from selector_drift.spec.schema import (MAX_MATCH_LENGTH, AssertionSpec, FieldTarget, NavStep,
+from selector_drift.spec.schema import (MAX_MATCH_LEN, AssertionSpec, FieldTarget, NavStep,
                                         Relation, TaskSpec, matches)
 
 CLAIM = FieldTarget(name="claim_number", description="the claim number cell",
@@ -1261,7 +1500,7 @@ def test_matches_bounds_its_input() -> None:
     """A crafted page value against a backtracking pattern must not hang rung 1."""
     evil = FieldTarget(name="x", description="x",
                        assertions=[AssertionSpec(type="format", pattern=r"^(a+)+$")])
-    assert not matches(evil, "a" * (MAX_MATCH_LENGTH + 1))
+    assert not matches(evil, "a" * (MAX_MATCH_LEN + 1))
 
 
 @pytest.mark.unit
@@ -1269,6 +1508,15 @@ def test_matches_with_no_format_assertion_has_nothing_to_contradict() -> None:
     only_domain = FieldTarget(name="x", description="x",
                               assertions=[AssertionSpec(type="domain", rule={"min": 0.0})])
     assert matches(only_domain, "anything")
+
+
+@pytest.mark.unit
+def test_a_field_may_name_the_portals_visible_label() -> None:
+    """The label rungs look for, when it is not the humanised field name (2026-09-26)."""
+    t = FieldTarget(name="amount", description="the claim amount", label="Claim Amount (USD)",
+                    assertions=[])
+    assert t.label == "Claim Amount (USD)"
+    assert FieldTarget(name="amount", description="the claim amount", assertions=[]).label is None
 ```
 
 ```python
@@ -1482,11 +1730,17 @@ Run: `uv run pytest tests/test_config.py tests/spec tests/scope/test_records_loa
 Expected: FAIL — collection errors `ModuleNotFoundError: No module named 'selector_drift.config'`
 and `No module named 'selector_drift.spec.schema'` / `'selector_drift.spec.loader'`.
 
-- [ ] **Step 3: Add the YAML type stubs** (`mypy --strict` rejects `import yaml` without them)
+- [ ] **Step 3: Add the matcher's engine and the type stubs** (`mypy --strict` rejects `import yaml`
+  and `import regex` without them)
 
 ```bash
-uv add --dev types-PyYAML
+uv add regex
+uv add --dev types-PyYAML types-regex
 ```
+
+`regex` (Apache-2.0) is here rather than in Task 21 because the bounded matcher is (2026-09-26):
+its per-match timeout is what makes a spec pattern safe to run against a page value, and rung 1
+runs it from Task 17 onwards. Task 21 explains the choice.
 
 - [ ] **Step 4: Write `config.py`**
 
@@ -1494,8 +1748,9 @@ uv add --dev types-PyYAML
 # selector_drift/config.py
 """Process settings, from the environment only. No secret has a default.
 
-Created in Task 5 with the names day one needs. Task 33 replaces this file with its superset
-(fixture mode, web origin, public base URL, typegen settings); every name here keeps its meaning.
+The one Settings definition in the product (2026-09-26). Later tasks read fields from here and
+define none: Task 6 (alert webhook), Task 18 (escalation corpus), Task 28 (lake root), Task 31
+(session directory), Task 33 (fixture mode, web origin, public base URL, typegen).
 """
 from __future__ import annotations
 
@@ -1514,12 +1769,19 @@ class ConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class Settings:
-    env: str                          # SD_ENV: development | production | test
-    database_url: str                 # SD_DATABASE_URL -- Task 3's db/session.py reads it too
+    env: str                          # SD_ENV: development | production | test | typegen
+    database_url: str                 # SD_DATABASE_URL -- db/session.py reads it from here
     spec_dir: Path                    # SD_SPEC_DIR
     scope_dir: Path                   # SD_SCOPE_DIR -- tests point it at a tmp copy
     evidence_root: Path               # SD_EVIDENCE_ROOT
     lake_root: Path                   # SD_LAKE_ROOT
+    fixture_mode: bool                # SD_FIXTURE_MODE=1 -- E2E only (web UI spec 6)
+    fixture_evidence_root: Path       # SD_FIXTURE_EVIDENCE_ROOT
+    web_origin: str                   # SD_WEB_ORIGIN -- the Origin every non-GET must carry
+    public_base_url: str              # SD_PUBLIC_BASE_URL -- problem-type URIs, method links
+    alert_webhook_url: str | None     # SD_ALERT_WEBHOOK_URL -- None: every alert logged NOT SENT
+    session_dir: Path                 # SD_SESSION_DIR -- injected session state (Task 31)
+    escalation_corpus: Path           # SD_ESCALATION_CORPUS -- rung 5's cases (Task 18)
     _redaction_key_hex: str           # SD_REDACTION_KEY -- hex, >= 32 bytes, never committed
 
     @property
@@ -1530,6 +1792,23 @@ class Settings:
         if len(key) < MIN_REDACTION_KEY_BYTES:
             raise ConfigError(f"SD_REDACTION_KEY must be at least {MIN_REDACTION_KEY_BYTES} bytes")
         return key
+
+    @property
+    def evidence_read_root(self) -> Path:
+        """Where the API reads bundles. Fixture mode changes this and nothing else."""
+        return self.fixture_evidence_root if self.fixture_mode else self.evidence_root
+
+    @classmethod
+    def for_typegen(cls) -> Settings:
+        """For scripts/gen-types.sh: builds the app to export its schema. Holds no secret."""
+        return cls(env="typegen", database_url="postgresql+psycopg://typegen@invalid/none",
+                   spec_dir=Path("specs"), scope_dir=Path("scopes"),
+                   evidence_root=Path("evidence"), lake_root=Path("lake"), fixture_mode=False,
+                   fixture_evidence_root=Path("web/e2e/fixtures"),
+                   web_origin="http://localhost:3000",
+                   public_base_url="https://selector-drift.invalid", alert_webhook_url=None,
+                   session_dir=Path("sessions"), escalation_corpus=Path("corpus/escalations"),
+                   _redaction_key_hex="")
 
 
 @lru_cache(maxsize=1)
@@ -1542,18 +1821,47 @@ def get_settings() -> Settings:
         scope_dir=Path(e("SD_SCOPE_DIR", "scopes")),
         evidence_root=Path(e("SD_EVIDENCE_ROOT", "evidence")),
         lake_root=Path(e("SD_LAKE_ROOT", "lake")),
+        fixture_mode=e("SD_FIXTURE_MODE", "0") == "1",
+        fixture_evidence_root=Path(e("SD_FIXTURE_EVIDENCE_ROOT", "web/e2e/fixtures")),
+        web_origin=e("SD_WEB_ORIGIN", "http://localhost:3000"),
+        public_base_url=e("SD_PUBLIC_BASE_URL", "https://selector-drift.invalid"),
+        alert_webhook_url=e("SD_ALERT_WEBHOOK_URL", "").strip() or None,
+        session_dir=Path(e("SD_SESSION_DIR", "sessions")),
+        escalation_corpus=Path(e("SD_ESCALATION_CORPUS", "/data/corpus/escalations")),
         _redaction_key_hex=e("SD_REDACTION_KEY", ""),
     )
 ```
 
-Append to `.env.example` (names and non-secret defaults only — gitleaks stays clean):
+In `selector_drift/db/session.py` (Task 3), replace the `os.environ` read with the one source:
+
+```python
+from selector_drift.config import get_settings
+
+engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+```
+
+Append to `.env.example` (names and non-secret defaults only — gitleaks stays clean). **This is
+every key `Settings` reads; no later task appends one of these again** (Tasks 6, 18, 28, 29A and 33
+each used to, and two of them duplicated `SD_SPEC_DIR`). Later tasks append only keys that are not
+settings — Task 29A's deploy feed, Task 32's credential store and broker:
 
 ```bash
 # selector_drift settings (Task 5). The worker container gets SD_DATABASE_URL from compose
 # (Task 6); for a local `uv run`, export it yourself -- no process reads this file for you.
+SD_ENV=development
 SD_DATABASE_URL=
 SD_SPEC_DIR=specs
 SD_SCOPE_DIR=scopes           # tests point this at a tmp copy; production never changes it
+SD_EVIDENCE_ROOT=/data/evidence
+SD_LAKE_ROOT=/data/lake
+SD_SESSION_DIR=/data/sessions
+SD_ESCALATION_CORPUS=/data/corpus/escalations   # rung 5's metadata-only cases; a mounted volume
+SD_REDACTION_KEY=          # generate: python -c "import secrets; print(secrets.token_hex(32))"
+SD_WEB_ORIGIN=http://localhost:3000
+SD_PUBLIC_BASE_URL=
+SD_FIXTURE_MODE=0
+# The one alert channel (Task 6, M2). Empty means every alert is logged as NOT SENT.
+SD_ALERT_WEBHOOK_URL=
 ```
 
 - [ ] **Step 5: Write `spec/schema.py`**
@@ -1572,21 +1880,42 @@ import ast
 import re
 from datetime import date
 from enum import StrEnum
-from functools import lru_cache
 from pathlib import PurePosixPath
-from typing import Annotated, Literal, Self, TypedDict
+from typing import Annotated, Final, Literal, Self, TypedDict
 
+import regex
 from pydantic import (AfterValidator, BaseModel, ConfigDict, Field, field_validator,
                       model_validator, with_config)
 
-MAX_MATCH_LENGTH = 512
-"""Longest value `matches()` will test. A spec pattern meeting a page value is untrusted input on
-both sides; bounding the input bounds catastrophic backtracking. Task 21's FormatAssertion uses
-the same cap."""
+MAX_MATCH_LEN: Final = 256          # 3x the longest bounded field in specs/ (claimant, 80)
+"""Longest value the matcher will test. A spec pattern meeting a page value is untrusted input on
+both sides; bounding the input bounds polynomial backtracking. Task 21's FormatAssertion and
+Task 17's rung 1 share it."""
+MATCH_TIMEOUT_S: Final = 0.05       # per value; checked inside the regex engine's loop
+MatchResult = Literal["match", "no_match", "too_long", "timeout"]
 
 
 class SpecError(ValueError):
     """A task spec that cannot be used as written. Refused, never repaired."""
+
+
+def compile_pattern(pattern: str) -> regex.Pattern[str]:
+    try:
+        return regex.compile(pattern)            # the module caches compiled patterns
+    except regex.error as exc:
+        raise SpecError(f"invalid format pattern {pattern!r}: {exc}") from exc
+
+
+def match_value(pattern: str, value: str) -> MatchResult:
+    """Untrusted pattern (spec) meets untrusted value (page). Bounded twice (H5): a length cap and
+    a per-match timeout, which catches exponential backtracking a cap alone does not (Task 21)."""
+    if len(value) > MAX_MATCH_LEN:
+        return "too_long"
+    try:
+        hit = compile_pattern(pattern).fullmatch(value, timeout=MATCH_TIMEOUT_S)
+    except TimeoutError:
+        return "timeout"
+    return "no_match" if hit is None else "match"
 
 
 class Relation(StrEnum):
@@ -1619,12 +1948,13 @@ class DomainRule(TypedDict, total=False):
     enum: list[str]
     date_after: IsoDate
     date_before: IsoDate
+    currency: Annotated[str, Field(pattern=r"^[A-Z]{3}$")]   # ISO 4217; Task 21's sanity rule
 
 
 def _check_rule(rule: DomainRule) -> None:
     if not rule:
         raise ValueError("a domain rule needs at least one of min, max, enum, date_after, "
-                         "date_before")
+                         "date_before, currency")
     lo, hi = rule.get("min"), rule.get("max")
     if lo is not None and hi is not None and lo > hi:
         raise ValueError(f"domain rule has min {lo} above max {hi}")
@@ -1655,8 +1985,8 @@ class AssertionSpec(BaseModel):
                              f"got {sorted(given) or 'nothing'}")
         if self.pattern is not None:
             try:
-                re.compile(self.pattern)
-            except re.error as exc:
+                compile_pattern(self.pattern)             # the engine match_value() runs
+            except SpecError as exc:
                 raise ValueError(f"pattern does not compile: {exc}") from exc
         if self.rule is not None:
             _check_rule(self.rule)
@@ -1676,6 +2006,7 @@ class FieldTarget(BaseModel):
 
     name: FieldName
     description: str = Field(min_length=1, max_length=200)
+    label: str | None = Field(default=None, min_length=1, max_length=80)  # portal's visible label
     relation: Relation | None = None
     assertions: list[AssertionSpec]
     distributional: bool = False
@@ -1777,22 +2108,16 @@ class TaskSpec(BaseModel):
         return self
 
 
-@lru_cache(maxsize=256)
-def _compiled(pattern: str) -> re.Pattern[str]:
-    return re.compile(pattern)
-
-
 def matches(target: FieldTarget, value: str) -> bool:
-    """True when `value` satisfies every format assertion on `target`.
+    """Rung 1's format check (Task 17, M23): every declared format pattern matches.
 
-    A value longer than MAX_MATCH_LENGTH never matches. A field with no format assertion has
-    nothing to contradict, so it matches; rung 1 then relies on its anchor checks (Task 17).
+    A value longer than MAX_MATCH_LEN, or one whose match times out, never matches. A field with
+    no format assertion has nothing to contradict, so it matches; rung 1 then relies on its
+    anchor checks (Task 17).
     """
     text = value.strip()
-    if len(text) > MAX_MATCH_LENGTH:
-        return False
-    return all(_compiled(a.pattern).fullmatch(text) is not None
-               for a in target.assertions if a.type == "format" and a.pattern is not None)
+    return all(match_value(a.pattern, text) == "match" for a in target.assertions
+               if a.type == "format" and a.pattern is not None)
 ```
 
 - [ ] **Step 6: Write `spec/loader.py`**
@@ -2029,8 +2354,8 @@ reach them, and use that URL in all three records).
 - [ ] **Step 9: Run the tests and make sure they pass**
 
 Run: `uv run pytest tests/test_config.py tests/spec tests/scope -v -m unit`
-Expected: PASS — 5 config, 20 schema (parametrised cases counted), 10 loader, 10 records-load, plus
-Task 2's 17 gate tests: **62 passed**.
+Expected: PASS — 6 config, 21 schema (parametrised cases counted), 5 matcher, 10 loader,
+10 records-load, plus Task 2's 19 gate tests: **71 passed**.
 
 Then the fast check:
 
@@ -2045,8 +2370,8 @@ Expected: clean.
 - [ ] **Step 10: Commit**
 
 ```bash
-git add selector_drift/config.py selector_drift/spec scopes specs .env.example pyproject.toml uv.lock \
-        tests/test_config.py tests/spec tests/scope/test_records_load.py
+git add selector_drift/config.py selector_drift/db/session.py selector_drift/spec scopes specs \
+        .env.example pyproject.toml uv.lock tests/test_config.py tests/spec tests/scope/test_records_load.py
 git commit -m "feat(spec): day-one scope records, task specs, and the safe_load-only loader"
 ```
 
@@ -2068,7 +2393,7 @@ rather than the refusal design §4.3 requires.
 - Create: `Dockerfile`, `.dockerignore`, `docker/postgres-init/10-prefect-database.sql`
 - Create: `docs/methodology.md`
 - Modify: `docker-compose.yml` (add `prefect-server`; give Task 4's `worker` its command, restart
-  policy, init and environment; mount the Postgres init directory), `.env.example`
+  policy, init, environment and the `sd_data` volume; mount the Postgres init directory)
 - Test: `tests/orchestrate/conftest.py`, `tests/orchestrate/test_run_key.py`,
   `tests/orchestrate/test_run_record.py`, `tests/orchestrate/test_rung_stats.py`,
   `tests/orchestrate/test_deployments.py`, `tests/quality/test_alert_channel.py`,
@@ -2105,9 +2430,13 @@ rather than the refusal design §4.3 requires.
     reads as a failure, never as a missing row. **Called only after `authorise()` returns.**
   - `record_run(key: str, *, target: str, spec_version: int, window: date, state: TerminalState, rows_written: int | None = None, error: str | None = None) -> None`
     — the terminal state on `runs`, upserted; `first_started_at` survives
-  - `record_authorisation(run_key: str, target: str, record_sha256: str) -> None` — one `audit_log`
-    row (`action="scope_authorised"`), the promise Task 2 makes: *"which authorisation was in force
-    when we accessed this system"* is answerable from the database
+  - `record_authorisation(run_key: str, target: str, record_sha256: str, *, record: ScopeRecord) -> None` —
+    one `audit_log` row (`action="scope_authorised"`), the promise Task 2 makes: *"which
+    authorisation was in force when we accessed this system"* is answerable from the database — and
+    an upsert of the `scope_records` mirror row for `target.target` (every mirror column, including
+    `credential_posture`, `warmup_runs`, `evidence_retention_days`, `record_sha256`, `loaded_at`).
+    **Found 2026-09-26: nothing wrote the mirror**, so Task 34C's targets screen and Task 33's
+    retention job read an empty table
   - `NO_TERMINAL_STATE: str`
 - Produces — `selector_drift/orchestrate/flows.py`:
   - `extraction_flow(spec_path: str) -> str` — Prefect flow (`retries=2`, `retry_delay_seconds=300`,
@@ -2244,8 +2573,8 @@ def prefect_api() -> Iterator[None]:
 @pytest.fixture
 def db() -> Iterator[None]:
     with engine.begin() as c:
-        c.execute(text("TRUNCATE runs, run_attempts, heartbeats, resolutions, audit_log "
-                       "RESTART IDENTITY CASCADE"))
+        c.execute(text("TRUNCATE runs, run_attempts, heartbeats, resolutions, audit_log, "
+                       "scope_records RESTART IDENTITY CASCADE"))
     yield
 
 
@@ -2359,7 +2688,7 @@ from pathlib import Path
 
 import pytest
 
-from selector_drift.db.models import AuditLog, Heartbeat, Run, RunAttempt
+from selector_drift.db.models import AuditLog, Heartbeat, Run, RunAttempt, ScopeRecordRow
 from selector_drift.db.session import Session
 from selector_drift.orchestrate.flows import extraction_flow
 from selector_drift.orchestrate.run_record import (NO_TERMINAL_STATE, heartbeat, record_attempt,
@@ -2515,6 +2844,19 @@ def test_every_authorised_run_audits_the_scope_record_hash(prefect_api, db, loca
         attempt = s.query(RunAttempt).filter_by(run_key=key).one()
     assert row.detail["record_sha256"] == attempt.scope_record_sha256
     assert row.detail["target"] == "testbench"
+
+
+@pytest.mark.integration
+def test_every_authorised_run_mirrors_its_scope_record(prefect_api, db, local_site) -> None:
+    """Found 2026-09-26: nothing wrote scope_records, which the targets screen and the retention
+    job read. The mirror carries the hash the audit row carries."""
+    key = ONCE("specs/testbench.yaml")
+    with Session() as s:
+        mirror = s.get(ScopeRecordRow, "testbench")
+        attempt = s.query(RunAttempt).filter_by(run_key=key).one()
+    assert mirror is not None and mirror.record_sha256 == attempt.scope_record_sha256
+    assert mirror.warmup_runs >= 1 and mirror.loaded_at is not None
+    assert mirror.credential_posture == "session_injection"
 ```
 
 ```python
@@ -2634,12 +2976,22 @@ def test_every_deployment_is_tagged_with_its_target() -> None:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 
 import pytest
 
+from selector_drift.config import get_settings
 from selector_drift.quality.alerts import WEBHOOK_ENV, post_alert
 
 HOOK = "https://hooks.example.invalid/sd"
+
+
+@pytest.fixture(autouse=True)
+def fresh_settings() -> Iterator[None]:
+    """The webhook is read through Settings (Task 5), which is cached per process."""
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.mark.unit
@@ -2738,8 +3090,9 @@ from typing import Literal
 
 from sqlalchemy import func, select
 
-from selector_drift.db.models import AuditLog, Heartbeat, Run, RunAttempt
+from selector_drift.db.models import AuditLog, Heartbeat, Run, RunAttempt, ScopeRecordRow
 from selector_drift.db.session import Session
+from selector_drift.scope.record import ScopeRecord
 
 TerminalState = Literal["completed", "healed", "quarantined", "failed", "refused"]
 AttemptState = Literal["started", "completed", "healed", "quarantined", "failed"]
@@ -2865,11 +3218,29 @@ def record_run(key: str, *, target: str, spec_version: int, window: date, state:
         s.commit()
 
 
-def record_authorisation(run_key: str, target: str, record_sha256: str) -> None:
+def record_authorisation(run_key: str, target: str, record_sha256: str, *,
+                         record: ScopeRecord) -> None:
+    """The audit row, and the scope_records mirror the read side shows (found 2026-09-26: the
+    mirror had no writer). Both in one transaction: a mirror newer than the audit is a lie."""
+    now = datetime.now(UTC)
     with Session() as s:
-        s.add(AuditLog(at=datetime.now(UTC), actor="scheduler", action="scope_authorised",
-                       subject=run_key,
+        s.add(AuditLog(at=now, actor="scheduler", action="scope_authorised", subject=run_key,
                        detail={"target": target, "record_sha256": record_sha256}))
+        s.merge(ScopeRecordRow(
+            target=record.target, basis=record.basis.value,
+            authorising_party=record.authorising_party, authorised_on=record.authorised_on,
+            expires_on=record.expires_on, evidence_uri=record.evidence_uri,
+            evidence_sha256=record.evidence_sha256, origins=list(record.origins),
+            rate_limit={"requests": record.rate_limit.requests,
+                        "per_seconds": record.rate_limit.per_seconds},
+            user_agent_contact=record.user_agent_contact,
+            first_heal_policy=record.first_heal_policy.value, legal_review=record.legal_review,
+            warmup_runs=record.warmup_runs,
+            evidence_retention_days=record.evidence_retention_days,
+            # ScopeRecord gains credential_posture in Task 32; until then every target is the
+            # column's default posture, and this line needs no edit when the field arrives.
+            credential_posture=str(getattr(record, "credential_posture", "session_injection")),
+            record_sha256=record_sha256, loaded_at=now))
         s.commit()
 ```
 
@@ -2883,14 +3254,15 @@ a target, a run key and a one-line summary."""
 from __future__ import annotations
 
 import logging
-import os
 from datetime import UTC, datetime
 from typing import Literal
 
 import httpx
 
+from selector_drift.config import get_settings
+
 AlertKind = Literal["refused", "failed", "quarantined", "missed_heartbeat", "finding"]
-WEBHOOK_ENV = "SD_ALERT_WEBHOOK_URL"
+WEBHOOK_ENV = "SD_ALERT_WEBHOOK_URL"      # the variable Settings.alert_webhook_url reads (Task 5)
 TIMEOUT_SECONDS = 10.0
 MAX_SUMMARY = 500
 
@@ -2898,7 +3270,8 @@ _log = logging.getLogger(__name__)
 
 
 def webhook_url() -> str | None:
-    return os.environ.get(WEBHOOK_ENV, "").strip() or None
+    # Through Settings, never os.environ directly (2026-09-26): one place reads configuration.
+    return get_settings().alert_webhook_url
 
 
 def post_alert(kind: AlertKind, target: str, run_key: str | None, summary: str) -> bool:
@@ -2934,6 +3307,7 @@ from prefect import flow
 from prefect.runtime import flow_run
 
 from selector_drift.browser import driver   # attribute access, so tests can patch driver.open
+from selector_drift.browser.limits import FLOW_TIMEOUT_SECONDS   # B8: 600 s (Task 4)
 from selector_drift.orchestrate.run_record import (heartbeat, link_heartbeat, next_attempt,
                                                    record_attempt, record_authorisation,
                                                    record_run, run_key, window_for)
@@ -2943,7 +3317,6 @@ from selector_drift.scope.gate import authorise
 from selector_drift.scope.record import AuthorisedTarget
 from selector_drift.spec.loader import load_scope, load_spec, scope_file, spec_file, target_of
 
-FLOW_TIMEOUT_SECONDS = 600            # B8: ten minutes, then Prefect cancels the run
 RETRIES = 2
 RETRY_DELAY_SECONDS = 300
 
@@ -2996,7 +3369,7 @@ def extraction_flow(spec_path: str) -> str:
 
     attempt = next_attempt(key)
     record_attempt(key, attempt, "started", None, target.record_sha256)
-    record_authorisation(key, target.target, target.record_sha256)
+    record_authorisation(key, target.target, target.record_sha256, record=record)
     try:
         asyncio.run(load_start_page(target))
     except Exception as exc:
@@ -3068,14 +3441,16 @@ from prefect import serve
 from prefect.deployments.runner import RunnerDeployment
 from prefect.schedules import Cron
 
+from selector_drift.browser.limits import MEM_LIMIT, PIDS_LIMIT
 from selector_drift.config import get_settings
 from selector_drift.orchestrate.flows import extraction_flow
 from selector_drift.quality.alerts import WEBHOOK_ENV, webhook_url
 from selector_drift.spec.loader import load_spec
 
 # Enforced by the worker container (docker-compose.yml, Task 4) under serve(); declared here so
-# a move to a Docker work pool keeps them. test_deployments pins that the two agree.
-JOB_LIMITS: dict[str, str | int] = {"mem_limit": "2g", "pids_limit": 512}
+# a move to a Docker work pool keeps them. test_deployments pins that the two agree. The values
+# are named once, in browser/limits.py (Task 4).
+JOB_LIMITS: dict[str, str | int] = {"mem_limit": MEM_LIMIT, "pids_limit": PIDS_LIMIT}
 SCHEDULE_TIMEZONE = "UTC"
 
 _log = logging.getLogger(__name__)
@@ -3141,7 +3516,8 @@ COPY scopes ./scopes
 RUN uv sync --frozen --no-dev \
  && playwright install --with-deps chromium \
  && chmod -R a+rX /opt/pw-browsers \
- && useradd --uid 10001 --home-dir /home/app --create-home app
+ && useradd --uid 10001 --home-dir /home/app --create-home app \
+ && mkdir -p /data && chown 10001:10001 /data
 
 USER 10001:10001
 CMD ["python", "-m", "selector_drift.orchestrate.deployments"]
@@ -3225,6 +3601,10 @@ Replace Task 4's `worker` block with (Task 4's lines kept verbatim; the command,
     shm_size: 1g
     mem_limit: 2g
     pids_limit: 512
+    volumes:
+      # The one writable path on a read-only rootfs (found 2026-09-26: rung 5's escalation corpus,
+      # the lake, evidence and injected sessions had nowhere to go). Owned by uid 10001.
+      - sd_data:/data
     environment:
       PLAYWRIGHT_BROWSERS_PATH: /opt/pw-browsers
       PREFECT_API_URL: http://prefect-server:4200/api
@@ -3232,6 +3612,10 @@ Replace Task 4's `worker` block with (Task 4's lines kept verbatim; the command,
       SD_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-selector_drift}:${POSTGRES_PASSWORD:-changeme_local_dev_only}@postgres:5432/${POSTGRES_DB:-selector_drift}
       SD_SPEC_DIR: /app/specs
       SD_SCOPE_DIR: /app/scopes
+      SD_LAKE_ROOT: /data/lake
+      SD_EVIDENCE_ROOT: /data/evidence
+      SD_SESSION_DIR: /data/sessions
+      SD_ESCALATION_CORPUS: /data/corpus/escalations
       SD_ALERT_WEBHOOK_URL: ${SD_ALERT_WEBHOOK_URL:-}
       TZ: UTC
     depends_on:
@@ -3239,12 +3623,19 @@ Replace Task 4's `worker` block with (Task 4's lines kept verbatim; the command,
       prefect-server: { condition: service_healthy }
 ```
 
-Append to `.env.example`:
+and declare the volume beside `postgres_data`:
 
-```bash
-# The one alert channel (Task 6, M2). Empty means every alert is logged as NOT SENT.
-SD_ALERT_WEBHOOK_URL=
+```yaml
+volumes:
+  postgres_data:
+  sd_data:
 ```
+
+The `Dockerfile` creates `/data` owned by `10001:10001` (`mkdir -p /data && chown 10001:10001 /data`
+in the final `RUN`), so a fresh named volume inherits that ownership on first mount.
+
+`.env.example` already names `SD_ALERT_WEBHOOK_URL` (Task 5 lists every `SD_` key once, 2026-09-26);
+this task adds nothing to it.
 
 - [ ] **Step 8: Implement the dev entrypoint**
 
@@ -3291,8 +3682,8 @@ uv run alembic upgrade head
 uv run pytest tests/orchestrate tests/quality/test_alert_channel.py tests/test_main.py -v
 ```
 
-Expected: PASS — 10 run-key (parametrised cases counted), 12 run-record (11 integration, 1 unit),
-2 rung-stats, 5 deployments, 3 alert-channel, 3 main: **35 passed**. Then the fast check (ruff, mypy
+Expected: PASS — 10 run-key (parametrised cases counted), 13 run-record (12 integration, 1 unit),
+2 rung-stats, 5 deployments, 3 alert-channel, 3 main: **36 passed**. Then the fast check (ruff, mypy
 --strict, lint-imports, `pytest -m unit`) and the full check (`-m "unit or integration"`), both clean.
 
 - [ ] **Step 10: Commit the code**
@@ -3312,9 +3703,10 @@ a machine that is on at 04:12 UTC every night. **Decided 2026-08-29 (OQ2): a fre
 Oracle Cloud Always Free, or Fly.io.** It also hosts the bench (OQ4), so the browser reaches the bench
 over the VM's own network and the H2 origin allowlist names one host.
 
-Precondition (P-1): the image runs `uv sync --frozen`, so `bok-core` must resolve **on the VM** — from
-PyPI, or from a path that exists there. The worktree's absolute Windows path does not. Check before
-building:
+**Blocked on P-1b** (preconditions table): the image runs `uv sync --frozen`, so `bok-core` must
+resolve **inside the Docker build context on the VM** — from PyPI, or from a vendored relative path.
+The worktree's absolute Windows path does not, and this step does not start until P-1b is closed.
+Check before building:
 
 ```bash
 ssh "$SD_VM" 'cd /srv/selector-drift && uv lock --check && grep -A1 "^bok-core" pyproject.toml'
@@ -5020,6 +5412,11 @@ git commit -m "feat(testbench): server-rendered claims portal with a determinist
 
 **Files:**
 - Create: `testbench/mutations/base.py`, `testbench/mutations/catalogue.py`, `testbench/schedule.py`, `testbench/portal/hook.py`, `testbench/answers/key.py`
+- Create (if absent — found 2026-09-26: this task is the first to import from these packages, and
+  Task 9's `test -f … || touch` came a task too late): `testbench/__init__.py`,
+  `testbench/mutations/__init__.py`, `testbench/answers/__init__.py` — empty. Run
+  `for f in testbench/__init__.py testbench/mutations/__init__.py testbench/answers/__init__.py; do test -f "$f" || touch "$f"; done`
+  before Step 1 and add them to the commit.
 - Modify: `testbench/portal/app.py` (the hook and the `catalogue` parameter), `.importlinter`
 - Modify: `tests/testbench/conftest.py` (a plain and a mutating server), `tests/testbench/helpers.py` (test mutations, `first_day_scheduling`, `render_in_browser`)
 - Test: `tests/testbench/test_schedule.py`, `tests/testbench/test_hook.py`, `tests/testbench/test_answer_key.py`, `tests/testbench/test_isolation.py`, `tests/testbench/test_served_equals_tested.py`
@@ -5482,9 +5879,11 @@ Expected: FAIL at collection — `ModuleNotFoundError: No module named 'testbenc
 # testbench/mutations/base.py
 """The Mutation protocol, the catalogue entry, and the one lxml round trip every mutation shares.
 
-Rules for every mutation (Tasks 9-11A): `apply` is pure and deterministic; it never reads or
-writes `data-sd-*` attributes, never drops an attribute it does not own, removes `data-sd-truth`
-from any element it clones, and never renames a form field's `name` or a submit button.
+Rules for every mutation (Tasks 9-11A): `apply` is pure and deterministic; it never decides
+anything based on `data-sd-*` attributes and never writes one, never drops an attribute it does
+not own, removes `data-sd-truth` from any element it clones (which means it must look at the
+attribute to strip it -- hence "decides nothing by", not "never reads"; reworded 2026-09-26), and
+never renames a form field's `name` or a submit button.
 """
 from __future__ import annotations
 
@@ -5850,7 +6249,7 @@ Expected: clean.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add .importlinter testbench/mutations testbench/schedule.py testbench/answers testbench/portal/hook.py testbench/portal/app.py tests/testbench
+git add .importlinter testbench/__init__.py testbench/mutations testbench/schedule.py testbench/answers testbench/portal/hook.py testbench/portal/app.py tests/testbench
 git commit -m "feat(testbench): in-process mutation engine, seeded schedule, isolated answer key"
 ```
 
@@ -5934,7 +6333,7 @@ executing them; each is required for the task to run against Tasks 7–8 as writ
 
    Task 11A adds, marked `unit` and parametrised over `CATALOGUE`, `test_only_virtualised_rows_emits_a_script`: `"<script" in entry.build(Random(0)).apply(render_results(FIXTURE_DAY))` is true for `VirtualisedRows` alone. Once it is registered, Task 8's `FIXED_DAYS` picks up a day that schedules it, and the served-equals-tested test proves the browser's post-script DOM matches the engine's.
 
-7. **Step 4 run commands** in Tasks 9–11 name the task's own test file (`uv run pytest tests/testbench/test_structural_mutations.py -v` → PASS, 5 tests; `test_semantic_mutations.py` → PASS, 5 tests; `test_adversarial.py` → PASS, 2 tests after Task 11), because `tests/testbench` now also holds Tasks 7–8's tests. Every test carries exactly one marker, `unit`.
+7. **Step 4 run commands** in Tasks 9–11A name the task's own test files, because `tests/testbench` now also holds Tasks 7–8's tests. **The expected counts are the ones each task's own run step states** (the per-file counts first written here — 5, 5 and 2 — were superseded when Tasks 9–11A were rewritten; removed 2026-09-26 so there is one number per step). Every test carries exactly one marker, `unit`.
 
 ---
 
@@ -5999,8 +6398,9 @@ test -f testbench/__init__.py || touch testbench/__init__.py
 test -f testbench/mutations/__init__.py || touch testbench/mutations/__init__.py
 ```
 
-Tasks 7–8 create `testbench/portal/__init__.py` but neither of these; without them `mypy --strict
-testbench` resolves `testbench/mutations/*.py` under a different module name than the imports use.
+Task 8 now creates both (2026-09-26), so this step is normally a no-op; it stays as a guard, because
+without them `mypy --strict testbench` resolves `testbench/mutations/*.py` under a different module
+name than the imports use.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -7866,14 +8266,19 @@ sequencing note says cross-family confirmation is the thing to get right. The pl
 
 Each class below attacks a *different* rung or check:
 
-| Class | What it attacks | Which control must catch it |
+| Class | What it attacks | Resolver (not fooled) or gate (refuses) |
 |---|---|---|
-| `HiddenDecoy` | Rung 2. A hidden grid — `aria-hidden` and off-screen, or `display:none` — placed ahead of the real table, every cell carrying `aria-label="Claim Number"` and a well-formed claim number | **H9.** Task 13's `visible()` filter: every rung's candidate filter requires a non-zero box, no `aria-hidden`, no `display:none` ancestor |
-| `DuplicateLabel` | Rung 1's *"exactly one"* and rung 3's anchor — a legacy column under the same label, before the real one, in the same format and with the same classes | Rung 1 must fail on two matches; rung 3 must refuse an ambiguous anchor rather than take the first |
-| `ValueSwap` | Everything structural **and** everything textual — `Amount` and `Reserve` exchange values row-wise, markup untouched | Only `RowKeyContinuity` (Task 22) sees it. This is the class that proves the third family earns its place |
-| `LocaleFlip` | `1,234.56` → `1.234,56`, table and detail page. Passes `FormatAssertion` if the pattern is loose | `DomainAssertion` range check, and the currency-sanity rule brief §5 asks for |
-| `VirtualisedRows` | The served HTML keeps all 50 rows; an inline script leaves 10 in the browser's DOM | The row-count contract (Task 29), not the resolver |
-| `ImageHeader` | Rung 4's header verification when the header is `<img alt="Amount">` — empty `textContent` | Header verification must read accessible text, not `textContent` |
+| `HiddenDecoy` | Rung 2. A hidden grid — **always `aria-hidden`** (plus off-screen, or `display:none`) — placed ahead of the real table, every cell carrying `aria-label="Claim Number"` and a well-formed claim number | **Resolver (H9).** Task 13's `visible()` filter. Parity rule (2026-09-26): `StaticPageSource` cannot see layout, so an element is invisible there if it or an ancestor is `aria-hidden`, `display:none`, carries `hidden`, or has a zero-size inline style; `LivePageSource` applies the same rule **and** requires a non-zero box. The `aria-hidden` variant is the one both sources see identically |
+| `DuplicateLabel` | Rung 1's *"exactly one"* and rung 3's anchor — a legacy column under the same label, before the real one, in the same format and with the same classes | **Resolver or gate.** Rung 1 must refuse (Task 17: the anchor header must be unique among headers), so a heal occurs; then either the heal lands on the true node or `IndependentRungAgreement` / `RowKeyContinuity` refuses it |
+| `ValueSwap` | Everything structural **and** everything textual — `Amount` and `Reserve` exchange values row-wise, markup untouched | **Gate, deterministically.** Only `RowKeyContinuity` (Task 22) sees it, via its steady-state collapse floor (0.50) on a rung-1 cache hit. This is the class that proves the third family earns its place |
+| `LocaleFlip` | `1,234.56` → `1.234,56`, table and detail page. Passes `FormatAssertion` if the pattern is loose | **Gate, deterministically.** `DomainAssertion`'s number parse / range check, and the currency-sanity rule brief §5 asks for — a `FAIL` quarantines whether or not a heal happened |
+| `VirtualisedRows` | The served HTML keeps all 50 rows (`PAGE_SIZE` 50); an inline script leaves 10 of 50 in the browser's DOM | Neither the resolver nor the gate: the row-count contract (Task 29), exercised end to end by Task 26A's e2e bench test |
+| `ImageHeader` | Rung 4's header verification when the header is `<img alt="Amount">` — empty `textContent` | **Resolver or gate.** Header verification must read accessible text, not `textContent`; if a rung still lands off the true node, the gate refuses |
+
+**The invariant Task 26 asserts for every class, replacing "refused per class" (2026-09-26): no
+wrong value is ever written** — the run is a `QuarantinedRun`, or every field resolved to a node in
+the answer key. Only `ValueSwap` and `LocaleFlip` are *required* to quarantine; the rest may be
+defeated at either layer.
 
 **Sequencing corrected 2026-09-26.** The first text had this task assert `isinstance(result,
 QuarantinedRun)` — but `QuarantinedRun` and `gate()` do not exist until Tasks 20–25, so those tests
@@ -8223,7 +8628,9 @@ The rung-2 attack (H9). Every decoy cell carries aria-label="Claim Number" and a
 passes the claim-number format assertion, and it comes first in document order. It is hidden
 either from assistive technology and the viewport (aria-hidden plus off-screen) or from
 rendering altogether (display:none), so only a resolver that filters candidates through
-visible() -- Task 13 -- refuses it.
+visible() -- Task 13 -- refuses it. Both variants carry aria-hidden="true" (2026-09-26): a real
+portal's hidden cache is hidden from assistive technology too, and it keeps the attack decidable
+from markup, so the static and live page sources judge it identically (Task 13's parity rule).
 """
 
 from __future__ import annotations
@@ -8246,7 +8653,7 @@ _CONTAINER: dict[str, dict[str, str]] = {
         "aria-hidden": "true",
         "style": "position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden",
     },
-    "display-none": {"class": "sr-cache", "style": "display:none"},
+    "display-none": {"class": "sr-cache", "aria-hidden": "true", "style": "display:none"},
 }
 
 
@@ -8680,7 +9087,6 @@ navigate:
 targets:
   - name: claim_number
     description: the claim number cell in the results table
-    relation: right_of
     assertions:
       - { type: format, pattern: '^[A-Z]{2}\d{8}$' }
   - name: claimant
@@ -8710,6 +9116,12 @@ targets:
       - { type: domain, rule: { date_after: '2023-01-01' } }
 ```
 
+**`claim_number` carries no `relation` in version 2 (found 2026-09-26).** Version 1's `relation:
+right_of` describes the *detail* page's `dt`/`dd` pair; version 2 extracts from the results table,
+where the markup relation (header above cell) is the truth and a `right_of` rule could only mislead
+rung 3. No field needs a `label` either: every bench header is the humanised field name, which is
+what `expected_label()` falls back to.
+
 **No `cross_field` assertion between `amount` and `reserve`, deliberately** (bench spec §4): they have
 no arithmetic relation, so `ValueSwap` can be caught only by `RowKeyContinuity` — the claim Task 11A
 makes and Task 26 tests. The amount pattern is strict (`1,234.56`), so `LocaleFlip` (`1.234,56`) fails
@@ -8726,6 +9138,7 @@ def test_the_bench_spec_extracts_all_six_columns_with_no_amount_reserve_relation
     assert [t.name for t in spec.targets] == ["claim_number", "claimant", "amount",
                                                "reserve", "status", "filed"]
     assert not any(a.type == "cross_field" for t in spec.targets for a in t.assertions)
+    assert all(t.relation is None for t in spec.targets)      # the table's markup relation wins
 ```
 
 - [ ] **Step 1: Write the failing tests**
@@ -9104,7 +9517,8 @@ block within one UTC day — across 00:00 UTC the unsigned request legitimately 
 
 - [ ] **Step 11: Confirm the runner identifies itself and the cron still writes run records**
 
-After the next scheduled fire (or `uv run python -m selector_drift` on the VM):
+After the next scheduled fire (or `uv run python -m selector_drift run testbench.yaml` on the VM —
+the entrypoint takes a subcommand; bare `python -m selector_drift` exits 2, found 2026-09-26):
 
 ```bash
 docker compose logs testbench --since 24h | grep 'access' | grep -c "$(grep '^user_agent_contact:' scopes/testbench.yaml | awk '{print $2}')"
@@ -9279,7 +9693,7 @@ from lxml import html as lh
 
 from selector_drift.resolve.page import StaticPageSource
 from selector_drift.spec.loader import load_spec
-from testbench.mutations.base import apply_all
+from testbench.mutations.base import Mutation, apply_all
 from testbench.mutations.catalogue import CATALOGUE
 from testbench.portal.render import render_results
 from tests.testbench.helpers import FIXTURE_DAY
@@ -9306,7 +9720,10 @@ class BenchPage:
 
     def mutated(self, name: str) -> BenchPage:
         entry = next(e for e in CATALOGUE if e.name == name)
-        mutation = entry.build(random.Random(0))
+        return self.mutated_by(entry.build(random.Random(0)))
+
+    def mutated_by(self, mutation: Mutation) -> BenchPage:
+        """A specific instance -- e.g. HiddenDecoy(variant="aria-hidden") for the parity test."""
         return BenchPage(apply_all([mutation], self.html), apply_all([mutation], self.marked))
 
 
@@ -9812,6 +10229,7 @@ from selector_drift.browser.page_source import LivePageSource
 from selector_drift.resolve.cascade import REGISTERED_RUNGS
 from selector_drift.resolve.page import PageSource, StaticPageSource
 from selector_drift.resolve.trace import ResolvedElement
+from testbench.mutations.adversarial.hidden_decoy import HiddenDecoy
 from tests.resolve.conftest import AMOUNT, CLAIM_NUMBER, BenchPage
 from tests.resolve.test_page import SEMANTICS
 
@@ -9854,7 +10272,13 @@ def _identity(page: PageSource, el: ResolvedElement | None) -> tuple[str, str] |
 @pytest.mark.e2e
 @pytest.mark.parametrize("name", ["unmutated", *PAGES])
 def test_live_and_static_sources_resolve_identically(name: str, bench: BenchPage) -> None:
-    page = bench if name == "unmutated" else bench.mutated(name)
+    if name == "HiddenDecoy":
+        # Parity rule (2026-09-26): a static source cannot see layout, so parity is asserted on
+        # the variant both sources judge from markup alone. The display:none and off-screen
+        # variants are covered per source by Task 14's decoy tests.
+        page = bench.mutated_by(HiddenDecoy(variant="aria-hidden"))
+    else:
+        page = bench if name == "unmutated" else bench.mutated(name)
     live, static = asyncio.run(_live(page.marked)), StaticPageSource(page.marked)
     for rung in [r for r in REGISTERED_RUNGS if r.rung_id in (2, 3, 4)]:
         for field in (CLAIM_NUMBER, AMOUNT):
@@ -10312,7 +10736,15 @@ class ParsedPage:
         return self._name_memo[node]
 
     def visible(self, node: HtmlElement) -> bool:
-        """H9: rendered, not aria-hidden, a box bigger than 1x1 px, on the page."""
+        """H9: rendered, not aria-hidden, a box bigger than 1x1 px, on the page.
+
+        Parity rule (documented 2026-09-26). A StaticPageSource has no layout, so for it an
+        element is invisible when it or an ancestor is aria-hidden, display:none, carries the
+        `hidden` attribute, or has a zero-size / off-screen INLINE or <style> declaration. A
+        LivePageSource applies the same markup rule AND requires a real, on-page bounding box.
+        The two agree on anything decidable from markup (the aria-hidden HiddenDecoy variant);
+        they may disagree only where layout alone hides an element, and only in the direction
+        of the live source seeing less."""
         return not self.ax_hidden(node) and self.boxed(node)
 
     def ax(self) -> AxNode:
@@ -11271,7 +11703,9 @@ def normalise(text: str | None) -> str:
 
 
 def expected_label(target: FieldTarget) -> str:
-    return normalise(target.name.replace("_", " "))
+    # The spec's `label` when the portal's visible label differs from the field name (Task 5,
+    # added 2026-09-26); otherwise the humanised name. Every rung reads the label through here.
+    return normalise(target.label or target.name.replace("_", " "))
 
 
 def tokens(value: str) -> tuple[str, ...]:
@@ -11613,8 +12047,8 @@ rendered as plain text in a layout rung 2 cannot relate (a `<span>` beside a `<s
 **Where HTML already defines the relation, the markup wins over the spec.** A column header relates
 to its column, a row header to its row, `<dt>` to its `<dd>`, `<label>` to its control.
 `FieldTarget.relation` (`RIGHT_OF`, `BELOW`, `WITHIN`) governs free-text anchors only. This is not a
-nicety: the bench spec gives `claim_number` `relation: right_of` (it describes the detail page's
-`dt`/`dd`), and applied literally to the results table's header it would land on the **next header**
+nicety: bench spec v1 gave `claim_number` `relation: right_of` (it described the detail page's
+`dt`/`dd`; v2 drops it, Task 12 Step 0), and applied literally to the results table's header it would land on the **next header**
 — a rung that "heals" to the Claimant column. A free-text anchor with no declared relation resolves
 nothing rather than guessing a direction.
 
@@ -11674,10 +12108,11 @@ def test_a_duplicated_label_is_refused_not_taken_first(bench: BenchPage) -> None
 
 @pytest.mark.unit
 def test_a_column_header_relates_to_its_column_whatever_the_spec_relation(bench: BenchPage) -> None:
-    """The bench spec says right_of (it describes the detail page); applied literally to a
-    results-table header it would land on the next header."""
-    assert CLAIM_NUMBER.relation is Relation.RIGHT_OF
-    el = AnchorRung().resolve(bench.source(), CLAIM_NUMBER)
+    """Spec v1 said right_of (it described the detail page); applied literally to a
+    results-table header it would land on the next header. Spec v2 dropped it (Task 12 Step 0),
+    so the relation is set here to keep proving the markup wins."""
+    right_of = CLAIM_NUMBER.model_copy(update={"relation": Relation.RIGHT_OF})
+    el = AnchorRung().resolve(bench.source(), right_of)
     assert el is not None and el.node_id == bench.truth("claim_number")[0]
 
 
@@ -12509,6 +12944,21 @@ def test_a_header_text_anchor_is_reverified_too(bench: BenchPage) -> None:
 
 
 @pytest.mark.unit
+def test_a_header_text_anchor_must_be_unique_among_the_headers(bench: BenchPage) -> None:
+    """Ledger 2026-09-26 (DuplicateLabel): the stored header still heads this column, but a
+    second header now reads the same -- rung 1 must refuse, so a heal happens and the gate
+    judges it, instead of a silent hit on whichever column the selector happens to name."""
+    reworded = bench.mutated("LabelReword")
+    cache = warm(reworded.html, "claim_number")       # header_text anchor, set by rung 4
+    cached = cache.get("testbench", "claim_number", 2)
+    assert cached is not None and (header := cached.anchor.header_text) is not None
+    twice = StaticPageSource(reworded.html.replace("</tr>", f"<th>{header}</th></tr>", 1))
+    [el] = twice.query(cached.selector)                 # the selector still names one cell
+    got = rung(cache).attempt(twice, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "anchor_mismatch" and "uniquely" in got.detail
+
+
+@pytest.mark.unit
 def test_a_cache_entry_for_another_spec_version_is_not_a_hit(
     bench: BenchPage, warm_cache: DictCache
 ) -> None:
@@ -12884,7 +13334,7 @@ holds a client's cache.
 - [ ] **Step 6: Run the tests and make sure they pass**
 
 Run: `uv run pytest tests/resolve tests/test_cache_write_site.py -m unit -v`
-Expected: PASS, 116 tests (102 before, 13 in `test_r1_cache.py`, 1 write-site).
+Expected: PASS, 117 tests (102 before, 14 in `test_r1_cache.py`, 1 write-site).
 
 Run: `docker compose up -d postgres && uv run pytest tests/resolve -m integration -v`
 Expected: PASS, 6 tests (2 from Task 13, 4 in `test_selector_cache.py`).
@@ -13099,12 +13549,12 @@ git commit -m "feat(orchestrate): the cache write-back, callable only with the g
 **Files:**
 - Create: `selector_drift/resolve/rungs/r5_visual.py`
 - Modify: `selector_drift/resolve/cascade.py` — register `VisualRung()` last
-- Modify: `.env.example` — `SD_ESCALATION_CORPUS`
+- Exists (Task 5): `Settings.escalation_corpus` and the `SD_ESCALATION_CORPUS` line in `.env.example`
 - Test: `tests/resolve/test_r5_escalation.py`
 
 **Interfaces:**
 - Consumes: `EscalateToHuman` (`resolve/escalation.py`, Task 13 — the runner already raises it when no rung wins); `RungBase`, `Family`, `RungAttempt`, `Miss` (Task 13); the runner's `Escalator` hook (Task 13).
-- Produces: `VisualRung(corpus: Path | None = None)`, `rung_id = 5`, `family = Family.NONE`; `.corpus` (the constructor's path, else `$SD_ESCALATION_CORPUS`, else `corpus/escalations`); `.escalate(page, target, *, run_key=None, attempts=()) -> ResolvedElement` (never returns — records the case and raises `EscalateToHuman(case=...)`); `.record_case(...) -> Path`; `CORPUS_ENV`, `DEFAULT_CORPUS`. **Makes no model call and imports nothing outside the standard library and `selector_drift`.**
+- Produces: `VisualRung(corpus: Path | None = None)`, `rung_id = 5`, `family = Family.NONE`; `.corpus` (the constructor's path, else `get_settings().escalation_corpus` — `SD_ESCALATION_CORPUS`, default `/data/corpus/escalations`, the worker's writable volume); `.escalate(page, target, *, run_key=None, attempts=()) -> ResolvedElement` (never returns — records the case and raises `EscalateToHuman(case=...)`); `.record_case(...) -> Path`; `CORPUS_ENV`, `DEFAULT_CORPUS`. **Makes no model call and imports nothing outside the standard library and `selector_drift`.**
 
 **Rung 5 is an escalation in v1 (design §5.3).** On every target that pays, a portal screenshot is
 `CLIENT_CONFIDENTIAL` and can never reach a free-tier model; *"0.0% of resolutions required a model
@@ -13127,9 +13577,9 @@ replay raises `EscalateToHuman` from the runner itself and writes no case — re
 it does not manufacture escalations.
 
 **The corpus directory must be a mounted volume in production.** The worker container runs with a
-read-only root filesystem (Global Constraints); the default relative `corpus/escalations` is for
-development. Set `SD_ESCALATION_CORPUS` to a path on a named volume in `docker-compose.yml` (Task 33's
-`Settings` should absorb it alongside `evidence_root`).
+read-only root filesystem (Global Constraints). `Settings.escalation_corpus` (Task 5) defaults to
+`/data/corpus/escalations`, on the `sd_data` volume Task 6 mounts at `/data`; a local run that has no
+`/data` sets `SD_ESCALATION_CORPUS` to a writable directory.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -13148,6 +13598,7 @@ from selector_drift.resolve.cache import NO_CACHE
 from selector_drift.resolve.cascade import REGISTERED_RUNGS, resolve_cascade
 from selector_drift.resolve.escalation import EscalateToHuman
 from selector_drift.resolve.page import StaticPageSource
+from selector_drift.config import get_settings
 from selector_drift.resolve.rungs import r5_visual
 from selector_drift.resolve.rungs.r5_visual import CORPUS_ENV, VisualRung
 from selector_drift.resolve.trace import CascadeTrace, Family, RungAttempt
@@ -13236,15 +13687,18 @@ def test_a_scheduled_escalation_carries_the_cascade_and_the_run_key(
 @pytest.mark.unit
 def test_replay_never_reaches_rung_five(unresolvable_page, tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(CORPUS_ENV, str(tmp_path))
+    get_settings.cache_clear()                     # Settings is cached per process (Task 5)
     with pytest.raises(EscalateToHuman):
         resolve_cascade(unresolvable_page, CLAIM_NUMBER, NO_CACHE, record=False)
     assert list(tmp_path.glob("*.json")) == []
 
 
 @pytest.mark.unit
-def test_the_corpus_location_comes_from_the_environment(monkeypatch, tmp_path) -> None:
+def test_the_corpus_location_comes_from_settings(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv(CORPUS_ENV, str(tmp_path / "c"))
-    assert VisualRung().corpus == tmp_path / "c"
+    get_settings.cache_clear()
+    assert VisualRung().corpus == tmp_path / "c" == get_settings().escalation_corpus
+    get_settings.cache_clear()
 
 
 @pytest.mark.unit
@@ -13321,18 +13775,18 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import os
 from collections.abc import Sequence
 from pathlib import Path
 
+from selector_drift.config import get_settings
 from selector_drift.resolve.escalation import EscalateToHuman
 from selector_drift.resolve.page import PageSource
 from selector_drift.resolve.rungs.base import Family, ResolvedElement, RungBase
 from selector_drift.resolve.trace import Miss, RungAttempt
 from selector_drift.spec.schema import FieldTarget
 
-CORPUS_ENV = "SD_ESCALATION_CORPUS"
-DEFAULT_CORPUS = Path("corpus/escalations")
+CORPUS_ENV = "SD_ESCALATION_CORPUS"          # read by Settings.escalation_corpus (Task 5)
+DEFAULT_CORPUS = Path("/data/corpus/escalations")   # Settings' default: the worker's /data volume
 
 
 class VisualRung(RungBase):
@@ -13344,7 +13798,9 @@ class VisualRung(RungBase):
 
     @property
     def corpus(self) -> Path:
-        return self._corpus or Path(os.environ.get(CORPUS_ENV, str(DEFAULT_CORPUS)))
+        # Through Settings, not os.environ (2026-09-26): one place reads configuration, and the
+        # default is the writable volume Task 6 mounts on a read-only rootfs.
+        return self._corpus or get_settings().escalation_corpus
 
     def attempt(self, page: PageSource, target: FieldTarget) -> ResolvedElement | Miss:
         self.escalate(page, target)
@@ -13414,13 +13870,8 @@ REGISTERED_RUNGS: list[Rung] = [
 ]
 ```
 
-`.env.example` gains:
-
-```bash
-# Rung 5's escalation corpus (metadata only, never page content). A mounted volume in production:
-# the worker's root filesystem is read-only.
-SD_ESCALATION_CORPUS=corpus/escalations
-```
+`.env.example` already names `SD_ESCALATION_CORPUS` (Task 5 lists every `SD_` key once); nothing to
+add here.
 
 - [ ] **Step 5: Run them and make sure they pass**
 
@@ -13447,15 +13898,17 @@ git commit -m "feat(resolve): rung 5 escalates to human review and builds the ev
 **Files:**
 - Create: `selector_drift/heallog/capture.py`, `selector_drift/heallog/bundle.py`, `selector_drift/heallog/replay.py`
 - Create: `selector_drift/browser/live_capture.py`
-- Modify: `selector_drift/browser/driver.py` — fixed 1280×900 viewport on every context; `PageHandle.raw`
-- Modify: `selector_drift/resolve/cascade.py` — keyword `record: bool = True`
-- Modify: `selector_drift/resolve/cache.py` — add the read-only `CacheReader` protocol (both `SelectorCache` and replay's `HealTimeCache` satisfy it)
+- Modify: `selector_drift/browser/driver.py` — fixed 1280×900 viewport on every context
+- **Exists (Task 13), consumed here — not modified (found 2026-09-26):** `resolve_cascade`'s `record`
+  keyword, the `CacheReader` protocol in `resolve/cache.py`, `PageHandle.raw`, and `NODE_ATTR` in
+  `resolve/page.py`. This task's first draft re-added all four; Task 13 now lands them.
 - Test: `tests/heallog/__init__.py` (empty — the test modules import helpers from `tests.heallog.conftest`, so `tests/` and `tests/heallog/` must be packages; create `tests/__init__.py` too if Task 1's template did not), `tests/heallog/conftest.py`, `tests/heallog/test_capture.py`, `tests/heallog/test_replay.py`, `tests/browser/test_live_capture.py`
 
 **Interfaces:**
-- Consumes: `resolve_cascade`, `StaticPageSource`, `ResolvedElement`, `CascadeTrace` (Task 13); `CachedSelector` (Task 17); `EscalateToHuman` (Task 18); `FieldTarget`, `load_spec` (Task 5); `Labelled`, `Sensitivity` (`bok_core.boundary.sensitivity`, P-1); `PageHandle`, `open` (Task 4).
+- Consumes: `resolve_cascade(page, target, cache, *, record=True, run_key=None, recorder=...)`, `CacheReader`, `NO_CACHE`, `NODE_ATTR` (`resolve/page.py`), `PageHandle.raw`, `StaticPageSource`, `ResolvedElement`, `CascadeTrace` (Task 13); `CachedSelector` (Task 17); `EscalateToHuman` (Task 18); `FieldTarget`, `load_spec` (Task 5); `Labelled`, `Sensitivity` (`bok_core.boundary.sensitivity`, P-1); `PageHandle`, `open` (Task 4).
 - Produces:
-  - `VIEWPORT: tuple[int, int] = (1280, 900)`, `NODE_ATTR = "data-sd-node"`, `NODE_ID_RE`
+  - `VIEWPORT: tuple[int, int] = (1280, 900)`, `NODE_ID_RE`; `heallog/capture.py` re-exports
+    `NODE_ATTR` by importing it from `resolve.page` (one definition)
   - `BBox(x: float, y: float, width: float, height: float)` — frozen Pydantic; CSS px in the full-page screenshot's coordinate space. `api/views.py` re-exports it (Task 34)
   - `Capturable` protocol — `viewport: tuple[int, int]` (property), `dom() -> str`, `async screenshot(*, mask_node_ids: frozenset[str]) -> bytes`, `async bbox(node_id: str) -> BBox | None`
   - `Masker` protocol — `__call__(dom: str) -> frozenset[str]`; Task 33's `PiiMasker` is the production one
@@ -13468,9 +13921,7 @@ git commit -m "feat(resolve): rung 5 escalates to human review and builds the ev
   - `replay(evidence: Evidence, target: FieldTarget, cache: CacheReader) -> tuple[ResolvedElement, CascadeTrace]`
   - `replay_bundle(bundle: Path, target: FieldTarget, cache: CacheReader, expected: ExpectedHeal) -> tuple[ResolvedElement, CascadeTrace]` — reads **`after.html`** and verifies it against the manifest first
   - `ExpectedHeal(winning_rung: int, node_id: str)`, `HealTimeCache(entry: CachedSelector | None)`, `NotReproducible(Exception)`
-  - `CacheReader` protocol in `resolve/cache.py` — `get(target, field, spec_version=None) -> CachedSelector | None`
   - `LiveCapture(page: playwright.async_api.Page, dom: str)` — the `Capturable` a live page offers
-  - `resolve_cascade(page, target, cache, *, record: bool = True)`
 
 **Four changes over the first draft, each closing a gap the API contract found (API spec §7).**
 
@@ -13853,9 +14304,11 @@ from lxml import html as lxml_html
 from pydantic import BaseModel, ConfigDict
 
 from bok_core.boundary.sensitivity import Labelled, Sensitivity
+# One definition (Task 13). `as NODE_ATTR` is the explicit re-export mypy --strict requires, so
+# `from selector_drift.heallog.capture import NODE_ATTR` (Tasks 33, 34C) keeps working.
+from selector_drift.resolve.page import NODE_ATTR as NODE_ATTR
 
 VIEWPORT: tuple[int, int] = (1280, 900)
-NODE_ATTR = "data-sd-node"
 # Node ids are minted by the PageSource (Task 13): structural paths or short tokens.
 # No quote, backslash, backtick, dollar or brace can appear, so an id can never
 # break out of the attribute selector LiveCapture builds from it.
@@ -14084,7 +14537,7 @@ def verified_bytes(directory: Path, files: Mapping[str, str], name: str) -> byte
     return data
 ```
 
-- [ ] **Step 5: Implement `replay.py` and the cascade's `record` keyword**
+- [ ] **Step 5: Implement `replay.py`** (the cascade's `record` keyword is Task 13's)
 
 ```python
 # selector_drift/heallog/replay.py
@@ -14163,48 +14616,12 @@ def replay_bundle(bundle: Path, target: FieldTarget, cache: CacheReader,
 `judge-reaches-rungs-only-by-protocol` contract forbids `validate → resolve.rungs`; Task 34's
 `api-is-read-side` contract depends on the same placement.
 
-In `selector_drift/resolve/cache.py`, add:
-
-```python
-class CacheReader(Protocol):
-    """What rung 1 reads. SelectorCache satisfies it; so does replay's HealTimeCache."""
-
-    def get(self, target: str, field: str,
-            spec_version: int | None = None) -> CachedSelector | None: ...
-```
-
-In `selector_drift/resolve/cascade.py`, the runner gains the keyword and its two effects
-(`_record_resolution` is Task 13's existing `resolutions` writer, unchanged):
-
-```python
-def resolve_cascade(page: PageSource, target: FieldTarget, cache: CacheReader,
-                    *, record: bool = True) -> tuple[ResolvedElement, CascadeTrace]:
-    # record=False is replay (Task 19): no resolutions row (C4's denominator counts
-    # scheduled resolutions only) and no rung 5 (an escalation would add a corpus case).
-    rungs = REGISTERED_RUNGS if record else [r for r in REGISTERED_RUNGS if r.rung_id < 5]
-    attempts: list[RungAttempt] = []
-    winner: ResolvedElement | None = None
-    for rung in rungs:
-        t0 = time.monotonic()
-        found = rung.resolve(page, target)
-        attempts.append(RungAttempt(rung_id=rung.rung_id, ok=found is not None,
-                                    # closed vocabulary -- Task 34C's RungAttemptView.outcome
-                                    reason="resolved" if found else "no_match",
-                                    ms=int((time.monotonic() - t0) * 1000)))
-        if found is not None:
-            winner = found
-            break
-    trace = CascadeTrace(attempts=attempts, winner=winner.rung_id if winner else None)
-    if record:
-        _record_resolution(target, trace, winner)          # Task 13's existing writer
-    if winner is None:
-        raise EscalateToHuman("replay: no rung 1-4 resolved" if not record else
-                              "no rung resolved")
-    return winner, trace
-```
-
-(Rung 5 raises `EscalateToHuman` itself on a recorded run, so the final `raise` is reached only on
-replay; it is written unconditionally so the function has no path that returns `None`.)
+**No change to `resolve/cache.py` or `resolve/cascade.py` in this task (2026-09-26).** The first
+draft added a `CacheReader` protocol here and re-wrote `resolve_cascade` with the old
+`RungAttempt(rung_id, ok, reason, ms)` shape and a `_record_resolution` writer. Both now land in
+Task 13: `CacheReader` in `resolve/cache.py`, and `resolve_cascade(page, target, cache, *,
+record=True, run_key=None, recorder=record_resolution)` with `record=False` skipping rung 5 and the
+`resolutions` row — exactly what `_run` above relies on.
 
 - [ ] **Step 6: Implement `LiveCapture` and fix the viewport in the driver**
 
@@ -14286,7 +14703,7 @@ Expected: PASS, 2 tests.
 ```bash
 git add selector_drift/heallog/capture.py selector_drift/heallog/bundle.py \
         selector_drift/heallog/replay.py selector_drift/browser/live_capture.py \
-        selector_drift/browser/driver.py selector_drift/resolve/cascade.py \
+        selector_drift/browser/driver.py \
         tests/heallog tests/browser/test_live_capture.py
 git commit -m "feat(heallog): capture with live boxes, bundle manifest, replay that separates corrupted from non-reproducible"
 ```
@@ -14853,15 +15270,20 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from selector_drift.extract.models import CandidateExtraction, Row
-from selector_drift.resolve.cache import CacheReader
-from selector_drift.resolve.page import PageSource
 from selector_drift.spec.schema import FieldTarget
 from selector_drift.validate.assertions.base import Assertion
 from selector_drift.validate.history import History
 from selector_drift.validate.verdict import Outcome, Verdict
+
+if TYPE_CHECKING:
+    # Annotations only (2026-09-26). A runtime import made api -> validate.gate -> resolve.cache
+    # an indirect import that Task 34's api-is-read-side contract counts; `.importlinter` sets
+    # exclude_type_checking_imports = True (Task 34), so these two are not edges in the graph.
+    from selector_drift.resolve.cache import CacheReader
+    from selector_drift.resolve.page import PageSource
 
 RESOLVING_RUNGS: Final = frozenset({1, 2, 3, 4})
 
@@ -14996,16 +15418,17 @@ git commit -m "feat(validate): Verdict, History, token-gated gate_run and the he
 ### Task 21: Format, domain and cross-field assertions
 
 **Files:**
-- Modify: `pyproject.toml` (via `uv add regex` and `uv add --dev types-regex`)
-- Modify: `selector_drift/spec/schema.py` — `MAX_MATCH_LEN`, `MATCH_TIMEOUT_S`, `MatchResult`, `compile_pattern()`, `match_value()`; `matches()` re-implemented on top of them
+- Exists (Task 5, since 2026-09-26): `regex` / `types-regex` in `pyproject.toml`, and in
+  `selector_drift/spec/schema.py` `MAX_MATCH_LEN`, `MATCH_TIMEOUT_S`, `MatchResult`,
+  `compile_pattern()`, `match_value()` and `matches()` built on them, with `tests/spec/test_matcher.py`.
+  This task consumes them and does not modify `spec/`.
 - Create: `selector_drift/validate/assertions/_numbers.py`, `format.py`, `domain.py`, `cross_field.py`
-- Test: `tests/spec/test_matcher.py`, `tests/validate/test_basic_assertions.py`
+- Test: `tests/validate/test_basic_assertions.py`
 
 **Interfaces:**
-- Consumes: `Assertion`, `Verdict`, `Outcome`, `cells`, `column`, `preview` (Task 20); `FieldTarget`, `SpecError`, `matches` (Task 5).
+- Consumes: `Assertion`, `Verdict`, `Outcome`, `cells`, `column`, `preview` (Task 20); `FieldTarget`, `SpecError`, `DomainRule`, `matches`, `match_value`, `compile_pattern`, `MAX_MATCH_LEN`, `MATCH_TIMEOUT_S` (Task 5).
 - Produces:
-  - `spec.schema.match_value(pattern, value) -> Literal["match", "no_match", "too_long", "timeout"]`, `compile_pattern(pattern) -> regex.Pattern[str]` (raises `SpecError`)
-  - `FormatAssertion(pattern: str)`, `DomainAssertion(rule: DomainRule)` with `DomainRule = Mapping[str, object]` and keys `min`, `max`, `enum`, `date_after`, `date_before`, `currency`, `CrossFieldAssertion(expression: str)` with `.names: frozenset[str]`
+  - `FormatAssertion(pattern: str)`, `DomainAssertion(rule: DomainRule)` — **`DomainRule` is imported from `spec/schema.py`**, never redefined here (found 2026-09-26: this task had its own `DomainRule = Mapping[str, object]`, so a rule the loader validated as a `TypedDict` reached the check untyped); its keys are `min`, `max`, `enum`, `date_after`, `date_before` (ISO `YYYY-MM-DD` strings, parsed with `date.fromisoformat` at construction) — `CrossFieldAssertion(expression: str)` with `.names: frozenset[str]`
   - `safe_eval(expression: str, row: Mapping[str, Decimal]) -> Decimal | bool`, `UnsafeExpression(SpecError)`, `parse_number(text) -> Decimal | None`
   - All three assertions work on run one with no history. Each judges the field in `ctx.target.name`; `CrossFieldAssertion` reads the fields its expression names.
 
@@ -15049,48 +15472,12 @@ check, and the currency-sanity rule"*).
 using the claim's own `observed_at` — the suite stays deterministic and the check still catches a
 `filed` column that is really a due date.
 
-- [ ] **Step 1: Add the dependency**
-
-```bash
-uv add regex
-uv add --dev types-regex
-```
+- [ ] **Step 1: The dependency and the matcher already exist.** `regex`, `types-regex`,
+  `match_value`, `compile_pattern`, `MAX_MATCH_LEN` and `tests/spec/test_matcher.py` landed in
+  Task 5 (moved there 2026-09-26, so one task defines the matcher). Confirm before writing tests:
+  `uv run pytest tests/spec/test_matcher.py -q` — 5 passed.
 
 - [ ] **Step 2: Write the failing tests**
-
-```python
-# tests/spec/test_matcher.py
-import pytest
-
-from selector_drift.spec.schema import (MAX_MATCH_LEN, FieldTarget, SpecError, compile_pattern,
-                                        match_value, matches)
-
-CLAIM = r"^[A-Z]{2}\d{8}$"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(("value", "expected"), [("AB12345678", "match"),
-                                                 ("12345678", "no_match"),
-                                                 ("A" * (MAX_MATCH_LEN + 1), "too_long")])
-def test_match_value_classifies_every_outcome(value, expected):
-    assert match_value(CLAIM, value) == expected
-
-
-@pytest.mark.unit
-def test_rung_one_and_the_gate_share_one_bounded_matcher():
-    # M23: spec.matches() is what rung 1 calls; it must carry the same cap as the gate.
-    target = FieldTarget.model_validate({"name": "claim_number", "description": "d",
-                                         "relation": None,
-                                         "assertions": [{"type": "format", "pattern": CLAIM}]})
-    assert matches(target, "AB12345678")
-    assert not matches(target, "AB" + "1" * MAX_MATCH_LEN)
-
-
-@pytest.mark.unit
-def test_a_broken_pattern_is_a_spec_error_not_a_nightly_crash():
-    with pytest.raises(SpecError, match="invalid format pattern"):
-        compile_pattern("(unclosed")
-```
 
 ```python
 # tests/validate/test_basic_assertions.py
@@ -15200,7 +15587,7 @@ def test_domain_assertion_catches_an_implausible_date():
 
 @pytest.mark.unit
 def test_a_date_after_the_page_was_observed_is_refused_without_a_clock():
-    v = DomainAssertion({"date_after": dt.date(2023, 1, 1)}).check(
+    v = DomainAssertion({"date_after": "2023-01-01"}).check(     # ISO string, as Task 5 loads it
         column("filed", ["2026-10-02"]), None, ctx(FILED))      # observed 2026-10-01
     assert v.outcome is Outcome.FAIL and "observed" in v.reason
 
@@ -15225,7 +15612,8 @@ def test_currency_sanity_refuses_more_decimals_than_the_currency_has():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("rule", [{}, {"minimum": 1}, {"min": 10, "max": 1},
-                                  {"currency": "XXX"}, {"enum": "Open"}, {"min": True}])
+                                  {"currency": "XXX"}, {"enum": "Open"}, {"min": True},
+                                  {"date_after": dt.date(2023, 1, 1)}])
 def test_a_malformed_domain_rule_is_refused_when_the_spec_loads(rule):
     with pytest.raises(SpecError):
         DomainAssertion(rule)
@@ -15286,46 +15674,10 @@ def test_safe_eval_is_exact_decimal_arithmetic():
 
 - [ ] **Step 3: Run them and watch them fail**
 
-Run: `uv run pytest tests/spec/test_matcher.py tests/validate/test_basic_assertions.py -v`
-Expected: FAIL — `ImportError: cannot import name 'MAX_MATCH_LEN' from 'selector_drift.spec.schema'`
-and `ModuleNotFoundError: No module named 'selector_drift.validate.assertions.cross_field'`.
+Run: `uv run pytest tests/validate/test_basic_assertions.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.validate.assertions.cross_field'`.
 
-- [ ] **Step 4: Implement the matcher and the three assertions**
-
-In `selector_drift/spec/schema.py`, add these (with `import regex`, `from typing import Final,
-Literal` at the top) and **replace Task 5's body of `matches`** with the one below, so rung 1 and
-the gate run the same bounded matcher:
-
-```python
-# selector_drift/spec/schema.py  (additions)
-MAX_MATCH_LEN: Final = 256          # 3x the longest bounded field in specs/ (claimant, 80)
-MATCH_TIMEOUT_S: Final = 0.05       # per value; checked inside the regex engine's loop
-MatchResult = Literal["match", "no_match", "too_long", "timeout"]
-
-
-def compile_pattern(pattern: str) -> regex.Pattern[str]:
-    try:
-        return regex.compile(pattern)            # the module caches compiled patterns
-    except regex.error as exc:
-        raise SpecError(f"invalid format pattern {pattern!r}: {exc}") from exc
-
-
-def match_value(pattern: str, value: str) -> MatchResult:
-    """Untrusted pattern (spec) meets untrusted value (page). Bounded twice (H5)."""
-    if len(value) > MAX_MATCH_LEN:
-        return "too_long"
-    try:
-        hit = compile_pattern(pattern).fullmatch(value, timeout=MATCH_TIMEOUT_S)
-    except TimeoutError:
-        return "timeout"
-    return "no_match" if hit is None else "match"
-
-
-def matches(target: FieldTarget, value: str) -> bool:
-    """Rung 1's format check (Task 17, M23): every declared format pattern matches."""
-    return all(match_value(a.pattern, value) == "match" for a in target.assertions
-               if a.type == "format" and a.pattern is not None)
-```
+- [ ] **Step 4: Implement the three assertions** (the matcher they call is Task 5's)
 
 ```python
 # selector_drift/validate/assertions/_numbers.py
@@ -15406,12 +15758,11 @@ class FormatAssertion:
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Mapping
 from decimal import Decimal
-from typing import TYPE_CHECKING, Final, TypeAlias
+from typing import TYPE_CHECKING, Final
 
 from selector_drift.extract.models import CandidateExtraction
-from selector_drift.spec.schema import SpecError
+from selector_drift.spec.schema import MAX_MATCH_LEN, DomainRule, SpecError
 from selector_drift.validate.assertions._numbers import parse_number
 from selector_drift.validate.assertions.base import cells, preview
 from selector_drift.validate.history import History
@@ -15420,7 +15771,8 @@ from selector_drift.validate.verdict import Outcome, Verdict
 if TYPE_CHECKING:
     from selector_drift.validate.gate import HealContext
 
-DomainRule: TypeAlias = Mapping[str, object]
+# DomainRule is Task 5's TypedDict -- one definition, validated when the spec loads (2026-09-26).
+# The checks below stay: a rule built in code, not loaded, must be refused just the same.
 _KEYS: Final = frozenset({"min", "max", "enum", "date_after", "date_before", "currency"})
 _MINOR_UNITS: Final = {"USD": 2, "EUR": 2, "GBP": 2, "CAD": 2, "AUD": 2, "CHF": 2,
                        "JPY": 0, "KWD": 3, "BHD": 3}
@@ -15438,18 +15790,15 @@ def _bound(raw: object, key: str) -> Decimal | None:
 
 
 def _day(raw: object, key: str) -> dt.date | None:
+    """Task 5's DomainRule carries dates as ISO `YYYY-MM-DD` strings (its IsoDate validator)."""
     if raw is None:
         return None
-    if isinstance(raw, dt.datetime):
-        return raw.date()
-    if isinstance(raw, dt.date):                     # yaml.safe_load turns 2023-01-01 into one
-        return raw
     if isinstance(raw, str):
         try:
             return dt.date.fromisoformat(raw)
         except ValueError:
             pass
-    raise SpecError(f"domain rule {key!r} must be an ISO date, got {raw!r}")
+    raise SpecError(f"domain rule {key!r} must be an ISO YYYY-MM-DD string, got {raw!r}")
 
 
 class DomainAssertion:
@@ -15501,6 +15850,8 @@ class DomainAssertion:
         return "; ".join(parts)
 
     def _problem(self, value: str, observed_on: dt.date | None) -> str | None:
+        if len(value) > MAX_MATCH_LEN:                # the matcher's cap: never parse a page essay
+            return f"length {len(value)} exceeds the {MAX_MATCH_LEN}-character cap"
         if self._numeric:
             n = parse_number(value)
             if n is None:
@@ -15701,14 +16052,14 @@ class CrossFieldAssertion:
 - [ ] **Step 5: Run them and make sure they pass**
 
 Run: `uv run pytest tests/spec tests/validate -v -m unit && uv run mypy --strict selector_drift/spec selector_drift/validate && uv run ruff check selector_drift/validate`
-Expected: PASS — 5 new in `tests/spec/test_matcher.py`, 32 new in `test_basic_assertions.py`
-(counting parametrisations), all Task 20 tests still green; Task 17's rung-1 tests still green
+Expected: PASS — 33 new in `test_basic_assertions.py` (counting parametrisations), Task 5's
+matcher tests and all Task 20 tests still green; Task 17's rung-1 tests still green
 (`uv run pytest tests/resolve -m unit`). mypy clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add pyproject.toml uv.lock selector_drift/spec/schema.py selector_drift/validate/assertions tests/spec/test_matcher.py tests/validate/test_basic_assertions.py
+git add selector_drift/validate/assertions tests/validate/test_basic_assertions.py
 git commit -m "feat(validate): bounded format, domain and whitelist cross-field assertions"
 ```
 
@@ -15726,8 +16077,11 @@ git commit -m "feat(validate): bounded format, domain and whitelist cross-field 
   a concrete rung module (`judge-reaches-rungs-only-by-protocol`); `History.previous().by_key()`
   (Task 20); `Confirmation` (Task 20).
 - Produces:
-  - `RowKeyContinuity(threshold: float = 0.95)` — family `VALUE`; `PASS` sets
-    `confirmed_by=Confirmation(rung=None, family=Family.VALUE)`; `.agreement(candidate, previous, field) -> tuple[float, int]`
+  - `RowKeyContinuity(threshold: float = 0.95, collapse_floor: float = COLLAPSE_FLOOR)` — family
+    `VALUE`; `PASS` sets `confirmed_by=Confirmation(rung=None, family=Family.VALUE)`;
+    `.agreement(candidate, previous, field) -> tuple[float, int]`; `COLLAPSE_FLOOR: Final = 0.50`
+  - `continuity_alert(v: Verdict) -> bool` — `True` for a steady-state `RowKeyContinuity` verdict
+    that is tolerated (`INSUFFICIENT`) but below the threshold; the pipeline alerts on it (Task 26A)
   - `IndependentRungAgreement(rungs: Sequence[Rung], value: RowKeyContinuity | None = None)` — re-derives
     the healed node with the healing rung, re-resolves with every **cross-family** rung, compares
     **`node_id`**; falls back to the `VALUE` family only when no DOM confirmer resolved. `PASS` sets
@@ -15755,7 +16109,8 @@ decoy produces. A heal that the healing rung itself cannot reproduce on the same
 ### R14/C3 — the third family, and how it enters this check
 
 **As first specified, a plain label rewording quarantined every time, forever.** Rungs 2 and 3 both
-fail on a reword (Tasks 14–15 assert it), rung 4 heals via `data-testid` (Task 16), the confirmer must
+fail on a reword (Tasks 14–15 assert it), rung 4 heals — on the bench via the `col-<field>` class /
+header position, since bench cells carry no `data-testid` (Task 16; corrected 2026-09-26) — the confirmer must
 be text-semantic, both just failed — `INSUFFICIENT`, which the §5.7 asymmetry turns into `FAIL`.
 Label rewording is the most common real UI change there is, and on the bench it re-seeds nightly with
 a fresh string, so `first_heal_policy: auto_promote` does not rescue it (that satisfies only
@@ -15781,10 +16136,26 @@ type error (`RowKeyContinuity` is not a `Rung`), so it is now the `value=` param
 | `DecoyColumn` | → Amount | → Prior Amount | differs | **FAIL (DOM split)** | FAIL | quarantined |
 | `ValueSwap` | agrees | agrees | differs | PASS (DOM agrees) | **FAIL** | quarantined |
 
-**Steady state: both confirmers return `INSUFFICIENT`, never `FAIL`.** On a cache hit there is
-nothing to confirm, and `RowKeyContinuity` must not block steady-state runs: a claim's `status`
-legitimately changes between days, and a `FAIL` blocks regardless of heal. `INSUFFICIENT` is
-tolerated on a cache hit (§5.7), so neither check can quarantine a steady run.
+**`ClassRename` + `LabelReword` on the same day is a known limit.** Rungs 2 and 3 fail on the reword
+and rung 4 loses the `col-<field>` class to the rename, so on the bench that field falls to header
+position alone or escalates; `docs/methodology.md` (Task 40) states it rather than the suite hiding it.
+
+**Steady state (decided 2026-09-26, ledger #32): `IndependentRungAgreement` is `INSUFFICIENT`;
+`RowKeyContinuity` is `INSUFFICIENT` unless the data collapses.** On a cache hit there is nothing to
+confirm, and a claim's `status` legitimately changes between days, so ordinary churn must not block a
+steady run — `INSUFFICIENT` is tolerated on a cache hit (§5.7). But `ValueSwap` arrives *under
+unchanged markup*: rung 1 hits, nothing heals, and without a steady-state rule the swapped column is
+written every night. So on a cache hit `RowKeyContinuity` still measures agreement with the previous
+accepted run and:
+
+| Agreement on the joined rows | Steady state (cache hit) | On a heal |
+|---|---|---|
+| ≥ 0.95 (`threshold`) | `INSUFFICIENT` — nothing to confirm | `PASS` |
+| 0.50 ≤ rate < 0.95 | `INSUFFICIENT` **and an alert** (`continuity_alert()`; Task 26A posts it) | `FAIL` |
+| < 0.50 (`COLLAPSE_FLOOR`) | **`FAIL`** — a collapse no overnight business change produces | `FAIL` |
+
+Below half the joined cells agreeing is not churn: it is a column now reading a different column's
+values. The floor is a published methodology number (Task 40), not a tunable.
 
 **When the healed field *is* the natural key,** comparing it to itself on joined rows is trivially
 1.0. `RowKeyContinuity` instead joins on the healed key's values and measures agreement of the
@@ -15856,6 +16227,9 @@ SWAPPED = candidate([_spec_row(r) | {"amount": r["reserve"], "reserve": r["amoun
                      for r in BASE_ROWS])
 FOREIGN_KEYS = candidate([_spec_row(r) | {"claim_number": f"ZZ{i:08d}"}
                           for i, r in enumerate(BASE_ROWS)])
+# Ordinary overnight churn: 2 of 20 amounts change (agreement 0.90 -- above the collapse floor).
+CHURNED = candidate([_spec_row(r) | ({"amount": "9,999.99"} if i % 10 == 0 else {})
+                     for i, r in enumerate(BASE_ROWS)])
 ```
 
 - [ ] **Step 2: Write the failing tests**
@@ -15865,12 +16239,13 @@ FOREIGN_KEYS = candidate([_spec_row(r) | {"claim_number": f"ZZ{i:08d}"}
 import pytest
 
 from selector_drift.resolve.trace import Family
-from selector_drift.validate.assertions.independence import (IndependentRungAgreement,
-                                                             RowKeyContinuity)
+from selector_drift.validate.assertions.independence import (COLLAPSE_FLOOR,
+                                                             IndependentRungAgreement,
+                                                             RowKeyContinuity, continuity_alert)
 from selector_drift.validate.verdict import Confirmation, Outcome
-from tests.validate.helpers import (AMOUNT, AMOUNT_CELL, CLAIM_NUMBER, DECOY, FOREIGN_KEYS,
-                                    PRIOR_AMOUNT_CELL, SWAPPED, UNCHANGED, FakeRung, anchors, ax,
-                                    ctx, heuristic, previous_history)
+from tests.validate.helpers import (AMOUNT, AMOUNT_CELL, CHURNED, CLAIM_NUMBER, DECOY,
+                                    FOREIGN_KEYS, PRIOR_AMOUNT_CELL, SWAPPED, UNCHANGED, FakeRung,
+                                    anchors, ax, ctx, heuristic, previous_history)
 
 
 def healed(rung: int, **kw):
@@ -16013,10 +16388,34 @@ def test_continuity_with_no_history_is_insufficient_never_pass():
 
 
 @pytest.mark.unit
-def test_continuity_never_blocks_a_steady_state_run():
-    # A status legitimately changes between days; a FAIL would block regardless of heal.
+def test_steady_state_churn_is_tolerated_but_alerted():
+    # Ledger #32 (2026-09-26). Values legitimately change between days: 0.90 agreement on a
+    # cache hit is INSUFFICIENT (tolerated), and continuity_alert() tells the pipeline to report it.
+    v = RowKeyContinuity().check(CHURNED, previous_history(), ctx(AMOUNT, healed=False, rung=1))
+    assert v.outcome is Outcome.INSUFFICIENT and v.observed == "0.9000"
+    assert continuity_alert(v)
+
+
+@pytest.mark.unit
+def test_steady_state_value_swap_is_a_collapse_and_fails():
+    # Ledger #32. ValueSwap under unchanged markup: rung 1 hits, nothing heals, and without
+    # this FAIL the swapped column is written every night. Agreement 0.0 < COLLAPSE_FLOOR.
     v = RowKeyContinuity().check(SWAPPED, previous_history(), ctx(AMOUNT, healed=False, rung=1))
-    assert v.outcome is Outcome.INSUFFICIENT
+    assert v.outcome is Outcome.FAIL and float(v.observed) < COLLAPSE_FLOOR == 0.50
+    assert "collapse" in v.reason and not continuity_alert(v)
+
+
+@pytest.mark.unit
+def test_an_unchanged_steady_state_run_is_neither_blocked_nor_alerted():
+    v = RowKeyContinuity().check(UNCHANGED, previous_history(), ctx(AMOUNT, healed=False, rung=1))
+    assert v.outcome is Outcome.INSUFFICIENT and not continuity_alert(v)
+
+
+@pytest.mark.unit
+def test_on_a_heal_the_same_churn_is_a_failure():
+    """Between the floor and the threshold, a heal is refused: the tolerance is for cache hits."""
+    v = RowKeyContinuity().check(CHURNED, previous_history(), healed(4))
+    assert v.outcome is Outcome.FAIL
 
 
 @pytest.mark.unit
@@ -16057,19 +16456,36 @@ if TYPE_CHECKING:
 
 _DOM_FAMILIES: Final = frozenset({Family.TEXT_SEMANTIC, Family.STRUCTURAL})
 VALUE_CONFIRMATION: Final = Confirmation(rung=None, family=Family.VALUE)
+COLLAPSE_FLOOR: Final = 0.50
+"""Steady-state agreement below this is a collapse, not churn: FAIL even on a cache hit
+(decided 2026-09-26, ledger #32 -- it is what catches ValueSwap under unchanged markup)."""
 
 
 def _norm(value: object) -> str:
     return " ".join(str(value).split())
 
 
+def continuity_alert(v: Verdict) -> bool:
+    """A steady-state continuity dip the gate tolerates (INSUFFICIENT) but a human must hear
+    about: the verdict carries an observed rate below its threshold. Only the steady-state path
+    produces an INSUFFICIENT with a rate -- on a heal the same rate is a FAIL."""
+    if v.check != RowKeyContinuity.name or v.outcome is not Outcome.INSUFFICIENT:
+        return False
+    if v.observed is None or v.threshold is None:
+        return False
+    return float(v.observed) < float(v.threshold.removeprefix(">= "))
+
+
 class RowKeyContinuity:
     name = "RowKeyContinuity"
 
-    def __init__(self, threshold: float = 0.95) -> None:
+    def __init__(self, threshold: float = 0.95, collapse_floor: float = COLLAPSE_FLOOR) -> None:
         if not 0.0 < threshold <= 1.0:
             raise ValueError("threshold must be in (0, 1]")
+        if not 0.0 < collapse_floor < threshold:
+            raise ValueError("collapse_floor must be in (0, threshold)")
         self.threshold = threshold
+        self.collapse_floor = collapse_floor
 
     @property
     def threshold_text(self) -> str:
@@ -16102,10 +16518,6 @@ class RowKeyContinuity:
     def check(self, candidate: CandidateExtraction, history: History | None,
               ctx: HealContext) -> Verdict:
         field = ctx.target.name
-        if not ctx.healed:
-            return self._v(Outcome.INSUFFICIENT, None,
-                           "nothing healed: continuity confirms heals; a steady-state value "
-                           "change is a data-quality finding, not a write gate")
         previous = history.previous() if history is not None else None
         if previous is None:
             return self._v(Outcome.INSUFFICIENT, None, "no accepted run to compare against")
@@ -16118,6 +16530,18 @@ class RowKeyContinuity:
         what = "the fields that co-vary with it" if field in previous.natural_key else field
         detail = (f"{what} agree with {previous.run_key} on {rate:.1%} of {compared} joined "
                   f"cells (joined on {joined})")
+        if not ctx.healed:                                    # steady state (ledger #32)
+            if rate < self.collapse_floor:
+                return self._v(Outcome.FAIL, f"{rate:.4f}",
+                               f"{detail}: below the {self.collapse_floor:.2f} collapse floor on a "
+                               "cache hit -- no overnight business change moves that many values "
+                               "while every key stays; the column reads different data")
+            if rate < self.threshold:
+                return self._v(Outcome.INSUFFICIENT, f"{rate:.4f}",
+                               f"{detail}: below the threshold but above the collapse floor -- "
+                               "tolerated on a cache hit as churn, and reported for review")
+            return self._v(Outcome.INSUFFICIENT, f"{rate:.4f}",
+                           f"nothing healed, so nothing to confirm; {detail}")
         if rate >= self.threshold:
             return self._v(Outcome.PASS, f"{rate:.4f}", detail, VALUE_CONFIRMATION)
         return self._v(Outcome.FAIL, f"{rate:.4f}",
@@ -16204,7 +16628,7 @@ class IndependentRungAgreement:
 - [ ] **Step 5: Run the tests and confirm the contract holds**
 
 Run: `uv run pytest tests/validate -v -m unit && uv run mypy --strict selector_drift/validate && uv run lint-imports`
-Expected: PASS — 20 new tests. `judge-reaches-rungs-only-by-protocol` and `judged-cannot-call-judge`
+Expected: PASS — 23 new tests. `judge-reaches-rungs-only-by-protocol` and `judged-cannot-call-judge`
 kept: `independence.py` imports `resolve.trace` and nothing under `resolve.rungs`.
 
 - [ ] **Step 6: Commit**
@@ -16219,17 +16643,22 @@ git commit -m "feat(validate): cross-family node-identity agreement with VALUE-f
 ### Task 23: `DistributionalAssertion` — PSI, per-target warm-up, persistence for alerting only
 
 **Files:**
+- Create: `selector_drift/validate/stats.py` — **the one PSI in the product** (ledger 2026-09-26:
+  Task 29 had a second implementation with different bin edges, `side="right"` and a looser number
+  parser, so the gate and the quality screen could print two PSIs for one field; `validate/` must not
+  import `quality/`, and Task 23 runs first, so the statistic lives here and Task 29 imports it)
 - Create: `selector_drift/validate/assertions/distribution.py`
 - Modify: `tests/validate/helpers.py` (append the history builders), `docs/methodology.md` (the PSI section)
-- Test: `tests/validate/test_distribution.py`
+- Test: `tests/validate/test_stats.py`, `tests/validate/test_distribution.py`
 
 **Interfaces:**
-- Consumes: `Assertion`, `Verdict`, `column` (Task 20), `History`/`AcceptedRun` (Task 20), `AuthorisedTarget.warmup_runs` (Task 2).
+- Consumes: `Assertion`, `Verdict`, `column` (Task 20), `History`/`AcceptedRun` (Task 20), `AuthorisedTarget.warmup_runs` (Task 2), `parse_number` (Task 21).
 - Produces:
+  - `validate/stats.py`: `psi(reference: Floats, current: Floats, epsilon: float = PSI_EPSILON) -> float`, `floats(values) -> list[float] | None`, `quantile_edges(reference: Sequence[float], bins: int = PSI_BINS) -> tuple[float, ...]`, `binned(values, edges, unparseable) -> Floats`, `category_proportions(reference, current) -> tuple[Floats, Floats]`, `psi_of_values(reference: Sequence[str], current: Sequence[str], *, bins=PSI_BINS, epsilon=PSI_EPSILON) -> tuple[float, bool]` (PSI, categorical); `PSI_BINS = 10`, `PSI_EPSILON = 1e-6`
   - `DistributionalAssertion(threshold: float = 0.20, warmup_runs: int = 30, persistence: int = 2, bins: int = 10, epsilon: float = 1e-6)`
   - `DistributionalAssertion.for_target(target: AuthorisedTarget)`; `.bin_edges_for(history, field) -> tuple[float, ...]`; `.assess(candidate, history, field) -> Assessment | str` (a `str` is the reason there is no basis)
-  - `Assessment(psi, reference_n, current_n, categorical, breach, prior_breaches, suppressed, alert)` — **Task 29's distribution-shift finding reads `assess()`**, so the gate and the alert cannot compute two different PSIs
-  - `psi(reference, current, epsilon) -> float`; `REFERENCE_RUNS = 30`
+  - `Assessment(psi, reference_n, current_n, categorical, breach, prior_breaches, suppressed, alert)` — **Task 29's distribution-shift finding computes its PSI with the same `psi_of_values()`** that `assess()` calls, so the gate and the alert cannot compute two different PSIs
+  - `REFERENCE_RUNS = 30`
 
 **(a) Persistence governs alerting only; on a heal, one breach is `FAIL` (M17).** As first drafted,
 `FAIL` needed PSI over threshold on `persistence` consecutive runs — so a heal into a shifted
@@ -16311,6 +16740,41 @@ LOW_BAND = column("amount", grid(100, 0.5))    # nine of ten reference bins left
 ```
 
 - [ ] **Step 2: Write the failing tests**
+
+```python
+# tests/validate/test_stats.py  (the PSI unit tests Task 29 first carried, moved with the statistic)
+import math
+
+import pytest
+
+from selector_drift.validate.stats import psi_of_values
+
+
+@pytest.mark.unit
+def test_psi_of_a_distribution_against_itself_is_zero():
+    values = [f"{100 + 7.5 * i:,.2f}" for i in range(100)]
+    assert psi_of_values(values * 6, values)[0] == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.unit
+def test_psi_is_finite_when_a_bin_is_empty():
+    # M16: without epsilon, log(0) makes PSI infinite and every run a breach.
+    reference = [str(i) for i in range(100)]
+    assert math.isfinite(psi_of_values(reference, ["5000"] * 10)[0])
+
+
+@pytest.mark.unit
+def test_psi_falls_back_to_category_proportions_for_text():
+    same, categorical = psi_of_values(["Open", "Paid"] * 50, ["Open", "Paid"] * 50)
+    assert categorical and same == pytest.approx(0.0, abs=1e-9)
+    assert psi_of_values(["Open", "Paid"] * 50, ["Closed"] * 100)[0] > 0.20
+
+
+@pytest.mark.unit
+def test_unparseable_current_values_land_in_their_own_bin():
+    reference = [f"{100 + i:,.2f}" for i in range(100)]
+    assert psi_of_values(reference, ["n/a"] * 100)[0] > 0.20
+```
 
 ```python
 # tests/validate/test_distribution.py
@@ -16463,45 +16927,41 @@ def test_parameters_that_would_disable_the_check_are_refused(kw):
 
 - [ ] **Step 3: Run them and watch them fail**
 
-Run: `uv run pytest tests/validate/test_distribution.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.validate.assertions.distribution'`.
+Run: `uv run pytest tests/validate/test_stats.py tests/validate/test_distribution.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.validate.stats'` and
+`No module named 'selector_drift.validate.assertions.distribution'`.
 
-- [ ] **Step 4: Implement PSI, warm-up and the persistence split**
+- [ ] **Step 4: Implement the statistic, PSI, warm-up and the persistence split**
 
 ```python
-# selector_drift/validate/assertions/distribution.py
-"""PSI with a documented threshold, per-target warm-up, and persistence for ALERTING only
-(design 5.7, M16/M17/M18). The methodology table in docs/methodology.md is this file."""
+# selector_drift/validate/stats.py
+"""The one PSI in the product (ledger 2026-09-26). DistributionalAssertion (Task 23) and the
+data-quality distribution_shift rule (Task 29) both call psi_of_values(), so a heal-log line and a
+quality row about the same field cannot disagree. validate/ must not import quality/, and this
+task runs first, so the statistic lives here; the methodology table in docs/methodology.md
+describes exactly this file."""
 from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import numpy as np
 import numpy.typing as npt
 
-from selector_drift.extract.models import CandidateExtraction
-from selector_drift.scope.record import AuthorisedTarget
 from selector_drift.validate.assertions._numbers import parse_number
-from selector_drift.validate.assertions.base import column
-from selector_drift.validate.history import History
-from selector_drift.validate.verdict import Outcome, Verdict
 
-if TYPE_CHECKING:
-    from selector_drift.validate.gate import HealContext
-
-REFERENCE_RUNS: Final = 30
 Floats = npt.NDArray[np.float64]
+PSI_BINS: Final = 10
+PSI_EPSILON: Final = 1e-6
 
 
-def psi(reference: Floats, current: Floats, epsilon: float) -> float:
+def psi(reference: Floats, current: Floats, epsilon: float = PSI_EPSILON) -> float:
     return float(np.sum((current - reference) * np.log((current + epsilon)
                                                        / (reference + epsilon))))
 
 
-def _floats(values: Sequence[str]) -> list[float] | None:
+def floats(values: Sequence[str]) -> list[float] | None:
     """Every value as a number, or None -- which selects the categorical path."""
     out: list[float] = []
     for v in values:
@@ -16512,7 +16972,16 @@ def _floats(values: Sequence[str]) -> list[float] | None:
     return out
 
 
-def _binned(values: Sequence[float], edges: tuple[float, ...], unparseable: int) -> Floats:
+def quantile_edges(reference: Sequence[float], bins: int = PSI_BINS) -> tuple[float, ...]:
+    """Inner quantile edges from the reference ONLY. The current run is never an input."""
+    if not reference:
+        return ()
+    qs = np.quantile(np.asarray(reference, dtype=np.float64),
+                     np.linspace(0.0, 1.0, bins + 1)[1:-1])
+    return tuple(float(x) for x in np.unique(qs))
+
+
+def binned(values: Sequence[float], edges: tuple[float, ...], unparseable: int) -> Floats:
     idx = np.searchsorted(np.asarray(edges, dtype=np.float64),
                           np.asarray(values, dtype=np.float64), side="left")
     counts = np.bincount(idx, minlength=len(edges) + 1).astype(np.float64)
@@ -16520,13 +16989,51 @@ def _binned(values: Sequence[float], edges: tuple[float, ...], unparseable: int)
     return np.asarray(counts / counts.sum(), dtype=np.float64)
 
 
-def _categorical(reference: Sequence[str], current: Sequence[str]) -> tuple[Floats, Floats]:
+def category_proportions(reference: Sequence[str],
+                         current: Sequence[str]) -> tuple[Floats, Floats]:
     r, c = Counter(reference), Counter(current)
     cats = sorted(set(r) | set(c))
     rp = np.asarray([r[k] for k in cats], dtype=np.float64)
     cp = np.asarray([c[k] for k in cats], dtype=np.float64)
     return (np.asarray(rp / rp.sum(), dtype=np.float64),
             np.asarray(cp / cp.sum(), dtype=np.float64))
+
+
+def psi_of_values(reference: Sequence[str], current: Sequence[str], *, bins: int = PSI_BINS,
+                  epsilon: float = PSI_EPSILON) -> tuple[float, bool]:
+    """(PSI, categorical). Numeric when every reference value parses: quantile bins fixed from
+    the reference, current values that do not parse counted in an extra bin. Otherwise category
+    proportions. Both inputs must be non-empty; callers check."""
+    ref_num = floats(reference)
+    if ref_num is not None:
+        edges = quantile_edges(ref_num, bins)
+        parsed = [float(n) for v in current if (n := parse_number(v)) is not None]
+        return (psi(binned(ref_num, edges, 0),
+                    binned(parsed, edges, len(current) - len(parsed)), epsilon), False)
+    r, c = category_proportions(reference, current)
+    return psi(r, c, epsilon), True
+```
+
+```python
+# selector_drift/validate/assertions/distribution.py
+"""PSI with a documented threshold, per-target warm-up, and persistence for ALERTING only
+(design 5.7, M16/M17/M18). The statistic itself is validate/stats.py, shared with Task 29."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Final
+
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.scope.record import AuthorisedTarget
+from selector_drift.validate.assertions.base import column
+from selector_drift.validate.history import History
+from selector_drift.validate.stats import floats, psi_of_values, quantile_edges
+from selector_drift.validate.verdict import Outcome, Verdict
+
+if TYPE_CHECKING:
+    from selector_drift.validate.gate import HealContext
+
+REFERENCE_RUNS: Final = 30
 
 
 @dataclass(frozen=True)
@@ -16561,12 +17068,8 @@ class DistributionalAssertion:
 
     def bin_edges_for(self, history: History, field: str) -> tuple[float, ...]:
         """Quantile edges from the reference window ONLY. The current run is not an input."""
-        ref = _floats(history.trailing(REFERENCE_RUNS).values(field))
-        if not ref:
-            return ()
-        qs = np.quantile(np.asarray(ref, dtype=np.float64),
-                         np.linspace(0.0, 1.0, self.bins + 1)[1:-1])
-        return tuple(float(x) for x in np.unique(qs))
+        ref = floats(history.trailing(REFERENCE_RUNS).values(field))
+        return quantile_edges(ref, self.bins) if ref else ()
 
     def assess(self, candidate: CandidateExtraction, history: History | None,
                field: str) -> Assessment | str:
@@ -16579,15 +17082,8 @@ class DistributionalAssertion:
             return f"the reference window holds no {field} values"
         if not current:
             return f"no values were extracted for {field}"
-        ref_num = _floats(reference)
-        if ref_num is not None:
-            edges = self.bin_edges_for(history, field)
-            parsed = [float(n) for v in current if (n := parse_number(v)) is not None]
-            r = _binned(ref_num, edges, 0)
-            c = _binned(parsed, edges, len(current) - len(parsed))
-        else:
-            r, c = _categorical(reference, current)
-        score = psi(r, c, self.epsilon)
+        score, categorical = psi_of_values(reference, current, bins=self.bins,
+                                           epsilon=self.epsilon)
         breach = score > self.threshold
         prior = 0
         for run in reversed(history.runs):
@@ -16597,7 +17093,7 @@ class DistributionalAssertion:
         previous = history.previous()
         suppressed = previous is not None and field in previous.marked_expected
         return Assessment(psi=score, reference_n=len(reference), current_n=len(current),
-                          categorical=ref_num is None, breach=breach, prior_breaches=prior,
+                          categorical=categorical, breach=breach, prior_breaches=prior,
                           suppressed=suppressed,
                           alert=breach and not suppressed and 1 + prior >= self.persistence)
 
@@ -16652,12 +17148,13 @@ so a heal quarantines until a human confirms it.
 - [ ] **Step 6: Run them and make sure they pass**
 
 Run: `uv run pytest tests/validate -v -m unit && uv run mypy --strict selector_drift/validate`
-Expected: PASS — 19 new tests (counting parametrisations). mypy clean.
+Expected: PASS — 23 new tests (19 in `test_distribution.py` counting parametrisations, 4 in
+`test_stats.py`). mypy clean.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add selector_drift/validate/assertions/distribution.py tests/validate/helpers.py tests/validate/test_distribution.py docs/methodology.md
+git add selector_drift/validate/stats.py selector_drift/validate/assertions/distribution.py tests/validate/helpers.py tests/validate/test_stats.py tests/validate/test_distribution.py docs/methodology.md
 git commit -m "feat(validate): PSI with per-target warm-up; persistence gates alerts, never heals"
 ```
 
@@ -16861,9 +17358,17 @@ git commit -m "feat(validate): first-heal confirmation with the policy injected 
   - `QuarantinedRun` (re-exported), `StillInvalid(verdicts: list[Verdict])` with `.verdicts` and `.failing`, `NotInQuarantine(LookupError)`, `AlreadyResolved(RuntimeError)`
   - `GateInputs(candidate, history, contexts, checks)`, `Rebuild = Callable[[str], GateInputs]`
   - `reconfirm(run_key, inputs) -> ValidatedExtraction` — the pure half of promotion
-  - `promote(run_key, *, actor, reason, rebuild, session_factory=Session) -> ValidatedExtraction` — re-runs the gate with `human_confirmed=True`; **does not land**
+  - `promote(run_key, *, actor, reason, rebuild, session_factory=Session) -> ValidatedExtraction` — re-runs the gate with `human_confirmed=True`; **does not land and does not mark the row resolved** (a refusal is audited as `promote_refused`)
+  - `mark_promoted(run_key, *, actor, reason, verdicts, session_factory=Session) -> None` — records the decision: `resolved_as="promoted"` plus the `promote` audit row. **Called by Task 26A only after `accept_promoted` has landed the data**
   - `discard(run_key, *, actor, reason, session_factory=Session) -> None`
   - Audit rows: `action` ∈ {`promote`, `promote_refused`, `discard`}, **`subject = run_key`**, `detail.reason`
+
+**Promotion is two calls, so the record cannot run ahead of the data (ledger 2026-09-26).** The first
+draft's `promote()` marked the row `promoted` and wrote the audit row *before* Task 26A's
+`accept_promoted` landed anything; a lake or disk failure in between left a run the UI and the audit
+log call promoted whose rows were never written. Now `promote()` only re-gates and returns the
+`ValidatedExtraction`; `orchestrate` lands it (`accept_promoted`) and only then calls
+`mark_promoted()`. A failure between the two leaves the row open — retryable, and honest.
 
 **`checks_for` turns a field's declared `AssertionSpec`s into the objects the gate runs.** Nothing did;
 Task 26A's first diagram called `gate()` with no checks at all. The confirming rungs are **injected**
@@ -17027,6 +17532,21 @@ def test_a_hostile_expression_in_a_spec_is_a_spec_refusal():
     field = _field_with(type="cross_field", expression="__import__('os') == 1")
     with pytest.raises(UnsafeExpression):
         checks_for(SPEC, field, [], warmup_runs=5, first_heal_policy=REQUIRED)
+
+
+@pytest.mark.unit
+def test_a_spec_file_with_an_unknown_assertion_type_does_not_load():
+    """The loader half (2026-09-26): AssertionSpec.type is a Literal, so `vibes` never reaches
+    checks_for from a file -- model_construct above is the only way to test checks_for's own
+    refusal, and this proves the file path refuses first."""
+    from selector_drift.spec.loader import load_spec_text
+    text = ("version: 1\nscope_ref: scopes/testbench.yaml\nschedule: '12 4 * * *'\n"
+            "row_scope: each row\nnatural_key: [claim_number]\n"
+            "expected_schema: {claim_number: string}\nnavigate: []\n"
+            "targets:\n  - name: claim_number\n    description: d\n"
+            "    assertions: [{type: vibes}]\n")
+    with pytest.raises(SpecError):
+        load_spec_text(text)
 ```
 
 ```python
@@ -17045,8 +17565,8 @@ from selector_drift.validate.assertions.first_heal import FirstHealConfirmation
 from selector_drift.validate.assertions.format import FormatAssertion
 from selector_drift.validate.gate import ValidatedExtraction, gate_run
 from selector_drift.validate.quarantine import (AlreadyResolved, GateInputs, NotInQuarantine,
-                                                QuarantinedRun, StillInvalid, discard, promote,
-                                                reconfirm)
+                                                QuarantinedRun, StillInvalid, discard,
+                                                mark_promoted, promote, reconfirm)
 from selector_drift.validate.verdict import Outcome, Verdict
 from tests.validate.helpers import (AMOUNT, AT, CLAIM_NUMBER, RUN_KEY, SHIFTED, amount_history,
                                     candidate, column, ctx)
@@ -17170,10 +17690,21 @@ def _row(run_key):
 
 
 @pytest.mark.integration
-def test_promotion_is_audited_and_resolves_the_row(quarantined):
+def test_promote_re_gates_but_records_nothing_until_the_data_lands(quarantined):
+    """Ledger 2026-09-26: the record must not run ahead of the data. promote() only re-gates;
+    the row stays open and nothing is audited until mark_promoted() (after accept_promoted)."""
     v = promote(quarantined, actor=ACTOR, reason="checked the screenshots",
                 rebuild=lambda k: first_heal_inputs())
     assert isinstance(v, ValidatedExtraction)
+    assert _audits() == [] and _row(quarantined).resolved_as is None
+
+
+@pytest.mark.integration
+def test_mark_promoted_is_audited_and_resolves_the_row(quarantined):
+    v = promote(quarantined, actor=ACTOR, reason="checked the screenshots",
+                rebuild=lambda k: first_heal_inputs())
+    mark_promoted(quarantined, actor=ACTOR, reason="checked the screenshots",
+                  verdicts=v.verdicts)
     (row,) = _audits()
     assert (row.actor, row.action, row.subject) == (ACTOR, "promote", RUN_KEY)
     assert row.detail["reason"] == "checked the screenshots"
@@ -17303,7 +17834,7 @@ from selector_drift.validate.history import History
 from selector_drift.validate.verdict import Outcome, Verdict
 
 __all__ = ["AlreadyResolved", "GateInputs", "NotInQuarantine", "QuarantinedRun", "Rebuild",
-           "StillInvalid", "discard", "promote", "reconfirm"]
+           "StillInvalid", "discard", "mark_promoted", "promote", "reconfirm"]
 
 REASON_MAX: Final = 500                      # API spec 4.1: DecisionRequest.reason is 1-500
 
@@ -17372,11 +17903,13 @@ def _dump(verdicts: Sequence[Verdict]) -> list[dict[str, object]]:
 
 def promote(run_key: str, *, actor: str, reason: str, rebuild: Rebuild,
             session_factory: SessionFactory = Session) -> ValidatedExtraction:
+    """Re-gate only. Marks nothing: the caller lands the data, then calls mark_promoted()
+    (ledger 2026-09-26 -- the record must never run ahead of the data)."""
     actor, reason = _decision(actor, reason)
     with session_factory() as s:
         _open(s, run_key)                                   # refuse before any work
     try:
-        validated = reconfirm(run_key, rebuild(run_key))
+        return reconfirm(run_key, rebuild(run_key))
     except StillInvalid as exc:
         with session_factory() as s:
             s.add(AuditLog(at=dt.datetime.now(dt.UTC), actor=actor, action="promote_refused",
@@ -17384,14 +17917,19 @@ def promote(run_key: str, *, actor: str, reason: str, rebuild: Rebuild,
                            detail={"reason": reason, "failing": _dump(exc.failing)}))
             s.commit()
         raise
+
+
+def mark_promoted(run_key: str, *, actor: str, reason: str, verdicts: Sequence[Verdict],
+                  session_factory: SessionFactory = Session) -> None:
+    """Record a promotion whose data has ALREADY landed (Task 26A's accept_promoted)."""
+    actor, reason = _decision(actor, reason)
     now = dt.datetime.now(dt.UTC)
     with session_factory() as s:
         q = _open(s, run_key)                               # a concurrent decision wins first
         q.resolved_as, q.actor, q.resolved_at = "promoted", actor, now
         s.add(AuditLog(at=now, actor=actor, action="promote", subject=run_key,
-                       detail={"reason": reason, "verdicts": _dump(validated.verdicts)}))
+                       detail={"reason": reason, "verdicts": _dump(verdicts)}))
         s.commit()
-    return validated
 
 
 def discard(run_key: str, *, actor: str, reason: str,
@@ -17409,8 +17947,8 @@ def discard(run_key: str, *, actor: str, reason: str,
 - [ ] **Step 5: Run the tests and the contracts**
 
 Run: `uv run pytest tests/validate -v -m "unit or integration" && uv run mypy --strict selector_drift/validate && uv run lint-imports`
-Expected: PASS — 10 new in `test_checks.py`, 16 new in `test_quarantine.py` (counting
-parametrisations: 11 `unit`, 5 `integration`, which need Postgres up). `validate-cannot-land`,
+Expected: PASS — 11 new in `test_checks.py`, 17 new in `test_quarantine.py` (counting
+parametrisations: 11 `unit`, 6 `integration`, which need Postgres up). `validate-cannot-land`,
 `judge-reaches-rungs-only-by-protocol` and `judged-cannot-call-judge` kept.
 
 - [ ] **Step 6: Run the fast check** (Global Constraints) — every tier-`unit` test in the repo green,
@@ -17428,14 +17966,15 @@ git commit -m "feat(validate): checks_for, audited promote/discard; promotion re
 ### Task 27: Typed extraction into `Claim`s — the row model
 
 **Files:**
-- Create: `selector_drift/extract/reader.py`, `selector_drift/extract/rows.py`, `selector_drift/extract/models.py`
+- Create: `selector_drift/extract/reader.py`, `selector_drift/extract/rows.py`
+- Exists (Task 20): `selector_drift/extract/models.py` — `CandidateExtraction` is created in Task 20,
+  which needs it and runs before this task; this task does not write the file (2026-09-26)
 - Test: `tests/extract/conftest.py`, `tests/extract/test_rows.py`, `tests/extract/test_reader.py`
 
 **Interfaces:**
-- Consumes: `ResolvedElement`, `CascadeTrace`, `NODE_ATTR` (Tasks 13, 19); `TaskSpec` (Task 5);
-  `bok_core.provenance` `Claim`, `Method`, `DomSource` (P-1).
+- Consumes: `ResolvedElement`, `CascadeTrace`, `NODE_ATTR` (Task 13, `resolve/page.py`); `TaskSpec` (Task 5);
+  `CandidateExtraction` (Task 20, `extract/models.py`); `bok_core.provenance` `Claim`, `Method`, `DomSource` (P-1).
 - Produces:
-  - `CandidateExtraction(rows: list[dict[str, Claim]], trace: dict[str, CascadeTrace], spec_version: int, run_key: str)` — frozen dataclass in `models.py`
   - `read(dom: str, resolved: Mapping[str, ResolvedElement], spec: TaskSpec, *, run_key: str, snapshot_id: str, traces: Mapping[str, CascadeTrace], observed_at: datetime) -> CandidateExtraction`
   - `locate(root, node_id) -> HtmlElement` · `row_of(el) -> HtmlElement` · `rel_path(row, el) -> RelPath` · `follow(row, path) -> HtmlElement | None`
   - `RowMisaligned(Exception)`
@@ -17610,24 +18149,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.extract
 
 - [ ] **Step 3: Implement the row model and the reader**
 
-```python
-# selector_drift/extract/models.py
-from __future__ import annotations
-
-from dataclasses import dataclass
-
-from bok_core.provenance import Claim
-
-from selector_drift.resolve.trace import CascadeTrace
-
-
-@dataclass(frozen=True)
-class CandidateExtraction:
-    rows: list[dict[str, Claim]]      # type: ignore[type-arg]  -- bare Claim, contract §2.1
-    trace: dict[str, CascadeTrace]
-    spec_version: int
-    run_key: str
-```
+`selector_drift/extract/models.py` already exists from Task 20 (`CandidateExtraction(rows, trace:
+dict[str, CascadeTrace], spec_version, run_key)`); the reader below returns exactly that type and
+this step does not touch the file (2026-09-26: an identical second copy of the class stood here).
 
 ```python
 # selector_drift/extract/rows.py
@@ -17760,14 +18284,34 @@ git commit -m "feat(extract): row model and deterministic Claims with DomSource 
 - Create: `tests/suite/test_mutation_heals.py`, `tests/suite/test_adversarial_refused.py`
 
 **Interfaces:**
-- Consumes: every rung, `gate`, `replay`, all nine mutations. Imports `testbench.answers.key` — **permitted in tests, forbidden in `selector_drift/`.**
-- Produces: the regression suite the resolver is measured against for the rest of the project.
+- Consumes: every rung, `gate_run`, `HealContext` (Task 20), `checks_for(..., warmup_runs, first_heal_policy)` (Task 25), `replay`, `NotReproducible` (Task 19), `read`, `RowMisaligned` (Task 27), `StaticPageSource` (Task 13), `render_results` (**`testbench.portal.render`**, Task 7), all **fifteen** mutations — eight benign, seven adversarial (Tasks 9–11A). Imports `testbench.answers.key` — **permitted in tests, forbidden in `selector_drift/`.**
+- Produces: the regression suite the resolver is measured against for the rest of the project; in `tests/suite/conftest.py`: `SPEC`, `CLAIM_NUMBER`, `AMOUNT`, `RUN_KEY`, `ALL_BENIGN_MUTATION_CLASSES`, `ALL_ADVERSARIAL_MUTATION_CLASSES`, `all_checks(field)`, `extract(...)`, `judge_run(ev, *, history, cache)`, and the fixtures `warm_cache`, `bench_evidence`, `truth`, `decoy_evidence`, `history` — Task 26B imports them from here and redefines none.
 
 **Amended 2026-09-26 — the suite's names, defined once.** The first draft called five names nothing
 defined — `extract`, `ALL_SIX_CHECKS`, `warm_cache()`, `bench_evidence`, `history` — and `extract` was
 built by a task that ran *after* this one. There are **seven** checks per field, not six:
 `RowKeyContinuity` joined in Task 22. `test_no_adversarial_mutation_ever_writes` moves to Task 26A: it
 reads `rows_written_for(...)`, which only the assembled pipeline produces.
+
+**Reconciled 2026-09-26 against Tasks 7, 20, 22 and 25.** `render_results` is imported from
+`testbench.portal.render` (it never lived in `portal.data`); the spec is loaded from a `Path`;
+`all_checks` passes the bench's `first_heal_policy=AUTO_PROMOTE` (Task 25 made it required — without
+it every first heal quarantines and Task 26B cannot pass); `ALL_BENIGN_MUTATION_CLASSES` is defined
+here, where the heal suite first uses it; and every judgement uses the **real** context —
+`healed=trace.healed` and `page=StaticPageSource(dom)` — because with `page=None`
+`IndependentRungAgreement` has nothing to re-resolve and can only answer `INSUFFICIENT`, and a forced
+`healed=True` hid the steady-state path `ValueSwap` actually takes.
+
+**The adversarial suite asserts one invariant, not a refusal per class (decided 2026-09-26).** *No
+wrong value is ever written:* for every adversarial class, the run is a `QuarantinedRun` (or cannot
+be judged at all — a field escalated), **or** every field resolved to a node in the answer key. A
+resolver that is not fooled is as good as a gate that refuses; demanding a particular refusal from
+a class the resolver already defeats tested a coincidence. Class-specific assertions remain only
+where the outcome is deterministic: `ValueSwap` is quarantined by `RowKeyContinuity`'s steady-state
+collapse floor (Task 22); `LocaleFlip` by a `FormatAssertion` / `DomainAssertion` `FAIL`; and a
+`DecoyColumn` heal that lands off the true column must be refused by `IndependentRungAgreement` or
+`RowKeyContinuity`. `VirtualisedRows` is not a resolver attack at all — the row-count contract
+(Task 29) and Task 26A's e2e bench test cover it.
 
 - [ ] **Step 0: Write the suite fixtures**
 
@@ -17778,39 +18322,49 @@ from __future__ import annotations
 import datetime as dt
 import random
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 import pytest
 from bok_core.boundary.sensitivity import Sensitivity
 
 from selector_drift.extract.models import CandidateExtraction
-from selector_drift.extract.reader import read
+from selector_drift.extract.reader import RowMisaligned, read
 from selector_drift.heallog.capture import Evidence
-from selector_drift.resolve.cache import CachedSelector
+from selector_drift.heallog.replay import NotReproducible, replay
+from selector_drift.resolve.cache import CachedSelector, CacheReader
 from selector_drift.resolve.cascade import resolve_cascade
 from selector_drift.resolve.page import StaticPageSource
 from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
 from selector_drift.resolve.rungs.r3_anchors import AnchorRung
 from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
-from selector_drift.resolve.trace import ResolvedElement
+from selector_drift.resolve.trace import CascadeTrace, ResolvedElement
+from selector_drift.scope.record import FirstHealPolicy
 from selector_drift.spec.loader import load_spec
 from selector_drift.spec.schema import FieldTarget
 from selector_drift.validate.assertions.base import Assertion
 from selector_drift.validate.checks import checks_for
+from selector_drift.validate.gate import HealContext, ValidatedExtraction, gate_run
 from selector_drift.validate.history import AcceptedRun, History
+from selector_drift.validate.quarantine import QuarantinedRun
 from testbench.mutations.base import apply_all
 from testbench.mutations.catalogue import CATALOGUE
-from testbench.portal.data import render_results
+from testbench.portal.render import render_results       # Task 7: render.py, not data.py
 
-SPEC = load_spec("specs/testbench.yaml")                 # version 2 (Task 12): six fields
+SPEC = load_spec(Path("specs/testbench.yaml"))           # version 2 (Task 12): six fields
 CLAIM_NUMBER = next(t for t in SPEC.targets if t.name == "claim_number")
 AMOUNT = next(t for t in SPEC.targets if t.name == "amount")
 BASE_DAY = dt.date(2026, 10, 1)        # fixed: the suite must not depend on the clock (M20)
 AT = dt.datetime(2026, 10, 1, 4, 12, tzinfo=dt.UTC)
+RUN_KEY = f"testbench:2:{BASE_DAY}"
 CONFIRMERS = [AxTreeRung(), AnchorRung(), HeuristicRung()]
+ALL_BENIGN_MUTATION_CLASSES = [e for e in CATALOGUE if not e.adversarial]          # 8
+ALL_ADVERSARIAL_MUTATION_CLASSES = [e for e in CATALOGUE if e.adversarial]         # 7
 
 
 def all_checks(field: FieldTarget) -> list[Assertion]:
-    return checks_for(SPEC, field, CONFIRMERS, warmup_runs=5)      # the bench warms up in 5
+    # The bench's scope record: warm-up 5, first_heal_policy auto_promote (Task 5).
+    return checks_for(SPEC, field, CONFIRMERS, warmup_runs=5,
+                      first_heal_policy=FirstHealPolicy.AUTO_PROMOTE)
 
 
 class _EmptyCache:
@@ -17819,7 +18373,7 @@ class _EmptyCache:
 
 
 class _DictCache:
-    """Read-only per-field cache satisfying CacheReader (Task 19)."""
+    """Read-only per-field cache satisfying CacheReader (Task 13)."""
     def __init__(self, entries: Mapping[str, CachedSelector]) -> None:
         self._entries = dict(entries)
 
@@ -17834,12 +18388,39 @@ def _resolve_all(html: str) -> dict[str, ResolvedElement]:
 
 
 def extract(el: ResolvedElement, field: str, *, dom: str,
-            run_key: str = f"testbench:2:{BASE_DAY}") -> CandidateExtraction:
+            run_key: str = RUN_KEY) -> CandidateExtraction:
     """One field's (possibly healed) element over the mutated page; the other fields resolve
     cleanly on the same page."""
     resolved = _resolve_all(dom) | {field: el}
     return read(dom, resolved, SPEC, run_key=run_key, snapshot_id="0" * 64,
                 traces={}, observed_at=AT)
+
+
+def judge_run(ev: Evidence, *, history: History | None, cache: CacheReader
+              ) -> tuple[dict[str, ResolvedElement], ValidatedExtraction | QuarantinedRun | None]:
+    """The pipeline's decision core without its I/O (Task 26A): every field replayed against
+    the cache on the stored DOM, extracted, and judged by gate_run with the REAL contexts --
+    healed from the trace, page = a StaticPageSource over the same DOM. None: a field did not
+    resolve or the fields do not share rows, so the run cannot write anything at all."""
+    page = StaticPageSource(ev.dom.value)
+    elements: dict[str, ResolvedElement] = {}
+    traces: dict[str, CascadeTrace] = {}
+    contexts: dict[str, HealContext] = {}
+    for t in SPEC.targets:
+        try:
+            el, trace = replay(ev, t, cache)
+        except NotReproducible:
+            return elements, None
+        elements[t.name], traces[t.name] = el, trace
+        contexts[t.name] = HealContext(healed=trace.healed, winning_rung=trace.winner or 5,
+                                       page=page, target=t, cache=cache)
+    try:
+        candidate = read(ev.dom.value, elements, SPEC, run_key=RUN_KEY, snapshot_id=ev.sha256,
+                         traces=traces, observed_at=AT)
+    except RowMisaligned:
+        return elements, None
+    return elements, gate_run(candidate, history, contexts,
+                              {t.name: all_checks(t) for t in SPEC.targets})
 
 
 @pytest.fixture
@@ -17872,7 +18453,7 @@ def _pages(name: str) -> tuple[str, str]:
 def bench_evidence() -> dict[str, Evidence]:
     """One page per mutation class, each with exactly that ONE class applied to BASE_DAY's
     page, so a failure names the class that caused it."""
-    return {e.name: Evidence.from_static(_pages(e.name)[0], run_key=f"testbench:2:{BASE_DAY}",
+    return {e.name: Evidence.from_static(_pages(e.name)[0], run_key=RUN_KEY,
                                          sensitivity=Sensitivity.SYNTHETIC, captured_at=AT)
             for e in CATALOGUE}
 
@@ -17943,50 +18524,64 @@ def test_every_mutation_class_heals_to_the_right_element(m, field, bench_evidenc
 # tests/suite/test_adversarial_refused.py
 import pytest
 
-from selector_drift.heallog.replay import replay
-from selector_drift.validate.gate import HealContext, gate
 from selector_drift.validate.quarantine import QuarantinedRun
 from selector_drift.validate.verdict import Outcome
-from tests.suite.conftest import AMOUNT, CLAIM_NUMBER, all_checks, extract
+from tests.suite.conftest import ALL_ADVERSARIAL_MUTATION_CLASSES, judge_run
+
+RESOLVER_ATTACKS = [e for e in ALL_ADVERSARIAL_MUTATION_CLASSES if e.name != "VirtualisedRows"]
 
 
-@pytest.mark.unit
-def test_decoy_column_is_refused_by_the_gate(decoy_evidence, warm_cache):
-    """The plausible-but-wrong heal. Every value looks valid. Cross-family disagreement
-    catches it, and it must catch it on run one with no history."""
-    el, trace = replay(decoy_evidence, AMOUNT, warm_cache())
-    ctx = HealContext(healed=True, winning_rung=trace.winner, page=None, target=AMOUNT,
-                      cache=warm_cache())
-    result = gate(extract(el, "amount", dom=decoy_evidence.dom.value), None, ctx,
-                  all_checks(AMOUNT))
-    assert isinstance(result, QuarantinedRun)
-    assert any(v.check == "IndependentRungAgreement" and v.outcome is Outcome.FAIL
+def _failed(result, field: str, checks: set[str]) -> bool:
+    return any(v.field == field and v.check in checks and v.outcome is Outcome.FAIL
                for v in result.verdicts)
 
 
-ADVERSARIAL_REFUSALS = [          # (class, field, the verdict that must refuse it) -- Task 11A table
-    ("HiddenDecoy", CLAIM_NUMBER, "IndependentRungAgreement"),
-    ("DuplicateLabel", CLAIM_NUMBER, "IndependentRungAgreement"),
-    ("ValueSwap", AMOUNT, "RowKeyContinuity"),
-    ("LocaleFlip", AMOUNT, "DomainAssertion"),
-    ("ImageHeader", AMOUNT, "IndependentRungAgreement"),
-]
+@pytest.mark.unit
+@pytest.mark.parametrize("m", RESOLVER_ATTACKS, ids=lambda m: m.name)
+def test_no_adversarial_class_ever_writes_a_wrong_value(m, bench_evidence, truth, history,
+                                                        warm_cache):
+    """THE invariant (2026-09-26): quarantined, or every field on a true node. Checked both on
+    run one (no history) and on a warmed-up target."""
+    for hist in (None, history):
+        elements, result = judge_run(bench_evidence[m.name], history=hist, cache=warm_cache())
+        wrong = sorted(f for f, el in elements.items() if el.node_id not in truth[m.name][f])
+        written = result is not None and not isinstance(result, QuarantinedRun)
+        assert not (written and wrong), (
+            f"{m.name} (history={'yes' if hist else 'none'}) would write {wrong} "
+            "from cells outside the answer key")
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(("name", "field", "check"), ADVERSARIAL_REFUSALS, ids=lambda x: str(x))
-def test_every_adversarial_class_is_refused_by_its_named_verdict(name, field, check,
-                                                                 bench_evidence, history,
-                                                                 warm_cache):
-    # Moved here from Task 11A (2026-09-26): gate() exists only from Task 20-25.
-    # VirtualisedRows is absent on purpose: the row-count contract (Task 29) catches it.
-    ev = bench_evidence[name]
-    el, trace = replay(ev, field, warm_cache())
-    ctx = HealContext(healed=True, winning_rung=trace.winner, page=None, target=field,
-                      cache=warm_cache())
-    result = gate(extract(el, field.name, dom=ev.dom.value), history, ctx, all_checks(field))
+def test_value_swap_is_refused_on_a_cache_hit_by_the_collapse_floor(bench_evidence, history,
+                                                                    warm_cache):
+    """Markup untouched, so rung 1 hits and nothing heals (the realistic context). Only
+    RowKeyContinuity's steady-state collapse floor (Task 22, ledger #32) can see it."""
+    _, result = judge_run(bench_evidence["ValueSwap"], history=history, cache=warm_cache())
     assert isinstance(result, QuarantinedRun)
-    assert any(v.check == check and v.outcome is not Outcome.PASS for v in result.verdicts),         f"{name} was quarantined, but not by {check} -- a refusal for the wrong reason is a coincidence"
+    assert _failed(result, "amount", {"RowKeyContinuity"})
+
+
+@pytest.mark.unit
+def test_locale_flip_is_refused_by_the_format_or_domain_check(bench_evidence, history,
+                                                            warm_cache):
+    """A FAIL quarantines whether or not a heal happened (design 5.7)."""
+    _, result = judge_run(bench_evidence["LocaleFlip"], history=history, cache=warm_cache())
+    assert isinstance(result, QuarantinedRun)
+    assert _failed(result, "amount", {"FormatAssertion", "DomainAssertion"})
+
+
+@pytest.mark.unit
+def test_a_decoy_heal_off_the_true_column_is_refused_by_a_confirmer(decoy_evidence, truth,
+                                                                   history, warm_cache):
+    """The plausible-but-wrong heal. If the resolver lands on the decoy, a confirming family
+    must say so -- on run one with no history (the DOM split) and with history (the values)."""
+    for hist in (None, history):
+        elements, result = judge_run(decoy_evidence, history=hist, cache=warm_cache())
+        el = elements.get("amount")
+        if el is None or el.node_id in truth["DecoyColumn"]["amount"]:
+            continue                        # not fooled: the invariant above already holds
+        assert isinstance(result, QuarantinedRun)
+        assert _failed(result, "amount", {"IndependentRungAgreement", "RowKeyContinuity"})
 ```
 
 `test_no_adversarial_mutation_ever_writes` is in Task 26A (`tests/orchestrate/test_pipeline_end_to_end.py`),
@@ -18028,9 +18623,9 @@ git commit -m "test: mutation heal suite and adversarial refusal suite"
 ### Task 28: The landing zone, idempotent under replay
 
 **Files:**
-- Create: `selector_drift/config.py` — **moved forward from Task 33 Step 3, verbatim.** This task is its first consumer in execution order (Task 26A Part 1, Task 31's registry and Task 26A's `history.py` all import `get_settings`). Task 33 then skips its Step 3 and its "`ModuleNotFoundError: selector_drift.config`" expectation.
+- Exists (Task 5): `selector_drift/config.py` — **no change here.** An earlier revision had this task create a verbatim copy of a `Settings` class (decided 2026-09-26: Task 5 owns the one definition, and it already carries `lake_root` and every other field this task reads). `.env.example` already names `SD_LAKE_ROOT`.
 - Create: `selector_drift/land/layout.py`, `selector_drift/land/writer.py`, `selector_drift/land/catalog.py`, `selector_drift/land/compact.py`
-- Modify: `pyproject.toml` (one dependency, one mypy override), `.env.example`
+- Modify: `pyproject.toml` (one dependency, one mypy override)
 - Test: `tests/land/__init__.py` (empty), `tests/land/factory.py`, `tests/land/conftest.py`, `tests/land/test_idempotency.py`, `tests/land/test_compaction.py`
 
 **Interfaces:**
@@ -18082,7 +18677,7 @@ start with `_sd_`; `write()` refuses them.
 two rows into one. The error names the row index, never the value — the value is client data and
 this message reaches `runs.error` and the logs (brief rule 6).
 
-- [ ] **Step 0: Dependencies, config, and the mypy override**
+- [ ] **Step 0: Dependencies and the mypy override** (config is Task 5's, unchanged)
 
 ```bash
 uv add python-ulid
@@ -18097,14 +18692,9 @@ module = ["pyarrow", "pyarrow.*"]
 ignore_missing_imports = true
 ```
 
-Create `selector_drift/config.py` with **exactly** the code in Task 33 Step 3 (`ConfigError`,
-`Settings`, `get_settings`), and append to `.env.example`:
-
-```bash
-SD_LAKE_ROOT=/data/lake
-SD_SPEC_DIR=specs
-SD_SCOPE_DIR=scopes
-```
+`selector_drift/config.py` is **not** created or edited here (2026-09-26): Task 5's `Settings` is the
+one definition and already has `lake_root`, `spec_dir` and `scope_dir`; `.env.example` already names
+`SD_LAKE_ROOT`, `SD_SPEC_DIR` and `SD_SCOPE_DIR`, so nothing is appended.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -18267,6 +18857,19 @@ def test_write_rejects_an_unvalidated_candidate(candidate):
     # The gate is the only way into the lake: a CandidateExtraction is refused before any I/O.
     with pytest.raises(TypeError, match="ValidatedExtraction"):
         write(candidate)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_a_quarantined_run_never_reaches_the_lake(candidate):
+    """Moved here from Task 25 (it needs land.write, which this task creates): a QuarantinedRun
+    is refused by type before any I/O, exactly like a raw candidate."""
+    from selector_drift.validate.gate import QuarantinedRun
+    from selector_drift.validate.verdict import Outcome, Verdict
+    refused = QuarantinedRun(run_key=candidate.run_key, reason="test refusal",
+                             verdicts=(Verdict(check="T", outcome=Outcome.FAIL, threshold="x",
+                                               observed="y", reason="r"),))
+    with pytest.raises(TypeError, match="ValidatedExtraction"):
+        write(refused)  # type: ignore[arg-type]
 
 
 @pytest.mark.unit
@@ -18505,8 +19108,7 @@ def test_a_compaction_already_running_is_not_doubled(lake_dir):
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `uv run pytest tests/land -v -m "unit or integration"`
-Expected: FAIL at collection — `ModuleNotFoundError: No module named 'selector_drift.land.writer'`
-(or `'selector_drift.config'` if Step 0's move was skipped).
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'selector_drift.land.writer'`.
 
 - [ ] **Step 3: Implement the layout, the writer, the catalog and compaction**
 
@@ -18878,14 +19480,14 @@ def compact(target: str) -> None:
 - [ ] **Step 4: Run them and make sure they pass**
 
 Run: `uv run pytest tests/land -v -m "unit or integration" && uv run mypy --strict selector_drift/land selector_drift/config.py && uv run lint-imports`
-Expected: PASS, 21 tests (12 in `test_idempotency.py`, 9 in `test_compaction.py`). mypy clean.
+Expected: PASS, 22 tests (13 in `test_idempotency.py`, 9 in `test_compaction.py`). mypy clean.
 `lint-imports` still reports every contract kept — `land` imports `validate` (for the type) and
 `spec`, never `resolve`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add selector_drift/config.py selector_drift/land tests/land pyproject.toml uv.lock .env.example
+git add selector_drift/land tests/land pyproject.toml uv.lock
 git commit -m "feat(land): append-only Parquet lake, dedup view and atomic compaction (M6, L7, P4)"
 ```
 
@@ -18899,11 +19501,23 @@ git commit -m "feat(land): append-only Parquet lake, dedup view and atomic compa
 - Test: `tests/quality/__init__.py` (empty), `tests/quality/conftest.py`, `tests/quality/test_contracts.py`
 
 **Interfaces:**
-- Consumes: `query`, `run_columns` (Task 28); `split_run_key`, `is_data_column`, `PROVENANCE_COL` (Task 28 `land.layout`); `load_spec`, `load_scope` (Task 5); `FindingRow`, `AuditLog` (Task 3); `Finding`, `Severity`, `to_sarif` (`bok_core.findings`); `Claim`, `DomSource`, `Method` (`bok_core.provenance`); `get_settings` (Task 28 Step 0).
+- Consumes: `query`, `run_columns` (Task 28); `split_run_key`, `is_data_column`, `PROVENANCE_COL` (Task 28 `land.layout`); `load_spec`, `load_scope`, `spec_file`, `scope_file` (Task 5); `FindingRow`, `AuditLog` (Task 3); `psi_of_values`, `PSI_BINS`, `PSI_EPSILON` (`validate/stats.py`, Task 23); `Finding`, `Severity`, `to_sarif` (`bok_core.findings`); `Claim`, `DomSource`, `Method` (`bok_core.provenance`); `get_settings` (Task 5).
 - Produces:
   - `evaluate(run_key: str) -> list[Finding]` — rules `row_count`, `null_rate`, `schema_drift` (against `spec.expected_schema`), `distribution_shift`; **persists every finding** to `findings` as `FindingRow(id=f"{finding.id}@{run_key}", run_key, severity, rule, payload=finding.model_dump(mode="json"), at)`, replacing that run's earlier rows, so re-evaluating a replayed run is idempotent
-  - `psi(reference: Sequence[str], observed: Sequence[str], *, bins: int = 10, epsilon: float = 1e-6) -> float`
+  - **No `psi` of its own (2026-09-26):** the statistic is Task 23's `validate.stats.psi_of_values`, the same function `DistributionalAssertion.assess()` calls; this task's first draft had a second PSI with different bin edges
   - Thresholds, each with its reason as a module constant: `ROW_COUNT_RATIO = 0.5`, `NULL_RATE_FLOOR = 0.05`, `PSI_THRESHOLD = 0.20`, `PERSISTENCE = 2`, `REFERENCE_WINDOWS = 30`
+
+**Every breach is a finding; only a persisted one pages (ledger 2026-09-26).** `history_for()`
+(Task 26A) reads `distribution_shift` rows as `AcceptedRun.shift_alerts`, and `DistributionalAssertion`
+counts `prior_breaches` from them. So `shift_alerts` means **breaches**: a finding is written on every
+run whose PSI exceeds the threshold — `MEDIUM` for a first breach — and only a breach that persisted
+(the previous landed run breached the same field, unmarked) is `HIGH`, which is what Task 29A's
+`notify()` pages on. Writing a row only when an alert fired would leave persistence 2 unreachable.
+
+**The row-count rule and `VirtualisedRows` (2026-09-26).** `Evidence.from_static` over the *served*
+HTML keeps all 50 rows, so a unit test cannot reproduce the 10-row browser DOM. This task's
+row-count test lands a candidate of 10 rows directly (`rows(40)` / `rows(10)` above the median);
+the real case — the browser's post-script DOM feeding the extractor — is Task 26A's e2e bench test.
 
 **Use the contract's real field names (H8/3, M7).** `INTERFACE-CONTRACT.md` §4 defines
 `Finding(id, severity, title, claim, taxonomy_refs, logical_location, partial_fingerprints,
@@ -18982,7 +19596,6 @@ def land(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Lander]:
 ```python
 # tests/quality/test_contracts.py
 import datetime as dt
-import math
 
 import pytest
 from bok_core.findings import Finding, Severity, to_sarif
@@ -18990,7 +19603,7 @@ from bok_core.provenance import DomSource, Method
 
 from selector_drift.db.models import AuditLog, FindingRow
 from selector_drift.db.session import Session
-from selector_drift.quality.contracts import PSI_THRESHOLD, evaluate, psi
+from selector_drift.quality.contracts import PSI_THRESHOLD, evaluate
 from tests.land.factory import SNAPSHOT, rows
 from tests.quality.conftest import BASE
 
@@ -19160,24 +19773,21 @@ def test_findings_export_through_the_shared_sarif_emitter(land):
     assert all("bok_provenance" in r["properties"] for r in results)
 
 
-@pytest.mark.unit
-def test_psi_of_a_distribution_against_itself_is_zero():
-    values = [f"{100 + 7.5 * i:,.2f}" for i in range(100)]
-    assert psi(values * 6, values) == pytest.approx(0.0, abs=1e-9)
-
-
-@pytest.mark.unit
-def test_psi_is_finite_when_a_bin_is_empty():
-    # M16: without epsilon, log(0) makes PSI infinite and every run a breach.
-    reference = [str(i) for i in range(100)]
-    assert math.isfinite(psi(reference, ["5000"] * 10))
-
-
-@pytest.mark.unit
-def test_psi_falls_back_to_category_proportions_for_text():
-    assert psi(["Open", "Paid"] * 50, ["Open", "Paid"] * 50) == pytest.approx(0.0, abs=1e-9)
-    assert psi(["Open", "Paid"] * 50, ["Closed"] * 100) > PSI_THRESHOLD
+@pytest.mark.integration
+def test_the_quality_psi_is_the_gates_psi(land):
+    """Ledger 2026-09-26: one statistic. The finding's observed PSI is psi_of_values over the
+    same reference and current values the gate's DistributionalAssertion would read."""
+    from selector_drift.validate.stats import psi_of_values
+    _history(land, 6)
+    key = land(DAY, rows(scale=3.0))
+    f = next(f for f in evaluate(key) if f.properties["rule"] == "distribution_shift")
+    ref = [r["amount"] for i in range(6) for r in rows()]
+    cur = [r["amount"] for r in rows(scale=3.0)]
+    assert float(f.properties["observed"]) == pytest.approx(psi_of_values(ref, cur)[0], abs=1e-4)
 ```
+
+The PSI unit tests this task's first draft carried moved to Task 23's `tests/validate/test_stats.py`
+with the statistic.
 
 Add `"bok_core.findings"` to `ALLOWED` in `tests/test_bok_core_allowlist.py`:
 
@@ -19210,18 +19820,17 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
-import numpy as np
 from bok_core.findings import Finding, Severity
 from bok_core.provenance import Claim, DomSource, Method
 from sqlalchemy import delete, select
 
-from selector_drift.config import get_settings
 from selector_drift.db.models import AuditLog, FindingRow
 from selector_drift.db.session import Session
 from selector_drift.land.catalog import query, run_columns
 from selector_drift.land.layout import PROVENANCE_COL, is_data_column, split_run_key
-from selector_drift.spec.loader import load_scope, load_spec
+from selector_drift.spec.loader import load_scope, load_spec, scope_file, spec_file
 from selector_drift.spec.schema import TaskSpec
+from selector_drift.validate.stats import PSI_BINS, PSI_EPSILON, psi_of_values
 
 ROW_COUNT_RATIO: Final = 0.5
 ROW_COUNT_MIN_WINDOWS: Final = 3
@@ -19238,8 +19847,6 @@ SCHEMA_REASON: Final = (
     "the spec's expected_schema is the contract the client signed off; a column that appears, "
     "disappears or changes type is how a UI change the resolver survived still changes what lands")
 PSI_THRESHOLD: Final = 0.20            # the same statistic as DistributionalAssertion (Task 23)
-PSI_BINS: Final = 10
-PSI_EPSILON: Final = 1e-6
 REFERENCE_WINDOWS: Final = 30
 PERSISTENCE: Final = 2
 PSI_REASON: Final = (
@@ -19261,39 +19868,8 @@ class _Run:
 
 
 # ------------------------------------------------------------------ the statistic
-
-
-def _numeric(values: Sequence[str]) -> list[float] | None:
-    out: list[float] = []
-    for v in values:
-        try:
-            d = Decimal(str(v).replace(",", ""))
-        except InvalidOperation:
-            return None
-        if not d.is_finite():
-            return None
-        out.append(float(d))
-    return out
-
-
-def psi(reference: Sequence[str], observed: Sequence[str], *, bins: int = PSI_BINS,
-        epsilon: float = PSI_EPSILON) -> float:
-    """Population stability index. Numeric: quantile bins fixed from the reference. Anything
-    that does not parse as a number: category proportions (Task 23's table, M16)."""
-    ref_n, obs_n = _numeric(reference), _numeric(observed)
-    if ref_n is not None and obs_n is not None:
-        edges = np.unique(np.quantile(np.asarray(ref_n), np.linspace(0.0, 1.0, bins + 1)))
-        inner = edges[1:-1]
-        size = len(inner) + 1
-        e = np.bincount(np.searchsorted(inner, ref_n, side="right"), minlength=size) / len(ref_n)
-        a = np.bincount(np.searchsorted(inner, obs_n, side="right"), minlength=size) / len(obs_n)
-    else:
-        ref_c, obs_c = Counter(map(str, reference)), Counter(map(str, observed))
-        cats = sorted(set(ref_c) | set(obs_c))
-        e = np.array([ref_c[c] for c in cats], dtype=float) / len(reference)
-        a = np.array([obs_c[c] for c in cats], dtype=float) / len(observed)
-    e, a = e + epsilon, a + epsilon
-    return float(np.sum((a - e) * np.log(a / e)))
+# There is none here: validate.stats.psi_of_values (Task 23) is the one PSI, shared with the
+# gate's DistributionalAssertion, so a heal-log line and a quality row cannot disagree.
 
 
 # ------------------------------------------------------------------ claims
@@ -19448,9 +20024,12 @@ def _distribution_shift(run: _Run) -> list[Finding]:
         observed = [str(r[t.name]) for r in run.rows if not _is_null(r.get(t.name))]
         if not observed:
             continue                                     # null_rate speaks for an empty field
-        value = psi([str(r[t.name]) for r in ref_rows], observed)
+        value, _categorical = psi_of_values([str(r[t.name]) for r in ref_rows], observed,
+                                            bins=PSI_BINS, epsilon=PSI_EPSILON)
         if value <= PSI_THRESHOLD:
             continue
+        # A finding on EVERY breach (MEDIUM); HIGH -- what notify() pages -- only when it
+        # persisted. history_for() reads these rows as shift_alerts = breaches (ledger 2026-09-26).
         persisted = _previous_breach(run, t.name)
         out.append(_finding(
             run, rule="distribution_shift", field=t.name,
@@ -19478,9 +20057,8 @@ def _persist(run_key: str, findings: list[Finding]) -> None:
 
 def evaluate(run_key: str) -> list[Finding]:
     target, _version, window = split_run_key(run_key)
-    settings = get_settings()
-    spec = load_spec(settings.spec_dir / f"{target}.yaml")
-    scope = load_scope(settings.scope_dir / f"{target}.yaml")
+    spec = load_spec(spec_file(f"{target}.yaml"))            # Task 5's resolvers, one rule
+    scope = load_scope(scope_file(spec.scope_ref))
     current = query("select * from lake where run_key = ?", [run_key], target=target).dicts()
     history = query(
         'select * from lake where "window" in (select distinct "window" from lake '
@@ -19497,8 +20075,8 @@ def evaluate(run_key: str) -> list[Finding]:
 - [ ] **Step 4: Run them and make sure they pass**
 
 Run: `uv run pytest tests/quality/test_contracts.py tests/test_bok_core_allowlist.py -v -m "unit or integration" && uv run mypy --strict selector_drift/quality`
-Expected: PASS, 19 tests in `test_contracts.py` (16 integration, 3 unit) plus the allow-list
-test. mypy clean.
+Expected: PASS, 17 tests in `test_contracts.py` (all integration; the three PSI unit tests moved to
+Task 23) plus the allow-list test. mypy clean.
 
 - [ ] **Step 5: Commit**
 
@@ -19516,7 +20094,7 @@ git commit -m "feat(quality): data-quality contracts as persisted, provenance-ca
 - Test: `tests/land/test_changeset.py`
 
 **Interfaces:**
-- Consumes: `query` (Task 28), `split_run_key`, `fs_key` (Task 28 `land.layout`), `load_spec` (Task 5), `get_settings` (Task 28 Step 0).
+- Consumes: `query` (Task 28), `split_run_key`, `fs_key` (Task 28 `land.layout`), `load_spec` (Task 5), `get_settings` (Task 5).
 - Produces: `changeset(run_key: str, prior: Path, fmt: Literal["csv", "json"], *, out_dir: Path | None = None) -> Path` — one line per `(natural key, field)` of the run's landed rows, diffed against a client-supplied prior snapshot (`.csv` or `.json`, keyed by the spec's `natural_key`). Columns: the natural-key fields, `field`, `prior_value`, `new_value`, `action` (`add`/`change`/`unchanged`), `accept` (always `false`). Written atomically to `out_dir` (default `<lake_root>/../changesets/`) as `{fs_key(run_key)}.{fmt}`. **No connectors. We never hold write credentials** (brief rule 7).
 
 **Why a file and never a connector.** A wrong write into a system of record is unrecoverable in a way a
@@ -19801,14 +20379,14 @@ git commit -m "feat(land): reviewable change-set export, no network, formula-saf
 ### Task 29A: Alerting, the intervention ledger, and deploy history — R17 (M1, M2, M10)
 
 **Files:**
-- Create: `selector_drift/quality/alerts.py`, `selector_drift/orchestrate/interventions.py`, `selector_drift/orchestrate/deploys.py`, `selector_drift/orchestrate/watch.py`, `deploys.yaml`
-- Modify: `selector_drift/orchestrate/pipeline.py` (Task 26A), `selector_drift/orchestrate/quarantine_actions.py` (Task 26A Part 2), `selector_drift/orchestrate/deployments.py` (Task 6), `pyproject.toml`, `.env.example`
+- Create: `selector_drift/orchestrate/interventions.py`, `selector_drift/orchestrate/deploys.py`, `selector_drift/orchestrate/watch.py`, `deploys.yaml`
+- Modify: `selector_drift/quality/alerts.py` (Task 6 — `notify()` and the dedup layer are built on its `webhook_url()`; ledger 2026-09-26: this task used to *create* the file a second time), `selector_drift/orchestrate/deployments.py` (Task 6), `pyproject.toml`, `.env.example`
 - Test: `tests/quality/test_alerts.py`, `tests/orchestrate/test_interventions.py`, `tests/orchestrate/test_deploys.py`
 
 **Interfaces:**
-- Consumes: `Finding`, `Severity` (`bok_core.findings`); `evaluate` (Task 29); the `audit_log`, `heartbeats`, `interventions`, `deploys`, `runs`, `heal_events` tables (Task 3); `load_spec`, `TaskSpec` (Task 5); `get_settings` (Task 28 Step 0); Task 26C's `audit_log(action="scored", detail={"judgement": ...})` rows.
+- Consumes: `Finding`, `Severity` (`bok_core.findings`); `evaluate` (Task 29); the `audit_log`, `heartbeats`, `interventions`, `deploys`, `runs`, `heal_events` tables (Task 3); `load_spec`, `TaskSpec` (Task 5); `get_settings` (Task 5); Task 26C's `audit_log(action="scored", detail={"judgement": ...})` rows.
 - Produces:
-  - `quality.alerts`: `notify(findings: Sequence[Finding], run: Run, *, now: datetime | None = None) -> None` — fires on a quarantined run and on every `HIGH`+ finding; `notify_false_accepts(*, now=None) -> None` — fires at `HIGH` on any `scored` `audit_log` row whose `detail->>'judgement' = 'false_accept'`; `notify_missed_heartbeats(*, now=None) -> None` — fires at `HIGH` when a target's latest cron slot has no heartbeat; `check_alert_channel() -> bool`. One webhook, URL from `SD_ALERT_WEBHOOK` (optional; absent ⇒ logged, never sent), deduplicated per `(target, rule)` per UTC day through `audit_log(action="alert_sent", subject="<target>:<rule>:<day>")`
+  - `quality.alerts`: `notify(findings: Sequence[Finding], run: Run, *, now: datetime | None = None) -> None` — fires on a quarantined run and on every `HIGH`+ finding; `notify_false_accepts(*, now=None) -> None` — fires at `HIGH` on any `scored` `audit_log` row whose `detail->>'judgement' = 'false_accept'`; `notify_missed_heartbeats(*, now=None) -> None` — fires at `HIGH` when a target's latest cron slot has no heartbeat; `check_alert_channel() -> bool`. One webhook, URL from `Settings.alert_webhook_url` (`SD_ALERT_WEBHOOK_URL`, Task 5 — the same one Task 6's `post_alert()` uses; optional; absent ⇒ logged, never sent), deduplicated per `(target, rule)` per UTC day through `audit_log(action="alert_sent", subject="<target>:<rule>:<day>")`
   - `orchestrate.interventions`: `record_intervention(kind, actor, target, field, before, after, reason, *, at=None) -> int`; `observe_spec(target: str, spec: TaskSpec, *, actor: str = "system:spec_loader", now=None) -> list[int]`; `spec_changes(old: TaskSpec, new: TaskSpec) -> list[tuple[str, dict[str, Any], dict[str, Any]]]`; `record_cache_edit(actor, target, field, before, after, reason) -> int`
   - `orchestrate.deploys`: `DeployRecord`, `DeployFeed` protocol, `SelfHostLog(path)`, `GitHubDeployments(repo, environment="production", token=None)`, `feed_for(target) -> DeployFeed`, `ingest_deploys(target: str, *, feed: DeployFeed | None = None, now=None) -> int`, `preceding_deploy(heal: HealEvent) -> Deploy | None`
   - `orchestrate.watch`: `alert_watch()` — Prefect flow; `watch_deployment()` in `deployments.py`, cron `*/15 * * * *`
@@ -19899,7 +20477,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     specs.mkdir()
     (specs / "testbench.yaml").write_text(SPEC_YAML, encoding="utf-8")   # schedule 12 4 * * *
     monkeypatch.setenv("SD_SPEC_DIR", str(specs))
-    monkeypatch.setenv("SD_ALERT_WEBHOOK", WEBHOOK)
+    monkeypatch.setenv("SD_ALERT_WEBHOOK_URL", WEBHOOK)          # Settings.alert_webhook_url
     get_settings.cache_clear()
     with engine.begin() as c:
         c.execute(text("TRUNCATE audit_log, heartbeats, heal_events, runs "
@@ -19973,11 +20551,12 @@ def test_the_webhook_body_carries_no_extracted_value(httpx_mock):
 
 @pytest.mark.integration
 def test_a_missing_webhook_logs_and_sends_nothing(httpx_mock, monkeypatch, caplog):
-    monkeypatch.delenv("SD_ALERT_WEBHOOK")
+    monkeypatch.delenv("SD_ALERT_WEBHOOK_URL")
+    get_settings.cache_clear()
     with caplog.at_level(logging.WARNING, logger="selector_drift.quality.alerts"):
         notify([], _run("quarantined"), now=NOW)
     assert httpx_mock.get_requests() == []
-    assert "SD_ALERT_WEBHOOK" in caplog.text and "quarantine" in caplog.text
+    assert "SD_ALERT_WEBHOOK_URL" in caplog.text and "quarantine" in caplog.text
     assert _sent() == 0                                 # not delivered, so not "sent"
 
 
@@ -20005,8 +20584,9 @@ def test_a_false_accept_pages_at_high_once(httpx_mock):
     # Amended 2026-09-26: a wrong heal the gate let through (Task 26C).
     httpx_mock.add_response(url=WEBHOOK, method="POST")
     with Session() as s:
-        s.add(AuditLog(at=NOW, actor="testbench.score", action="scored", subject=KEY,
-                       detail={"judgement": "false_accept", "field": "amount"}))
+        # Task 26C's row shape: subject is the heal id, detail.run_key names the run.
+        s.add(AuditLog(at=NOW, actor="testbench.score", action="scored", subject="7",
+                       detail={"judgement": "false_accept", "field": "amount", "run_key": KEY}))
         s.commit()
     notify_false_accepts(now=NOW)
     notify_false_accepts(now=NOW + dt.timedelta(minutes=15))
@@ -20018,8 +20598,8 @@ def test_a_false_accept_pages_at_high_once(httpx_mock):
 @pytest.mark.integration
 def test_a_correct_judgement_does_not_page(httpx_mock):
     with Session() as s:
-        s.add(AuditLog(at=NOW, actor="testbench.score", action="scored", subject=KEY,
-                       detail={"judgement": "correct_refusal"}))
+        s.add(AuditLog(at=NOW, actor="testbench.score", action="scored", subject="7",
+                       detail={"judgement": "correct_refusal", "run_key": KEY}))
         s.commit()
     notify_false_accepts(now=NOW)
     assert httpx_mock.get_requests() == []
@@ -20057,7 +20637,8 @@ def test_a_target_whose_log_has_not_started_is_not_missed(httpx_mock):
 
 @pytest.mark.unit
 def test_an_unconfigured_channel_says_so(monkeypatch, caplog):
-    monkeypatch.delenv("SD_ALERT_WEBHOOK", raising=False)
+    monkeypatch.delenv("SD_ALERT_WEBHOOK_URL", raising=False)
+    get_settings.cache_clear()
     with caplog.at_level(logging.WARNING, logger="selector_drift.quality.alerts"):
         assert check_alert_channel() is False
     assert "LOGGED ONLY" in caplog.text
@@ -20306,26 +20887,28 @@ def test_a_target_with_no_declared_feed_is_refused(tmp_path, monkeypatch):
 - [ ] **Step 3: Run them and watch them fail**
 
 Run: `uv run pytest tests/quality/test_alerts.py tests/orchestrate/test_interventions.py tests/orchestrate/test_deploys.py -v -m "unit or integration"`
-Expected: FAIL at collection — `ModuleNotFoundError: No module named 'selector_drift.quality.alerts'`
-(and `...orchestrate.interventions`, `...orchestrate.deploys`).
+Expected: FAIL at collection — `ImportError: cannot import name 'check_alert_channel' from
+'selector_drift.quality.alerts'` (the module is Task 6's; the notify layer is not there yet), and
+`ModuleNotFoundError` for `...orchestrate.interventions` and `...orchestrate.deploys`.
 
 - [ ] **Step 4: Implement the alert channel**
 
-```python
-# selector_drift/quality/alerts.py
-"""One alert channel (M2). A webhook, deduplicated per (target, rule) per UTC day in audit_log,
-so an alert stays an alert and never becomes a pager a client mutes (B7). Carries no client
-data, and never logs its own URL, which is a credential."""
-from __future__ import annotations
+This **extends Task 6's `selector_drift/quality/alerts.py`** (ledger 2026-09-26: the first draft
+created the module a second time, with a second env var `SD_ALERT_WEBHOOK` for the same URL). Task
+6's `AlertKind`, `WEBHOOK_ENV` (`"SD_ALERT_WEBHOOK_URL"`), `TIMEOUT_SECONDS`, `_log`,
+`webhook_url()` (which reads `Settings.alert_webhook_url`, Task 5) and `post_alert()` stay as they
+are; the imports below are merged into the file's import block, and everything else is appended.
+`post_alert()` remains the undeduplicated day-one channel for `refused` / `failed`; `notify()` is the
+deduplicated channel for quarantines, findings, false accepts and missed heartbeats — one URL, one
+setting, one module.
 
+```python
+# selector_drift/quality/alerts.py  (additions to Task 6's file)
 import datetime as dt
-import logging
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
-import httpx
 from bok_core.findings import Finding, Severity
 from croniter import croniter
 from sqlalchemy import func, select
@@ -20336,24 +20919,24 @@ from selector_drift.db.models import AuditLog, HealEvent, Heartbeat, Run
 from selector_drift.db.session import Session
 from selector_drift.spec.loader import load_spec
 
-log = logging.getLogger(__name__)
+log = _log                              # Task 6's module logger, one logger for the channel
 
-WEBHOOK_ENV: Final = "SD_ALERT_WEBHOOK"
 ACTOR: Final = "system:alerts"
 SENT: Final = "alert_sent"
 PAGE: Final = frozenset({Severity.CRITICAL, Severity.HIGH})
 _RANK: Final = {Severity.CRITICAL: 0, Severity.HIGH: 1, Severity.MEDIUM: 2, Severity.LOW: 3,
                 Severity.INFO: 4}
 HEARTBEAT_GRACE: Final = dt.timedelta(minutes=30)
-TIMEOUT_S: Final = 10.0
+TIMEOUT_S: Final = TIMEOUT_SECONDS
 
 
-def webhook_url() -> str | None:
-    url = os.environ.get(WEBHOOK_ENV, "").strip()
+def _delivery_url() -> str | None:
+    """Task 6's webhook_url() (Settings), refused unless https: the URL is a bearer credential."""
+    url = webhook_url()
     if url and not url.startswith("https://"):
         log.error("%s is not an https URL; alerts will be LOGGED ONLY", WEBHOOK_ENV)
         return None
-    return url or None
+    return url
 
 
 class _HideWebhook(logging.Filter):
@@ -20385,7 +20968,7 @@ class Alert:
 
 
 def check_alert_channel() -> bool:
-    if webhook_url() is None:
+    if _delivery_url() is None:
         log.warning("%s is not set: alerts will be LOGGED ONLY and reach nobody", WEBHOOK_ENV)
         return False
     return True
@@ -20411,7 +20994,7 @@ def _unique(alerts: Sequence[Alert]) -> list[Alert]:
 
 
 def _dispatch(alerts: Sequence[Alert], now: dt.datetime) -> None:
-    url = webhook_url()
+    url = _delivery_url()
     with Session() as s:
         for alert in _unique(alerts):
             day = alert.day or now.astimezone(dt.UTC).date()
@@ -20446,12 +21029,15 @@ def notify(findings: Sequence[Finding], run: Run, *, now: dt.datetime | None = N
     _dispatch(alerts, now or dt.datetime.now(dt.UTC))
 
 
-def _target_of(s: OrmSession, subject: str) -> str | None:
-    """Task 26C writes the heal id as subject; Task 34B's fixtures write the run_key."""
-    if ":" in subject:
-        return subject.split(":", 1)[0]
-    if subject.isdigit():
-        heal = s.get(HealEvent, int(subject))
+def _target_of(s: OrmSession, row: AuditLog) -> str | None:
+    """The scorer's row shape (Task 26C, ledger 2026-09-26): subject = str(heal_id),
+    actor = 'testbench.score', detail.run_key = the heal's run. The run_key names the target;
+    the heal id is the fallback for a row written before detail.run_key existed."""
+    run_key = (row.detail or {}).get("run_key")
+    if isinstance(run_key, str) and ":" in run_key:
+        return run_key.split(":", 1)[0]
+    if row.subject.isdigit():
+        heal = s.get(HealEvent, int(row.subject))
         return heal.target if heal is not None else None
     return None
 
@@ -20460,14 +21046,15 @@ def notify_false_accepts(*, now: dt.datetime | None = None) -> None:
     alerts: list[Alert] = []
     with Session() as s:
         rows = s.scalars(select(AuditLog).where(
-            AuditLog.action == "scored",
+            AuditLog.actor == "testbench.score", AuditLog.action == "scored",
             AuditLog.detail["judgement"].astext == "false_accept")).all()
         for row in rows:
-            target = _target_of(s, row.subject)
+            target = _target_of(s, row)
             if target is not None:
+                run_key = (row.detail or {}).get("run_key")
                 alerts.append(Alert(target, "false_accept", Severity.HIGH,
-                                    f"the gate accepted a wrong heal ({row.subject})",
-                                    row.subject if ":" in row.subject else None,
+                                    f"the gate accepted a wrong heal (heal {row.subject})",
+                                    run_key if isinstance(run_key, str) else None,
                                     day=row.at.astimezone(dt.UTC).date()))
     _dispatch(alerts, now or dt.datetime.now(dt.UTC))
 
@@ -20792,79 +21379,25 @@ def watch_deployment() -> RunnerDeployment:
 
 and the module's `serve(...)` call gains `watch_deployment()`.
 
-- [ ] **Step 7: Wire the pipeline and promotion**
+- [ ] **Step 7: Hand the wiring to Task 26A** (no pipeline edit here — corrected 2026-09-26)
 
-In `selector_drift/orchestrate/pipeline.py` (Task 26A), add the imports:
+The first text of this step edited `orchestrate/pipeline.py` and `orchestrate/quarantine_actions.py`,
+but both are created by Task 26A, which runs **after** this task (after Task 33). So the wiring is
+written once, in Task 26A's own code, using what this task produces:
 
-```python
-from selector_drift.orchestrate.interventions import observe_spec
-from selector_drift.quality.alerts import notify
-```
+- `observe_spec(record.target, spec)` immediately after the scope record loads and **before**
+  authorisation, so a spec edit is recorded even on a run that is then refused;
+- `run_for(key) -> Run` in `pipeline.py`, and `notify(findings, run_for(key))` on **every settled
+  run** — completed, healed, quarantined and refused — plus the failure path in `flows.py`;
+- in `quarantine_actions._promote`, a `record_intervention("manual_promote", ...)` row once the
+  promoted data has landed.
 
-observe the spec immediately after the scope record is loaded, **before** authorisation, so a spec
-edit is recorded even on a run that is then refused:
+This step therefore changes no file; Task 26A's tests cover the wiring.
 
-```python
-    spec = load_spec(settings.spec_dir / spec_path)
-    record = load_scope(settings.scope_dir / spec.scope_ref.split("/")[-1])
-    observe_spec(record.target, spec)                          # Task 29A (M1)
-    key = run_key(record.target, spec.version, window.isoformat())
-```
-
-add `run_for`:
-
-```python
-def run_for(key: str) -> Run:
-    with Session() as s:
-        run = s.get(Run, key)
-        if run is None:
-            raise LookupError(f"no run {key}")
-        return run
-```
-
-and replace Part 1's decision block and its tail with (Part 2's `settle()` replacement keeps the
-`findings` / `notify` lines unchanged):
-
-```python
-    findings: list[Finding] = []
-    if isinstance(result, ValidatedExtraction):
-        land_writer.write(result, attempt=attempt)
-        writer = CacheWriter(target=target.target, spec_version=spec.version)
-        for name, el in elements.items():
-            writer.put(result, el, field=name)                     # ONLY here (C2)
-        findings = evaluate(key)                                   # Task 29: persists findings
-        state = "healed" if heals else "completed"
-        rows = len(result.rows)
-    else:
-        _hold_minimal(key, result.reason, result.verdicts)
-        state, rows = "quarantined", 0
-
-    record_attempt(key, attempt, state, None, target.record_sha256)
-    record_run(key, target=target.target, spec_version=spec.version, window=window,
-               state=state, rows_written=rows)
-    notify(findings, run_for(key))                                 # every settled run (M2)
-    return key
-```
-
-with `from bok_core.findings import Finding` added to the imports. The `RowMisaligned` early return
-also calls `notify([], run_for(key))` after its `record_run`.
-
-In `selector_drift/orchestrate/quarantine_actions.py` (Task 26A Part 2), import
-`from selector_drift.orchestrate.interventions import record_intervention` and make `_promote`:
-
-```python
-    def _promote(run_key: str, actor: str, reason: str) -> None:
-        validated = quarantine.promote(run_key, actor=actor, reason=reason)  # re-runs the gate
-        accept_promoted(run_key, validated, cache=CacheWriter.for_run_key(run_key))
-        record_intervention("manual_promote", actor, run_key.split(":", 1)[0], "*",
-                            {"run_key": run_key, "state": "quarantined"},
-                            {"run_key": run_key, "state": "promoted"}, reason)
-```
-
-Append to `.env.example`:
+Append to `.env.example` (the webhook is already there as `SD_ALERT_WEBHOOK_URL`, Task 5 — this
+task's first draft added a second name, `SD_ALERT_WEBHOOK`, for the same URL):
 
 ```bash
-SD_ALERT_WEBHOOK=          # optional; https only; unset = alerts are logged, never sent
 SD_DEPLOYS_FILE=deploys.yaml
 SD_GITHUB_TOKEN=           # optional; fine-grained, read-only deployments, for gh-actions feeds
 ```
@@ -20882,8 +21415,7 @@ neither `resolve` nor `testbench.answers`).
 ```bash
 git add selector_drift/quality/alerts.py selector_drift/orchestrate/interventions.py \
         selector_drift/orchestrate/deploys.py selector_drift/orchestrate/watch.py \
-        selector_drift/orchestrate/deployments.py selector_drift/orchestrate/pipeline.py \
-        selector_drift/orchestrate/quarantine_actions.py deploys.yaml pyproject.toml uv.lock \
+        selector_drift/orchestrate/deployments.py deploys.yaml pyproject.toml uv.lock \
         .env.example tests/quality/test_alerts.py tests/orchestrate/test_interventions.py \
         tests/orchestrate/test_deploys.py
 git commit -m "feat(quality): alerting, intervention ledger, deploy-history ingest (M1, M2, M10)"
@@ -20902,7 +21434,7 @@ git commit -m "feat(quality): alerting, intervention ledger, deploy-history inge
 - Test: `tests/credentials/__init__.py` (empty), `tests/credentials/conftest.py`, `tests/credentials/test_no_totp_seed.py`, `tests/credentials/test_session.py`, `tests/credentials/test_registry.py`
 
 **Interfaces:**
-- Consumes: `AuthorisedTarget`, `ScopeRecord`, `authorise` (Task 2); `load_scope` (Task 5, `spec/loader.py`); `get_settings` (Task 28 Step 0).
+- Consumes: `AuthorisedTarget`, `ScopeRecord`, `authorise` (Task 2); `load_scope` (Task 5, `spec/loader.py`); `get_settings` (Task 5 — `session_dir` included).
 - Produces:
   - `Credentials(cookies: list[dict[str, Any]] | None = None, username: str | None = None, password: SecretStr | None = None)` — frozen, `extra="forbid"`; `cookies` is excluded from `repr`
   - `CredentialProvider` protocol — `get(target: AuthorisedTarget) -> Credentials`, `get_totp_code(target: AuthorisedTarget) -> str`
@@ -21146,7 +21678,7 @@ def scopes(tmp_path, monkeypatch):
     d.mkdir()
     (d / "testbench.yaml").write_text(SCOPE_YAML, encoding="utf-8")
     monkeypatch.setenv("SD_SCOPE_DIR", str(d))
-    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(tmp_path / "evidence"))
+    monkeypatch.setenv("SD_SESSION_DIR", str(tmp_path / "sessions"))    # Settings.session_dir
     get_settings.cache_clear()
     yield d
     get_settings.cache_clear()
@@ -21303,7 +21835,9 @@ _TARGET = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 def session_path(target: str) -> Path:
     if not _TARGET.fullmatch(target):
         raise ValueError(f"{target!r} is not a target name")
-    return get_settings().evidence_root.parent / "sessions" / f"{target}.json"
+    # Settings.session_dir (SD_SESSION_DIR, Task 5), not a path derived from evidence_root:
+    # sessions are credentials and get their own, explicitly configured place (2026-09-26).
+    return get_settings().session_dir / f"{target}.json"
 
 
 _FACTORIES: dict[str, Factory] = {
@@ -22103,14 +22637,18 @@ git commit -m "feat(credentials): client broker, acknowledged envelope-encrypted
 ### Task 33: Evidence storage — capture, redact, verify, store
 
 **Files:**
-- Create: `selector_drift/config.py`, `selector_drift/heallog/evidence.py`, `selector_drift/heallog/diff.py`, `selector_drift/heallog/retention.py`
-- Modify: `selector_drift/orchestrate/deployments.py` (register `evidence_retention`), `docs/methodology.md` (Retention section), `.env.example`
+- Exists (Task 5): `selector_drift/config.py` — **consumed, not created or modified** (2026-09-26).
+  Task 5's `Settings` is the one definition and already carries every field this task reads
+  (`evidence_root`, `fixture_mode`, `fixture_evidence_root`, `web_origin`, `public_base_url`,
+  `redaction_key`, `evidence_read_root`, `for_typegen()`); `.env.example` already names every key.
+- Create: `selector_drift/heallog/evidence.py`, `selector_drift/heallog/diff.py`, `selector_drift/heallog/retention.py`
+- Modify: `selector_drift/orchestrate/deployments.py` (register `evidence_retention`), `docs/methodology.md` (Retention section)
 - Test: `tests/heallog/test_redaction_order.py`, `tests/heallog/test_bundle_store.py`, `tests/heallog/test_diff.py`, `tests/heallog/test_retention.py`
 
 **Interfaces:**
 - Consumes: `Evidence`, `BBox`, `credential_input_nodes`, `NODE_ATTR`, `Masker` (Task 19); the whole of `heallog/bundle.py` (Task 19); `bok_core.boundary.redact.redact`, `RedactionResult`; `bok_core.boundary.egress.Plane`, `write_guarded`; `bok_core.boundary.sensitivity.Labelled`, `Sensitivity`, `SensitivityViolation`; `HealEvent`, `ScopeRecordRow`, `AuditLog` (Task 3).
 - Produces:
-  - `Settings` and `get_settings() -> Settings` (`lru_cache`d; tests call `get_settings.cache_clear()`), `ConfigError`
+  - (`Settings`, `get_settings()`, `ConfigError` are Task 5's; this task only reads them)
   - `scrub_credentials(dom: str) -> tuple[str, int]` — **R15/H6**; returns the scrubbed DOM and how many values it removed
   - `strip_png_metadata(png: bytes) -> bytes`
   - `pii_node_ids(dom: str, *, key: bytes, sensitivity: Sensitivity) -> frozenset[str]` and `PiiMasker(key: bytes, sensitivity: Sensitivity)` — the production `Masker`
@@ -22631,94 +23169,22 @@ def test_methodology_states_the_retention_policy():
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `uv run pytest tests/heallog -v -m "unit or integration"`
-Expected: FAIL — `ModuleNotFoundError: selector_drift.config`.
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.heallog.evidence'`. (`config.py`
+exists since Task 5; the first draft expected it missing here.)
 
-- [ ] **Step 3: Implement `config.py`**
+- [ ] **Step 3: Confirm the settings this task reads — no code** (2026-09-26)
 
-```python
-# selector_drift/config.py
-"""Process settings, from the environment only. No secret has a default."""
-from __future__ import annotations
-
-import os
-from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
-
-
-class ConfigError(RuntimeError):
-    pass
-
-
-@dataclass(frozen=True)
-class Settings:
-    env: str                          # SD_ENV: development | production | typegen
-    evidence_root: Path               # SD_EVIDENCE_ROOT
-    lake_root: Path                   # SD_LAKE_ROOT
-    spec_dir: Path                    # SD_SPEC_DIR
-    scope_dir: Path                   # SD_SCOPE_DIR -- tests point it at a tmp copy
-    database_url: str                 # SD_DATABASE_URL -- read since Task 3 by db/session.py
-    fixture_mode: bool                # SD_FIXTURE_MODE=1 -- E2E only (web UI spec 6)
-    fixture_evidence_root: Path       # SD_FIXTURE_EVIDENCE_ROOT
-    web_origin: str                   # SD_WEB_ORIGIN -- the Origin every non-GET must carry
-    public_base_url: str              # SD_PUBLIC_BASE_URL -- problem-type URIs, method links
-    _redaction_key_hex: str           # SD_REDACTION_KEY -- hex, >= 32 bytes, never committed
-
-    @property
-    def redaction_key(self) -> bytes:
-        if not self._redaction_key_hex:
-            raise ConfigError("SD_REDACTION_KEY is not set; evidence cannot be redacted")
-        key = bytes.fromhex(self._redaction_key_hex)
-        if len(key) < 32:
-            raise ConfigError("SD_REDACTION_KEY must be at least 32 bytes")
-        return key
-
-    @property
-    def evidence_read_root(self) -> Path:
-        """Where the API reads bundles. Fixture mode changes this and nothing else."""
-        return self.fixture_evidence_root if self.fixture_mode else self.evidence_root
-
-    @classmethod
-    def for_typegen(cls) -> Settings:
-        """For scripts/gen-types.sh: builds the app to export its schema. Holds no secret."""
-        return cls(env="typegen", evidence_root=Path("evidence"), lake_root=Path("lake"),
-                   spec_dir=Path("specs"), scope_dir=Path("scopes"),
-                   database_url="postgresql+psycopg://typegen@invalid/none", fixture_mode=False,
-                   fixture_evidence_root=Path("web/e2e/fixtures"),
-                   web_origin="http://localhost:3000",
-                   public_base_url="https://selector-drift.invalid", _redaction_key_hex="")
-
-
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    e = os.environ.get
-    return Settings(
-        env=e("SD_ENV", "development"),
-        evidence_root=Path(e("SD_EVIDENCE_ROOT", "evidence")),
-        lake_root=Path(e("SD_LAKE_ROOT", "lake")),
-        spec_dir=Path(e("SD_SPEC_DIR", "specs")),
-        scope_dir=Path(e("SD_SCOPE_DIR", "scopes")),
-        database_url=e("SD_DATABASE_URL", "postgresql+psycopg://selector_drift@localhost:5432/selector_drift"),
-        fixture_mode=e("SD_FIXTURE_MODE", "0") == "1",
-        fixture_evidence_root=Path(e("SD_FIXTURE_EVIDENCE_ROOT", "web/e2e/fixtures")),
-        web_origin=e("SD_WEB_ORIGIN", "http://localhost:3000"),
-        public_base_url=e("SD_PUBLIC_BASE_URL", "https://selector-drift.invalid"),
-        _redaction_key_hex=e("SD_REDACTION_KEY", ""),
-    )
-```
-
-Append to `.env.example` (names only, no values — gitleaks stays clean):
+Task 5's `selector_drift/config.py` is the one `Settings` definition and already has
+`evidence_root`, `fixture_mode`, `fixture_evidence_root`, `web_origin`, `public_base_url`, the
+`redaction_key` and `evidence_read_root` properties and `Settings.for_typegen()`; `.env.example`
+already names every `SD_` key. This step used to write a second copy of the class and append
+`SD_SPEC_DIR` to `.env.example` a second time — both removed. Check before writing code:
 
 ```bash
-SD_ENV=development
-SD_EVIDENCE_ROOT=/data/evidence
-SD_LAKE_ROOT=/data/lake
-SD_SPEC_DIR=specs
-SD_REDACTION_KEY=          # generate: python -c "import secrets; print(secrets.token_hex(32))"
-SD_WEB_ORIGIN=http://localhost:3000
-SD_PUBLIC_BASE_URL=
-SD_FIXTURE_MODE=0
+uv run python -c "from selector_drift.config import Settings; s = Settings.for_typegen(); print(s.evidence_read_root, s.public_base_url)"
 ```
+
+Expected: `evidence https://selector-drift.invalid`.
 
 - [ ] **Step 4: Implement `evidence.py`**
 
@@ -23168,6 +23634,12 @@ def retention_deployment() -> RunnerDeployment:
 
 and the module's `serve(...)` call gains `retention_deployment()` beside the extraction deployments.
 
+**The `mem_limit` above is a declaration, not a limit (found 2026-09-26).** Under `serve()` — a
+process runner in the worker container (Task 6) — Prefect applies no `job_variables`; this flow runs
+inside the `worker` service and is bounded by *its* `mem_limit: 2g` / `pids_limit: 512`. The value is
+kept only so a later move to a Docker work pool starts from a stated number; nothing tests it as a
+limit, and no one should read it as one.
+
 - [ ] **Step 7: Write the Retention section of `docs/methodology.md`**
 
 ```markdown
@@ -23197,9 +23669,9 @@ Expected: PASS — 7 redaction-order, 13 bundle-store (the parametrised target t
 - [ ] **Step 9: Commit**
 
 ```bash
-git add selector_drift/config.py selector_drift/heallog/evidence.py selector_drift/heallog/diff.py \
+git add selector_drift/heallog/evidence.py selector_drift/heallog/diff.py \
         selector_drift/heallog/retention.py selector_drift/orchestrate/deployments.py \
-        docs/methodology.md .env.example tests/heallog
+        docs/methodology.md tests/heallog
 git commit -m "feat(heallog): two-store evidence bundle, atomic guarded writes, retention, HTML-aware diff"
 ```
 
@@ -23213,35 +23685,55 @@ git commit -m "feat(heallog): two-store evidence bundle, atomic guarded writes, 
 
 **This task has two test cycles.** Part 1 (Steps 1–5) is the first revision's task, unchanged apart
 from one marker per test. Part 2 (Steps 6–11) adds the evidence ordering the API contract requires
-(API spec §7.2) and **runs after Task 33**, because it consumes Task 33's writers. Part 1 is
-independently reviewable and lands first; the `Consumes` line of the first revision already named
+(API spec §7.2) and **runs after Task 33**, because it consumes Task 33's writers. Both parts sit here,
+after Task 33, in execution order; they remain two reviewable cycles. The `Consumes` line of the first revision already named
 `heallog.store`, which did not exist until Task 33 — found 2026-09-26, fixed by the split.
 
 **Files:**
-- **Modify: `selector_drift/orchestrate/flows.py`** — the only task in the plan that does
-- Create: `selector_drift/orchestrate/pipeline.py`
+- **Modify: `selector_drift/orchestrate/flows.py`** — the only task in the plan that does; Task 6's
+  prologue (heartbeat first, spec, run key, `link_heartbeat`) and its one-argument signature stay
+- Create: `selector_drift/browser/navigate.py`, `selector_drift/orchestrate/history.py`,
+  `selector_drift/orchestrate/pipeline.py`
+- Create (Part 1, **code written in Task 17 Step 8, landed here** — it imports Task 20/25/27 types;
+  found 2026-09-26): `selector_drift/orchestrate/cache_writer.py`, `tests/orchestrate/test_cache_writer.py`,
+  and the `only-orchestrate-writes-the-cache` stanza in `.importlinter` — exactly Task 17 Step 8's
+  code blocks, before Step 3 below
 - Create (Part 2): `selector_drift/orchestrate/accept.py`, `selector_drift/orchestrate/quarantine_actions.py`
+- Modify: `tests/orchestrate/conftest.py` (Task 6) — **append** the bench fixtures; the file is
+  never rewritten (Task 6's `db`, `prefect_api`, `scope_dir`, `scope_record`, `write_scope` stay)
 - Test: `tests/orchestrate/test_pipeline_end_to_end.py`, `tests/orchestrate/test_evidence_ordering.py` (Part 2)
 
 **Interfaces:**
-- Consumes: `authorise`, `browser.driver.open`, `resolve_cascade`, `extract.read`, `validate.gate`,
-  `CacheWriter.put` (Task 17, moved to `orchestrate/cache_writer.py`), `land.write`, `quality.evaluate`; Part 2 adds Task 19's `capture`,
-  `record_boxes`, `replay_bundle`, `HealTimeCache`, `ExpectedHeal`, `NotReproducible`,
-  `LiveCapture`, and Task 33's `redact_evidence`, `RedactionFailed`, `PiiMasker`,
-  `write_heal_bundle`, `write_last_accepted`, `promote_heal_bundle_to_last_accepted`,
-  `get_settings`; Task 25's `promote`, `discard`, `QuarantinedRun`; `Plane`
+- Consumes: `load_spec`, `load_scope`, `spec_file`, `scope_file`, `target_of` (Task 5, `spec/loader.py`
+  — **not** `scope.gate`); `heartbeat`, `link_heartbeat`, `next_attempt`, `record_attempt`,
+  `record_authorisation`, `record_run`, `run_key`, `window_for`, `NO_TERMINAL_STATE` (Task 6
+  `orchestrate/run_record.py`), `scheduled_slot`, `FLOW_TIMEOUT_SECONDS` (Tasks 6 / 4); `post_alert`
+  (Task 6) and `notify`, `observe_spec`, `record_intervention` (Task 29A); `authorise` (Task 2);
+  the module `selector_drift.browser.driver` (its `open`, called as `driver.open`, so a test's patch
+  of `selector_drift.browser.driver.open` is real); `resolve_cascade(page, target, cache, *,
+  record=True, run_key=None, recorder=...)` and `EscalateToHuman` (Task 13); `extract.read`
+  (Task 27); `checks_for(spec, field, confirmers, *, warmup_runs, first_heal_policy)` (Task 25),
+  `gate_run`, `HealContext` (Task 20), `continuity_alert` (Task 22); `CacheWriter.put` (Task 17
+  Step 8); `land.writer.write(validated, *, attempt)`, `catalog.query`, `is_data_column` (Task 28);
+  `evaluate` (Task 29); Part 2 adds Task 19's `capture`, `record_boxes`, `replay_bundle`,
+  `HealTimeCache`, `ExpectedHeal`, `NotReproducible`, `LiveCapture`, `StaticPageSource`, Task 33's
+  `redact_evidence`, `RedactionFailed`, `PiiMasker`, `write_heal_bundle`, `write_last_accepted`,
+  `promote_heal_bundle_to_last_accepted`, `heal_bundle_dir`, `AFTER_HTML`, Task 28's `fs_key`, and
+  Task 25's `promote`, `mark_promoted`, `discard`, `GateInputs`, `QuarantinedRun`; `Plane`
   (`bok_core.boundary.egress`).
 - Produces:
-  - an `extraction_flow` that actually runs the product
-  - Part 1: `record_heals(run_key: str, traces: Mapping[str, CascadeTrace], elements: Mapping[str, ResolvedElement], verdicts: Sequence[Verdict], *, target: str, cache_before: Mapping[str, CachedSelector | None]) -> list[HealEvent]`, `run_once(spec_path, *, window, attempt, credentials, confirmers) -> str` and `record_run(...)` in `pipeline.py`; `browser.navigate.run_steps(page, steps, creds, *, target)`; `orchestrate.history.history_for(db, target, spec, *, limit=90) -> History | None` — one `heal_events` row per field whose `trace.healed`, `evidence_uri` null until Part 2 fills it
+  - an `extraction_flow(spec_path: str) -> str` that actually runs the product — **one argument**,
+    as Task 6, Task 34's `__main__` and these tests call it; `timeout_seconds=FLOW_TIMEOUT_SECONDS`
+    (600, B8); an `on_failure` hook that records a crash or timeout the body never saw
+  - Part 1: `record_heals(run_key: str, traces: Mapping[str, CascadeTrace], elements: Mapping[str, ResolvedElement], verdicts: Sequence[Verdict], *, target: str, cache_before: Mapping[str, CachedSelector | None]) -> list[HealEvent]`, `run_once(spec_path, *, window, credentials, confirmers) -> str` and `run_for(key) -> Run` in `pipeline.py` (the attempt number is `next_attempt(key)` inside `run_once`, never Prefect's `run_count`; `record_run` is Task 6's, imported); `browser.navigate.run_steps(page, steps, creds, *, target)`; `orchestrate.history.history_for(db, target, spec, *, limit=90) -> History | None` — one `heal_events` row per field whose `trace.healed`, `evidence_uri` null until Part 2 fills it
   - Part 2, `orchestrate/accept.py`:
-    - `accept(validated: ValidatedExtraction, elements: Mapping[str, ResolvedElement], *, cache: CacheWriter, commit_last_accepted: Callable[[], object]) -> Path` — **the one call site of `land.write`, `cache.put` and the last-accepted replacement, in that order**
-    - `hold(run_key: str, reason: str, verdicts: Sequence[Verdict], candidate: CandidateExtraction) -> str` — writes the candidate rows to `lake_root/quarantine/<run_key>.parquet` and the `quarantine` row; returns `data_uri`
+    - `accept(validated: ValidatedExtraction, elements: Mapping[str, ResolvedElement], *, cache: CacheWriter, commit_last_accepted: Callable[[], object], attempt: int | None = None) -> Path` — **the one call site of `land.write`, `cache.put` and the last-accepted replacement, in that order**; `attempt` is passed to `land.write(..., attempt=)` (Task 28)
+    - `hold(run_key: str, reason: str, verdicts: Sequence[Verdict], candidate: CandidateExtraction) -> str` — writes the candidate rows to `lake_root/quarantine/{fs_key(run_key)}.parquet` and the `quarantine` row; returns `data_uri`
     - `bundle_and_replay(heal: HealEvent, target: str, after: RedactedEvidence, field_target: FieldTarget, cached_before: CachedSelector | None, node_id: str) -> None`
-    - `settle(*, target: AuthorisedTarget, spec: TaskSpec, candidate: CandidateExtraction, result: ValidatedExtraction | QuarantinedRun, evidence: Evidence, elements: Mapping[str, ResolvedElement], heals: Sequence[HealEvent], cache: CacheWriter, cache_before: Mapping[str, CachedSelector | None], redaction_key: bytes) -> RunState`
+    - `settle(*, target: AuthorisedTarget, spec: TaskSpec, candidate: CandidateExtraction, result: ValidatedExtraction | QuarantinedRun, evidence: Evidence, elements: Mapping[str, ResolvedElement], heals: Sequence[HealEvent], cache: CacheWriter, cache_before: Mapping[str, CachedSelector | None], redaction_key: bytes, attempt: int | None = None) -> RunState`
     - `redaction_verdict(exc: RedactionFailed) -> Verdict`
     - `RunState = Literal["completed", "healed", "quarantined"]`
-  - Part 2, `orchestrate/quarantine_actions.py`: `QuarantineActions(promote: Callable[[str, str, str], None], discard: Callable[[str, str, str], None])`, `build_quarantine_actions() -> QuarantineActions`, `accept_promoted(run_key: str, validated: ValidatedExtraction, *, cache: CacheWriter) -> Path`, `element_from_heal(session: OrmSession, heal: HealEvent) -> ResolvedElement`
+  - Part 2, `orchestrate/quarantine_actions.py`: `QuarantineActions(promote: Callable[[str, str, str], None], discard: Callable[[str, str, str], None])`, `build_quarantine_actions() -> QuarantineActions`, `rebuild_gate_inputs(run_key: str) -> GateInputs` (Task 25's `Rebuild`), `accept_promoted(run_key: str, validated: ValidatedExtraction, *, cache: CacheWriter) -> Path`, `element_from_heal(session: OrmSession, heal: HealEvent) -> ResolvedElement`
 
 **Why this task exists.** `flows.py` is created in Task 6, where `extraction_flow` deliberately
 *"does nothing else — no cascade exists yet"*, and **it appears in no later task's file list.** Tasks
@@ -23264,6 +23756,8 @@ authorise(scope)                       -> AuthorisedTarget      | ScopeRefusal -
   for each field in spec.targets:
       resolve_cascade(page, field)     -> ResolvedElement, CascadeTrace
                                           + one `resolutions` row, win or lose      (C4)
+                                        | EscalateToHuman -> hold("escalated"), state=quarantined,
+                                          never a flow failure (design §5.3, §9.3)
   record_boxes(evidence, page, nodes)  -> Evidence + boxes      (live page still open)  §7.2
   extract.read(elements, spec)         -> CandidateExtraction
   quality.evaluate(candidate)          -> list[Finding]         -> alert channel    (M2)
@@ -23325,7 +23819,10 @@ authorise(scope)                       -> AuthorisedTarget      | ScopeRefusal -
   callables, `__main__ serve-api` hands them to `create_app()`, and a promoted run reaches
   `accept()` — the same single call site — with its last-accepted snapshot taken from the heal
   bundle's `after` half. **Task 25's `promote()` must not itself call `land.write()`**; it re-runs
-  the gate, audits, and returns.
+  the gate and returns. **The record follows the data (ledger 2026-09-26):** `_promote` calls
+  `promote()` (re-gate only), then `accept_promoted()` lands the rows, and only then
+  `quarantine.mark_promoted()` writes `resolved_as="promoted"` and the audit row — so a lake failure
+  in between leaves the quarantine open and retryable, never "promoted" with nothing landed.
 - **`hold()` is named here because nothing named it.** The first revision's diagram said "quarantine
   row" and no task produced the function that writes one.
 
@@ -23335,54 +23832,124 @@ authorise(scope)                       -> AuthorisedTarget      | ScopeRefusal -
 
 ```python
 # tests/orchestrate/test_pipeline_end_to_end.py
+from __future__ import annotations
+
+from pathlib import Path
+
 import pytest
+from sqlalchemy.orm import Session as OrmSession
+
+from selector_drift.db.models import HealEvent, Resolution, Run, RunAttempt
+from selector_drift.db.session import Session
+from selector_drift.land.catalog import query
+from selector_drift.orchestrate.flows import extraction_flow
+from selector_drift.resolve.cache import CachedSelector, SelectorCache
+from selector_drift.spec.loader import load_spec
+
+REPO = Path(__file__).resolve().parents[2]
+SPEC = load_spec(REPO / "specs" / "testbench.yaml")          # version 2 (Task 12 Step 0)
+ONCE = extraction_flow.with_options(retries=0)              # no 300 s retry sleeps in a test
+
+
+def rows_in_lake(key: str) -> int:
+    return len(query("select * from lake where run_key = ?", [key], target="testbench").rows)
+
+
+def cache_entry(target: str, field: str) -> CachedSelector | None:
+    return SelectorCache().get(target, field, SPEC.version)
+
+
+def state_of(key: str) -> str:
+    with Session() as s:
+        run = s.get(Run, key)
+        assert run is not None
+        return run.state
 
 
 @pytest.mark.integration
-def test_a_clean_run_writes_rows_and_updates_nothing_else(bench, session):
-    key = extraction_flow("specs/testbench.yaml")
+def test_a_clean_run_writes_rows_and_updates_nothing_else(prefect_api, bench,
+                                                          session: OrmSession) -> None:
+    key = ONCE("testbench.yaml")
     assert session.get(Run, key).state == "completed"
     assert rows_in_lake(key) > 0
     assert session.query(HealEvent).filter_by(run_key=key).count() == 0
 
 
 @pytest.mark.integration
-def test_a_healed_run_writes_rows_a_heal_event_and_the_cache(bench_mutated, session):
-    key = extraction_flow("specs/testbench.yaml")
+def test_a_healed_run_writes_rows_a_heal_event_and_the_cache(prefect_api, bench_mutated,
+                                                            session: OrmSession) -> None:
+    key = ONCE("testbench.yaml")
     assert session.get(Run, key).state == "healed"
     assert session.query(HealEvent).filter_by(run_key=key).one().confirmer_rung
     assert cache_entry("testbench", "claim_number").set_by_run_key == key
 
 
 @pytest.mark.integration
-def test_a_quarantined_run_writes_no_rows_and_does_not_touch_the_cache(bench_decoy, session):
+def test_a_quarantined_run_writes_no_rows_and_does_not_touch_the_cache(
+        prefect_api, bench_decoy, session: OrmSession) -> None:
     before = cache_entry("testbench", "amount")
-    key = extraction_flow("specs/testbench.yaml")
+    key = ONCE("testbench.yaml")
     assert session.get(Run, key).state == "quarantined"
     assert rows_in_lake(key) == 0
     assert cache_entry("testbench", "amount") == before          # C2
 
 
 @pytest.mark.integration
-def test_a_refused_target_never_opens_a_browser_and_never_captures(expired_spec, monkeypatch):
-    opened = []
+def test_a_refused_target_never_opens_a_browser_and_never_captures(
+        prefect_api, db, expired_spec, monkeypatch) -> None:
+    # Real only because pipeline.py calls `driver.open(...)` through the module (2026-09-26);
+    # a `from ...driver import open` binding would make this patch vacuous.
+    opened: list[int] = []
     monkeypatch.setattr("selector_drift.browser.driver.open", lambda *a, **k: opened.append(1))
-    assert state_of(extraction_flow(expired_spec)) == "refused"
+    assert state_of(ONCE(expired_spec)) == "refused"
     assert opened == []
 
 
 @pytest.mark.integration
-def test_every_resolution_lands_in_the_resolutions_table(bench, session):
-    key = extraction_flow("specs/testbench.yaml")
+def test_every_resolution_lands_in_the_resolutions_table(prefect_api, bench,
+                                                         session: OrmSession) -> None:
+    key = ONCE("testbench.yaml")
     assert session.query(Resolution).filter_by(run_key=key).count() == len(SPEC.targets)
 
 
 @pytest.mark.integration
-def test_a_failed_run_writes_an_attempt_row_and_a_retry_writes_a_second(flaky_bench, session):
-    key = extraction_flow("specs/testbench.yaml")            # fails
-    extraction_flow("specs/testbench.yaml")                  # retries, succeeds
-    assert session.query(RunAttempt).filter_by(run_key=key).count() == 2   # M13
-    assert {a.state for a in attempts(key)} == {"failed", "completed"}
+def test_an_authorised_run_audits_its_scope_record(prefect_api, bench,
+                                                   session: OrmSession) -> None:
+    """Task 2's promise, kept by the pipeline too (Task 6's record_authorisation)."""
+    from selector_drift.db.models import AuditLog
+    key = ONCE("testbench.yaml")
+    assert session.query(AuditLog).filter_by(action="scope_authorised", subject=key).count() == 1
+
+
+@pytest.mark.integration
+def test_a_failed_run_writes_an_attempt_row_and_a_retry_writes_a_second(
+        prefect_api, flaky_bench, session: OrmSession) -> None:
+    """M13. Attempt numbers come from next_attempt(), so the retry appends -- it never
+    overwrites attempt 1 the way Prefect's run_count (1 for every new flow run) would."""
+    with pytest.raises(Exception):
+        ONCE("testbench.yaml")                                    # the portal answers 503
+    key = ONCE("testbench.yaml")                                  # the retry succeeds
+    attempts = (session.query(RunAttempt).filter_by(run_key=key)
+                .order_by(RunAttempt.attempt).all())
+    assert [(a.attempt, a.state) for a in attempts] == [(1, "failed"), (2, "completed")]
+
+
+@pytest.mark.integration
+def test_an_escalated_field_quarantines_the_run_and_never_fails_the_flow(
+        prefect_api, bench, session: OrmSession, monkeypatch) -> None:
+    """Design 5.3 / 9.3: no rung resolved -> quarantine with reason 'escalated'. Raising instead
+    would hand the run to Prefect's retries, duplicating resolutions rows and corpus cases."""
+    from selector_drift.resolve.escalation import EscalateToHuman
+
+    def refuse(page, target, cache, **kw):
+        raise EscalateToHuman(f"no rung resolved {target.name!r}")
+    monkeypatch.setattr("selector_drift.orchestrate.pipeline.resolve_cascade", refuse)
+    key = ONCE("testbench.yaml")
+    assert state_of(key) == "quarantined"
+    from selector_drift.db.models import Quarantine
+    q = session.get(Quarantine, key)
+    assert q is not None and q.reason == "escalated"
+    assert {v["check"] for v in q.verdicts} == {"Escalated"}
 ```
 
 - [ ] **Step 2: Run them and watch them fail.** Every one, for a different reason — nothing is wired.
@@ -23464,27 +24031,22 @@ async def run_steps(page: PageHandle, steps: Sequence[NavStep], creds: Credentia
 """Builds validate.History from what was WRITTEN. validate/ never reads storage itself."""
 from __future__ import annotations
 
-import datetime as dt
-
-import pyarrow.parquet as pq
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from selector_drift.config import get_settings
 from selector_drift.db.models import AuditLog, FindingRow, Quarantine, Run
-from selector_drift.land.writer import fs_key
+from selector_drift.land.catalog import query
+from selector_drift.land.layout import is_data_column
 from selector_drift.spec.schema import TaskSpec
 from selector_drift.validate.history import AcceptedRun, History
 
 
-def _rows(target: str, window: dt.date, run_key: str) -> tuple[dict[str, str], ...]:
-    part = get_settings().lake_root / f"target={target}" / f"window={window.isoformat()}"
-    files = sorted(part.glob(f"{fs_key(run_key)}-*.parquet"))
-    if not files:
-        return ()
-    latest = files[-1]                                   # {key}-{attempt}-{ulid}: ulid sorts by time
-    return tuple({k: str(v) for k, v in r.items() if k not in ("run_key", "ingested_at")}
-                 for r in pq.read_table(latest).to_pylist())
+def _rows(target: str, run_key: str) -> tuple[dict[str, str], ...]:
+    """The rows this run landed, through the lake view (Task 28) -- deduplicated, and immune to
+    compaction renaming files. The first draft globbed parquet files and took `files[-1]`, which
+    compaction breaks and which ignored the dedup the view exists for (found 2026-09-26)."""
+    found = query("select * from lake where run_key = ?", [run_key], target=target).dicts()
+    return tuple({k: str(v) for k, v in r.items() if is_data_column(k)} for r in found)
 
 
 def history_for(db: Session, target: str, spec: TaskSpec, *, limit: int = 90) -> History | None:
@@ -23497,16 +24059,18 @@ def history_for(db: Session, target: str, spec: TaskSpec, *, limit: int = 90) ->
         return None
     out = []
     for run in reversed(runs):                          # oldest first
-        alerts = frozenset(db.scalars(select(FindingRow.payload["properties"]["field"].astext)
-                                      .where(FindingRow.run_key == run.run_key,
-                                             FindingRow.rule == "distribution_shift")).all())
+        # shift_alerts are BREACHES, not alerts: Task 29 writes a distribution_shift finding on
+        # every breach, so DistributionalAssertion can count persistence (ledger 2026-09-26).
+        breaches = frozenset(db.scalars(select(FindingRow.payload["properties"]["field"].astext)
+                                        .where(FindingRow.run_key == run.run_key,
+                                               FindingRow.rule == "distribution_shift")).all())
         expected = frozenset(db.scalars(select(AuditLog.detail["field"].astext)
                                         .where(AuditLog.action == "marked_expected",
                                                AuditLog.subject == run.run_key)).all())
         out.append(AcceptedRun(run_key=run.run_key, window=run.window,
-                               rows=_rows(target, run.window, run.run_key),
+                               rows=_rows(target, run.run_key),
                                natural_key=tuple(spec.natural_key),
-                               shift_alerts=alerts, marked_expected=expected))
+                               shift_alerts=breaches, marked_expected=expected))
     return History(runs=tuple(out))
 ```
 
@@ -23518,9 +24082,12 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Mapping, Sequence
 
-from selector_drift.browser.driver import open as open_browser
+from bok_core.findings import Finding
+
+from selector_drift.browser import driver         # module attribute: tests patch driver.open
 from selector_drift.browser.live_capture import LiveCapture
 from selector_drift.browser.navigate import run_steps
+from selector_drift.browser.page_source import LivePageSource
 from selector_drift.config import get_settings
 from selector_drift.credentials.provider import CredentialProvider
 from selector_drift.db.models import HealEvent, Quarantine, Run
@@ -23531,30 +24098,31 @@ from selector_drift.heallog.evidence import PiiMasker
 from selector_drift.land import writer as land_writer
 from selector_drift.orchestrate.cache_writer import CacheWriter
 from selector_drift.orchestrate.history import history_for
-from selector_drift.orchestrate.run_record import record_attempt, run_key
+from selector_drift.orchestrate.interventions import observe_spec
+from selector_drift.orchestrate.run_record import (next_attempt, record_attempt,
+                                                   record_authorisation, record_run, run_key)
+from selector_drift.quality.alerts import notify, post_alert
 from selector_drift.quality.contracts import evaluate
 from selector_drift.resolve.cache import CachedSelector, SelectorCache
 from selector_drift.resolve.cascade import resolve_cascade
-from selector_drift.browser.page_source import LivePageSource
+from selector_drift.resolve.escalation import EscalateToHuman
 from selector_drift.resolve.trace import CascadeTrace, ResolvedElement, Rung
 from selector_drift.scope.errors import ScopeRefusal
-from selector_drift.scope.gate import authorise, load_scope
-from selector_drift.spec.loader import load_spec
+from selector_drift.scope.gate import authorise
+from selector_drift.spec.loader import load_scope, load_spec, scope_file, spec_file, target_of
+from selector_drift.validate.assertions.independence import continuity_alert
 from selector_drift.validate.checks import checks_for
 from selector_drift.validate.gate import HealContext, ValidatedExtraction, gate_run
 from selector_drift.validate.verdict import Confirmation, Outcome, Verdict
 
 
-def record_run(key: str, *, target: str, spec_version: int, window: dt.date, state: str,
-               rows_written: int | None = None, error: str | None = None) -> None:
-    now = dt.datetime.now(dt.UTC)
+def run_for(key: str) -> Run:
+    """The settled run, for notify() (Task 29A). Every settled run is passed to notify()."""
     with Session() as s:
-        run = s.get(Run, key) or Run(run_key=key, target=target, spec_version=spec_version,
-                                     window=window, first_started_at=now)
-        run.state, run.last_finished_at = state, now
-        run.rows_written, run.error = rows_written, error
-        s.merge(run)
-        s.commit()
+        run = s.get(Run, key)
+        if run is None:
+            raise LookupError(f"no run {key}")
+        return run
 
 
 def _confirmer(verdicts: Sequence[Verdict], field: str) -> Confirmation | None:
@@ -23582,7 +24150,7 @@ def record_heals(key: str, traces: Mapping[str, CascadeTrace],
                 selector_before=before.selector if before else None, selector_after=el.selector,
                 anchor_before=before.anchor.model_dump(mode="json") if before else None,
                 anchor_after=el.anchor.model_dump(mode="json"),
-                trace=[a.as_json() for a in trace.attempts],
+                trace=[a.as_json() for a in trace.attempts],       # RungAttempt.as_json (Task 13)
                 verdicts=[v.model_dump(mode="json") for v in verdicts if v.field == name],
                 evidence_uri=None, replayed_ok=None, promoted_by=None, promoted_at=None))
         s.add_all(heals)
@@ -23599,6 +24167,13 @@ def _alignment_verdict(exc: RowMisaligned) -> Verdict:
                    reason="fields from different row lists would be zipped into wrong rows")
 
 
+def _escalation_verdict(field: str, exc: EscalateToHuman) -> Verdict:
+    """Design 5.3 / 9.3: no rung 1-4 resolved. A refusal the human reads, never a guess."""
+    return Verdict(check="Escalated", outcome=Outcome.FAIL,
+                   threshold="a rung 1-4 resolves the field", observed="no rung resolved",
+                   reason=exc.reason, field=field)
+
+
 def _hold_minimal(key: str, reason: str, verdicts: Sequence[Verdict]) -> None:
     """Part 1's quarantine: the row and its verdicts. Part 2 replaces it with accept.hold(),
     which also keeps the candidate's data."""
@@ -23609,19 +24184,28 @@ def _hold_minimal(key: str, reason: str, verdicts: Sequence[Verdict]) -> None:
         s.commit()
 
 
-async def run_once(spec_path: str, *, window: dt.date, attempt: int,
-                   credentials: CredentialProvider, confirmers: Sequence[Rung]) -> str:
+async def run_once(spec_path: str, *, window: dt.date, credentials: CredentialProvider,
+                   confirmers: Sequence[Rung]) -> str:
     settings = get_settings()
-    spec = load_spec(settings.spec_dir / spec_path)
-    record = load_scope(settings.scope_dir / spec.scope_ref.split("/")[-1])
-    key = run_key(record.target, spec.version, window.isoformat())
+    stem = target_of(spec_path)
+    spec = load_spec(spec_file(spec_path))            # Task 5's resolver: no double prefix
+    key = run_key(stem, spec.version, window.isoformat())
+    observe_spec(stem, spec)                          # Task 29A (M1): even on a refused run
     try:
+        record = load_scope(scope_file(spec.scope_ref))
+        if record.target != stem:
+            raise ScopeRefusal(f"spec {spec_path} is for target {stem!r} but its scope record "
+                               f"names {record.target!r}")
         target = authorise(record, today=window)
-    except ScopeRefusal as exc:                                  # no attempt row (Task 6)
-        record_run(key, target=record.target, spec_version=spec.version, window=window,
+    except ScopeRefusal as exc:                       # no attempt row (Task 6)
+        record_run(key, target=stem, spec_version=spec.version, window=window,
                    state="refused", error=exc.reason)
+        post_alert("refused", stem, key, exc.reason)
+        notify([], run_for(key))
         return key
+    attempt = next_attempt(key)                       # M13: appends; never Prefect's run_count
     record_attempt(key, attempt, "started", None, target.record_sha256)
+    record_authorisation(key, target.target, target.record_sha256, record=record)   # Task 2
 
     reader = SelectorCache()
     cache_before = {t.name: reader.get(target.target, t.name, spec.version) for t in spec.targets}
@@ -23629,19 +24213,36 @@ async def run_once(spec_path: str, *, window: dt.date, attempt: int,
     elements: dict[str, ResolvedElement] = {}
     traces: dict[str, CascadeTrace] = {}
     contexts: dict[str, HealContext] = {}
-    async with open_browser(target, creds) as session:
+    escalated: list[Verdict] = []
+    async with driver.open(target, creds) as session:
         await run_steps(session.page, spec.navigate, creds, target=target)
         page = await LivePageSource.snapshot(session.page)
         live = LiveCapture(session.page.raw, page.dom())
         evidence = await capture(live, run_key=key, sensitivity=target.sensitivity,
                                  masker=PiiMasker(settings.redaction_key, target.sensitivity))
         for t in spec.targets:
-            el, trace = resolve_cascade(page, t, reader)             # one resolutions row (C4)
+            try:
+                el, trace = resolve_cascade(page, t, reader, run_key=key)   # one row (C4)
+            except EscalateToHuman as exc:            # quarantine, never fail the flow
+                if exc.trace is not None:
+                    traces[t.name] = exc.trace
+                escalated.append(_escalation_verdict(t.name, exc))
+                continue
             elements[t.name], traces[t.name] = el, trace
             contexts[t.name] = HealContext(healed=trace.healed, winning_rung=trace.winner or 5,
                                            page=page, target=t, cache=reader)
         evidence = await record_boxes(evidence, live,
                                       {n: e.node_id for n, e in elements.items()})
+
+    if escalated:
+        # Design 5.3 / 9.3. A retry would re-run the cascade and write a second resolutions row
+        # and a second corpus case for the same field, so this settles the run instead.
+        _hold_minimal(key, "escalated", escalated)
+        record_attempt(key, attempt, "quarantined", "escalated", target.record_sha256)
+        record_run(key, target=target.target, spec_version=spec.version, window=window,
+                   state="quarantined", rows_written=0)
+        notify([], run_for(key))
+        return key
 
     try:
         candidate = read(evidence.dom.value, elements, spec, run_key=key,
@@ -23651,24 +24252,32 @@ async def run_once(spec_path: str, *, window: dt.date, attempt: int,
         _hold_minimal(key, "fields do not share a row", [_alignment_verdict(exc)])
         record_attempt(key, attempt, "quarantined", str(exc), target.record_sha256)
         record_run(key, target=target.target, spec_version=spec.version, window=window,
-                   state="quarantined")
+                   state="quarantined", rows_written=0)
+        notify([], run_for(key))
         return key
 
     with Session() as db:
         history = history_for(db, target.target, spec)
-    checks = {t.name: checks_for(spec, t, confirmers, warmup_runs=target.warmup_runs)
+    checks = {t.name: checks_for(spec, t, confirmers, warmup_runs=target.warmup_runs,
+                                 first_heal_policy=target.first_heal_policy)
               for t in spec.targets}
     result = gate_run(candidate, history, contexts, checks)
     heals = record_heals(key, traces, elements, result.verdicts, target=target.target,
                          cache_before=cache_before)
+    for v in result.verdicts:                         # ledger #32: tolerated, but a human hears
+        if continuity_alert(v):
+            post_alert("finding", target.target, key,
+                       f"{v.field}: row-key continuity {v.observed} below {v.threshold} on a "
+                       "cache hit -- tolerated as churn, reported for review")
 
     # ---- Part 1's decision. Part 2 (Step 8) replaces this block with settle(). ----
+    findings: list[Finding] = []
     if isinstance(result, ValidatedExtraction):
-        land_writer.write(result)
+        land_writer.write(result, attempt=attempt)                 # Task 28: attempt in the name
         writer = CacheWriter(target=target.target, spec_version=spec.version)
         for name, el in elements.items():
             writer.put(result, el, field=name)                     # ONLY here (C2)
-        evaluate(key)                                              # Task 29: persists findings
+        findings = evaluate(key)                                   # Task 29: persists findings
         state = "healed" if heals else "completed"
         rows = len(result.rows)
     else:
@@ -23679,35 +24288,107 @@ async def run_once(spec_path: str, *, window: dt.date, attempt: int,
     record_attempt(key, attempt, state, None, target.record_sha256)
     record_run(key, target=target.target, spec_version=spec.version, window=window,
                state=state, rows_written=rows)
+    notify(findings, run_for(key))                                 # every settled run (M2)
     return key
 ```
 
 ```python
-# selector_drift/orchestrate/flows.py  (rewritten; heartbeat() stays first)
+# selector_drift/orchestrate/flows.py  (Task 6's file; everything after the prologue replaced)
+"""The scheduled run. Task 6's prologue is unchanged -- heartbeat first, then the spec, the run
+key and link_heartbeat -- and pipeline.run_once() now does everything after it."""
+from __future__ import annotations
+
 import asyncio
-import datetime as dt
+from datetime import UTC, date, datetime
 
-from prefect import flow, get_run_logger
+from prefect import Flow, flow, get_run_logger
+from prefect.client.schemas.objects import FlowRun, State
 from prefect.runtime import flow_run
+from sqlalchemy import func, select
 
-from selector_drift.credentials.registry import provider_for     # Tasks 31-32: per-target posture
-from selector_drift.orchestrate.pipeline import run_once
-from selector_drift.orchestrate.run_record import heartbeat
+from selector_drift.browser.limits import FLOW_TIMEOUT_SECONDS   # B8: 600 s (Task 4)
+from selector_drift.credentials import registry                 # Tasks 31-32; module attribute so tests can patch it
+from selector_drift.db.models import RunAttempt
+from selector_drift.db.session import Session
+from selector_drift.orchestrate.pipeline import run_for, run_once
+from selector_drift.orchestrate.run_record import (heartbeat, link_heartbeat, parse_run_key,
+                                                   record_attempt, record_run, run_key,
+                                                   window_for)
+from selector_drift.quality.alerts import notify, post_alert
 from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
 from selector_drift.resolve.rungs.r3_anchors import AnchorRung
 from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
+from selector_drift.spec.loader import load_spec, spec_file, target_of
 
 CONFIRMERS = (AxTreeRung(), AnchorRung(), HeuristicRung())   # injected: validate/ sees only Rung
+RETRIES = 2
+RETRY_DELAY_SECONDS = 300
 
 
-@flow(name="extraction", retries=2, retry_delay_seconds=300, timeout_seconds=900)
-def extraction_flow(spec_path: str, target: str) -> str:
-    scheduled = flow_run.scheduled_start_time or dt.datetime.now(dt.UTC)
-    heartbeat(target, scheduled, None)
-    attempt = flow_run.run_count or 1
-    window = scheduled.astimezone(dt.UTC).date()                  # UTC, always (M20)
-    key = asyncio.run(run_once(spec_path, window=window, attempt=attempt,
-                               credentials=provider_for(target), confirmers=CONFIRMERS))
+def scheduled_slot() -> datetime:
+    """The cron slot this run belongs to, in UTC (Task 6). Outside a flow run: now()."""
+    slot = flow_run.scheduled_start_time
+    return datetime.fromtimestamp(slot.timestamp(), tz=UTC)
+
+
+def _describe(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _open_attempt(key: str) -> RunAttempt | None:
+    """The latest attempt, if it started and nothing settled it. A refusal has no attempt, and
+    a settled attempt must never be re-marked failed."""
+    with Session() as s:
+        latest = s.scalar(select(func.max(RunAttempt.attempt)).where(RunAttempt.run_key == key))
+        if latest is None:
+            return None
+        row = s.scalar(select(RunAttempt).where(RunAttempt.run_key == key,
+                                                RunAttempt.attempt == latest))
+        return row if row is not None and row.state == "started" else None
+
+
+def _fail(attempt: RunAttempt, error: str) -> None:
+    """Design 9.3 Fail: the attempt and the run are marked failed, and someone is told."""
+    target, version, window = parse_run_key(attempt.run_key)
+    record_attempt(attempt.run_key, attempt.attempt, "failed", error,
+                   attempt.scope_record_sha256)
+    record_run(attempt.run_key, target=target, spec_version=version, window=window,
+               state="failed", error=error)
+    post_alert("failed", target, attempt.run_key, error)
+    notify([], run_for(attempt.run_key))
+
+
+def _on_failure(flow_: Flow[..., str], run: FlowRun, state: State) -> None:
+    """Prefect calls this when the flow run ends Failed -- including a timeout or a crash the
+    body's `except` never saw (found 2026-09-26: a failed run never alerted). An attempt still
+    reading `started` is one nothing recorded; record it now."""
+    spec_path = str(run.parameters["spec_path"])
+    slot = (run.expected_start_time or datetime.now(UTC)).astimezone(UTC)
+    key = run_key(target_of(spec_path), load_spec(spec_file(spec_path)).version,
+                  window_for(slot))
+    attempt = _open_attempt(key)
+    if attempt is not None:
+        _fail(attempt, state.message or "the flow run failed without a recorded error")
+
+
+@flow(name="extraction", retries=RETRIES, retry_delay_seconds=RETRY_DELAY_SECONDS,
+      timeout_seconds=FLOW_TIMEOUT_SECONDS, on_failure=[_on_failure])
+def extraction_flow(spec_path: str) -> str:
+    slot = scheduled_slot()
+    stem = target_of(spec_path)
+    beat = heartbeat(stem, slot, None)                  # FIRST statement (API spec 6.1, B3)
+    spec = load_spec(spec_file(spec_path))              # SpecError: heartbeat stays, run_key NULL
+    window = window_for(slot)
+    key = run_key(stem, spec.version, window)
+    link_heartbeat(beat, key)
+    try:
+        asyncio.run(run_once(spec_path, window=date.fromisoformat(window),
+                             credentials=registry.provider_for(stem), confirmers=CONFIRMERS))
+    except Exception as exc:
+        attempt = _open_attempt(key)                    # None: failed before authorise()
+        if attempt is not None:
+            _fail(attempt, _describe(exc))
+        raise                                           # Prefect's retry policy applies
     get_run_logger().info("run finished", extra={"run_key": key})
     return key
 ```
@@ -23717,27 +24398,48 @@ def extraction_flow(spec_path: str, target: str) -> str:
 returns the `CredentialProvider` a target's posture names; Task 31 creates the module with
 `SessionInjection` as the default and Task 32 registers the other two.
 
+**What changed from the first draft of this step, and why (reconciled 2026-09-26 against Tasks 5,
+6, 13, 25, 28 and 29A).** `load_scope` is imported from `spec.loader`, not `scope.gate`; the spec and
+scope files are resolved with `spec_file()` / `scope_file()` (the first draft prefixed
+`settings.spec_dir` twice); `record_run` is Task 6's, not a local copy; `record_authorisation()` is
+called after `authorise()`, so every run carries its audit row and mirror (Task 2's promise); the
+attempt is `next_attempt(key)`, never Prefect's `run_count`, which restarts at 1 for every new flow
+run and overwrote attempt 1 (M13); the flow keeps Task 6's one-argument signature, its heartbeat-first
+prologue and its 600-second timeout; `driver.open` is called through the module so the refused-target
+test's patch is real; `checks_for` receives `first_heal_policy`; the lake write passes
+`attempt=attempt`; an `EscalateToHuman` quarantines the run with reason `escalated` instead of
+failing the flow (a retry would duplicate the `resolutions` rows and the corpus case); `notify()`
+runs on **every** settled run; and failures — including a timeout or crash the body never sees — are
+recorded and alerted by `_fail()` / the `on_failure` hook (design §9.3).
+
 In Part 2 (Step 8), the block between the two `# ----` markers is replaced by:
 
 ```python
+    findings: list[Finding] = []
     state = settle(target=target, spec=spec, candidate=candidate, result=result,
                    evidence=evidence, elements=elements, heals=heals,
                    cache=CacheWriter(target=target.target, spec_version=spec.version),
-                   cache_before=cache_before, redaction_key=settings.redaction_key)
+                   cache_before=cache_before, redaction_key=settings.redaction_key,
+                   attempt=attempt)
     rows = len(result.rows) if isinstance(result, ValidatedExtraction) else 0
     if state != "quarantined":
-        evaluate(key)
+        findings = evaluate(key)
 ```
 
-and `_hold_minimal` is deleted.
+`_hold_minimal` is deleted, and its two other callers — the `escalated` early return and the
+`RowMisaligned` early return — call Part 2's `hold(key, reason, verdicts, empty)` with
+`empty = CandidateExtraction(rows=[], trace=traces, spec_version=spec.version, run_key=key)`, so a
+quarantine always has a `data_uri`, even when it holds no rows. The tail (`record_attempt`,
+`record_run`, `notify(findings, run_for(key))`) is unchanged.
 
-- [ ] **Step 4: Run the full check.** Expected: PASS, 6 tests, and the run states in `psql` now
+- [ ] **Step 4: Run the full check.** Expected: PASS, 8 tests in `test_pipeline_end_to_end.py` plus
+  Task 17 Step 8's 3 in `test_cache_writer.py`, and the run states in `psql` now
   include `healed` and `quarantined` for the first time.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add selector_drift/orchestrate tests/orchestrate
+git add .importlinter selector_drift/browser/navigate.py selector_drift/orchestrate tests/orchestrate
 git commit -m "feat(orchestrate): assemble the pipeline -- resolve, gate, land, log"
 ```
 
@@ -23750,7 +24452,6 @@ git commit -m "feat(orchestrate): assemble the pipeline -- resolve, gate, land, 
 from __future__ import annotations
 
 import ast
-import dataclasses
 import datetime as dt
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23838,8 +24539,8 @@ def evidence_env(tmp_path, monkeypatch):
 @pytest.fixture
 def lands(monkeypatch):
     written: list[object] = []
-    monkeypatch.setattr(accept_mod.land_writer, "write",
-                        lambda v: (written.append(v), Path("/lake/x.parquet"))[1])
+    monkeypatch.setattr(accept_mod.land_writer, "write",       # accept() passes attempt= (Task 28)
+                        lambda v, attempt=None: (written.append(v), Path("/lake/x.parquet"))[1])
     return written
 
 
@@ -23864,8 +24565,10 @@ def _run(html: str, checks, *, masked: bool = True):
     claim = Claim(value="AB12345678", method=Method.DETERMINISTIC,
                   source=DomSource(snapshot_id=ev.sha256, selector=el.selector, rung=el.rung_id),
                   observed_at=datetime.now(UTC))
-    candidate = CandidateExtraction(rows=[{"claim_number": claim}], trace=trace,
-                                    spec_version=1, run_key=RUN_KEY)
+    # trace is dict[str, CascadeTrace] (Task 20's CandidateExtraction), keyed by field.
+    candidate = CandidateExtraction(rows=[{"claim_number": claim}],
+                                    trace={"claim_number": trace}, spec_version=1,
+                                    run_key=RUN_KEY)
     ctx = HealContext(healed=True, winning_rung=el.rung_id, page=None, target=CLAIM_NUMBER,
                       cache=FakeCache())
     result = gate(candidate, None, ctx, checks)
@@ -23876,7 +24579,7 @@ def _run(html: str, checks, *, masked: bool = True):
         heal = HealEvent(run_key=RUN_KEY, target="testbench", field="claim_number",
                          broke_at=datetime.now(UTC), winning_rung=el.rung_id,
                          selector_after=el.selector,
-                         anchor_after=dataclasses.asdict(el.anchor), trace=[],
+                         anchor_after=el.anchor.model_dump(mode="json"), trace=[],
                          verdicts=[])
         s.add(heal)
         s.commit()
@@ -23951,7 +24654,7 @@ def test_last_accepted_moves_only_after_land_write_returns(monkeypatch):
     old = _seed_last_accepted(OLD_PAGE)
     cache = FakeCache()
 
-    def refuse(v):
+    def refuse(v, attempt=None):
         raise OSError("lake unavailable")
     monkeypatch.setattr(accept_mod.land_writer, "write", refuse)
     ev, el, candidate, result, heal = _run(NEW_PAGE, [Passes()])
@@ -23994,8 +24697,9 @@ def _run_again_passing(html: str):
     claim = Claim(value="AB12345678", method=Method.DETERMINISTIC,
                   source=DomSource(snapshot_id=ev.sha256, selector=el.selector, rung=el.rung_id),
                   observed_at=datetime.now(UTC))
-    candidate = CandidateExtraction(rows=[{"claim_number": claim}], trace=trace,
-                                    spec_version=1, run_key=RUN_KEY)
+    candidate = CandidateExtraction(rows=[{"claim_number": claim}],
+                                    trace={"claim_number": trace}, spec_version=1,
+                                    run_key=RUN_KEY)
     ctx = HealContext(healed=True, winning_rung=el.rung_id, page=None, target=CLAIM_NUMBER,
                       cache=FakeCache(), human_confirmed=True)
     return ev, el, candidate, gate(candidate, None, ctx, [Passes()]), None
@@ -24022,8 +24726,36 @@ def test_the_three_acceptance_writes_have_one_call_site():
     assert all(v == [accept_py] for v in calls.values()), calls
 
 
+@pytest.mark.unit
+def test_promotion_is_recorded_only_after_the_data_lands(monkeypatch):
+    """Ledger 2026-09-26: re-gate, land, THEN mark promoted -- a lake failure between the two
+    must leave the quarantine open, never 'promoted' with nothing written."""
+    from types import SimpleNamespace
+
+    from selector_drift.orchestrate import quarantine_actions as qa
+    calls: list[str] = []
+    monkeypatch.setattr(qa.quarantine, "promote",
+                        lambda *a, **k: (calls.append("promote"), SimpleNamespace(verdicts=()))[1])
+    monkeypatch.setattr(qa, "accept_promoted", lambda *a, **k: calls.append("land"))
+    monkeypatch.setattr(qa.quarantine, "mark_promoted", lambda *a, **k: calls.append("mark"))
+    monkeypatch.setattr(qa, "record_intervention", lambda *a, **k: calls.append("intervention"))
+    monkeypatch.setattr(qa.CacheWriter, "for_run_key", classmethod(lambda cls, key: None))
+    qa.build_quarantine_actions().promote(RUN_KEY, "op1", "checked the screenshots")
+    assert calls == ["promote", "land", "mark", "intervention"]
+
+    calls.clear()
+
+    def lake_down(*a, **k):
+        raise OSError("lake unavailable")
+    monkeypatch.setattr(qa, "accept_promoted", lake_down)
+    with pytest.raises(OSError):
+        qa.build_quarantine_actions().promote(RUN_KEY, "op1", "checked the screenshots")
+    assert "mark" not in calls
+
+
 @pytest.mark.integration
-def test_every_fire_writes_exactly_one_heartbeat_including_refusals(expired_spec):
+def test_every_fire_writes_exactly_one_heartbeat_including_refusals(prefect_api, db,
+                                                                    expired_spec):
     key = extraction_flow(expired_spec)
     with Session() as s:
         assert s.query(Heartbeat).filter_by(run_key=key).count() == 1
@@ -24042,6 +24774,7 @@ Expected: FAIL — `ModuleNotFoundError: selector_drift.orchestrate.accept`.
 data, to the selector cache, and to evidence (API spec 7.2)."""
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -24063,6 +24796,8 @@ from selector_drift.heallog.evidence import (RedactedEvidence, RedactionFailed,
 from selector_drift.heallog.replay import (ExpectedHeal, HealTimeCache, NotReproducible,
                                            replay_bundle)
 from selector_drift.land import writer as land_writer
+from selector_drift.land.layout import PROVENANCE_COL
+from selector_drift.land.writer import fs_key
 from selector_drift.orchestrate.cache_writer import CacheWriter
 from selector_drift.resolve.cache import CachedSelector
 from selector_drift.resolve.trace import ResolvedElement
@@ -24077,10 +24812,11 @@ _VERDICTS = TypeAdapter(list[Verdict])
 
 
 def accept(validated: ValidatedExtraction, elements: Mapping[str, ResolvedElement], *,
-           cache: CacheWriter, commit_last_accepted: Callable[[], object]) -> Path:
+           cache: CacheWriter, commit_last_accepted: Callable[[], object],
+           attempt: int | None = None) -> Path:
     """The ONLY call site of the three acceptance writes, in this order. Each runs only
     after the previous one returned; an exception stops the rest (C2, API spec 7.2)."""
-    path = land_writer.write(validated)
+    path = land_writer.write(validated, attempt=attempt)       # Task 28: the attempt is in the name
     for field_name, element in elements.items():
         cache.put(validated, element, field=field_name)
     commit_last_accepted()
@@ -24092,9 +24828,14 @@ def hold(run_key: str, reason: str, verdicts: Sequence[Verdict],
     """Quarantine: keep the data, the verdicts and the reason. Never the lake."""
     root = get_settings().lake_root / "quarantine"
     root.mkdir(parents=True, exist_ok=True)
-    final = root / f"{run_key.replace(':', '_')}.parquet"
+    final = root / f"{fs_key(run_key)}.parquet"               # Task 28: ':' is illegal on Windows
     tmp = final.with_suffix(".parquet.tmp")
-    rows = [{name: str(claim.value) for name, claim in row.items()} for row in candidate.rows]
+    # Values plus the lake's provenance column (Task 28), so promotion can rebuild the Claims
+    # the gate judged (rebuild_gate_inputs) instead of re-judging bare strings.
+    rows = [{name: str(claim.value) for name, claim in row.items()}
+            | {PROVENANCE_COL: json.dumps({name: claim.model_dump(mode="json", exclude={"value"})
+                                           for name, claim in row.items()})}
+            for row in candidate.rows]
     pq.write_table(pa.Table.from_pylist(rows), tmp)
     os.replace(tmp, final)
     with Session() as s:
@@ -24137,7 +24878,7 @@ def settle(*, target: AuthorisedTarget, spec: TaskSpec, candidate: CandidateExtr
            result: ValidatedExtraction | QuarantinedRun, evidence: Evidence,
            elements: Mapping[str, ResolvedElement], heals: Sequence[HealEvent],
            cache: CacheWriter, cache_before: Mapping[str, CachedSelector | None],
-           redaction_key: bytes) -> RunState:
+           redaction_key: bytes, attempt: int | None = None) -> RunState:
     try:
         redacted = redact_evidence(evidence, key=redaction_key)       # before ANY write
     except RedactionFailed as exc:
@@ -24150,7 +24891,7 @@ def settle(*, target: AuthorisedTarget, spec: TaskSpec, candidate: CandidateExtr
                           cache_before.get(heal.field), elements[heal.field].node_id)
 
     if isinstance(result, ValidatedExtraction):
-        accept(result, elements, cache=cache,
+        accept(result, elements, cache=cache, attempt=attempt,
                commit_last_accepted=lambda: write_last_accepted(redacted, target.target,
                                                                 Plane.CLIENT))
         return "healed" if heals else "completed"
@@ -24160,29 +24901,40 @@ def settle(*, target: AuthorisedTarget, spec: TaskSpec, candidate: CandidateExtr
 ```
 
 In `pipeline.py`, everything from the gate onward becomes one call. The excerpt below is the whole
-change; `live` is the `LiveCapture(session.page.raw, page_source.dom())` built right after the page
-is snapshotted, and `evidence` is the `capture(live, run_key=key, sensitivity=target.sensitivity,
-masker=PiiMasker(settings.redaction_key, target.sensitivity))` taken before resolution:
+change (reconciled 2026-09-26 with Task 29A: `notify()` runs on **every** settled run, with the
+findings `evaluate()` persisted — the first excerpt notified only on quarantine and named `findings`
+without defining it); `live` is the `LiveCapture(session.page.raw, page.dom())` built right after
+the page is snapshotted, and `evidence` is the `capture(live, run_key=key,
+sensitivity=target.sensitivity, masker=PiiMasker(settings.redaction_key, target.sensitivity))`
+taken before resolution:
 
 ```python
     evidence = await record_boxes(evidence, live,
                                   {name: el.node_id for name, el in elements.items()})
-    # ... extract.read, quality.evaluate, gate -- unchanged from Part 1 ...
+    # ... escalation / RowMisaligned early returns (now hold() with an empty candidate),
+    #     extract.read, history_for, checks_for, gate_run -- unchanged from Part 1 ...
     heals = record_heals(key, traces, elements, result.verdicts, target=target.target,
                          cache_before=cache_before)
+    findings: list[Finding] = []
     state = settle(target=target, spec=spec, candidate=candidate, result=result,
                    evidence=evidence, elements=elements, heals=heals,
                    cache=CacheWriter(target=target.target, spec_version=spec.version),
-                   cache_before=cache_before, redaction_key=settings.redaction_key)
-    if state == "quarantined":
-        notify(findings, run_for(key))                                  # Task 29A
-    return state
+                   cache_before=cache_before, redaction_key=settings.redaction_key,
+                   attempt=attempt)
+    rows = len(result.rows) if isinstance(result, ValidatedExtraction) else 0
+    if state != "quarantined":
+        findings = evaluate(key)                     # Task 29: reads landed rows
+    record_attempt(key, attempt, state, None, target.record_sha256)
+    record_run(key, target=target.target, spec_version=spec.version, window=window,
+               state=state, rows_written=rows)
+    notify(findings, run_for(key))                   # Task 29A: every settled run (M2)
+    return key
 ```
 
 `cache_before` is `{name: cache.get(target.target, name, spec.version) for name in fields}`, read
 **before** resolution, so a heal's replay runs against the cache entry rung 1 actually declined.
-`verdicts_of(result)` is `result.verdicts` on a `QuarantinedRun` and the gate's recorded verdict
-list on a `ValidatedExtraction` (Task 20).
+`record_heals` is given `result.verdicts` — both `QuarantinedRun` and `ValidatedExtraction` carry
+the gate's verdict list (Task 20).
 
 - [ ] **Step 9: Implement `quarantine_actions.py`**
 
@@ -24192,22 +24944,37 @@ list on a `ValidatedExtraction` (Task 20).
 write, and handed to the API -- which may not (Task 34, api-is-read-side)."""
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import pyarrow.parquet as pq
+from bok_core.boundary.egress import Plane
+from bok_core.provenance import Claim
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
-from bok_core.boundary.egress import Plane
-from selector_drift.db.models import HealEvent, Resolution
+from selector_drift.db.models import HealEvent, Quarantine, Resolution
 from selector_drift.db.session import Session
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.heallog.bundle import AFTER_HTML, read_heal_manifest, verified_bytes
 from selector_drift.heallog.evidence import promote_heal_bundle_to_last_accepted
+from selector_drift.land.layout import PROVENANCE_COL
 from selector_drift.orchestrate.accept import accept
 from selector_drift.orchestrate.cache_writer import CacheWriter
-from selector_drift.resolve.trace import AnchorEvidence, ResolvedElement
+from selector_drift.orchestrate.flows import CONFIRMERS
+from selector_drift.orchestrate.history import history_for
+from selector_drift.orchestrate.interventions import record_intervention
+from selector_drift.orchestrate.run_record import parse_run_key
+from selector_drift.resolve.cache import SelectorCache
+from selector_drift.resolve.page import StaticPageSource
+from selector_drift.resolve.trace import AnchorEvidence, CascadeTrace, ResolvedElement
+from selector_drift.spec.loader import load_scope, load_spec, scope_file, spec_file
 from selector_drift.validate import quarantine
-from selector_drift.validate.gate import ValidatedExtraction
+from selector_drift.validate.checks import checks_for
+from selector_drift.validate.gate import HealContext, ValidatedExtraction
+from selector_drift.validate.quarantine import GateInputs
 
 
 @dataclass(frozen=True)
@@ -24223,6 +24990,63 @@ def element_from_heal(session: OrmSession, heal: HealEvent) -> ResolvedElement:
     return ResolvedElement(selector=heal.selector_after, node_id=resolution.node_id,
                            anchor=AnchorEvidence(**heal.anchor_after),
                            rung_id=heal.winning_rung)
+
+
+def _page_of(heals: Sequence[HealEvent]) -> StaticPageSource | None:
+    """The DOM the run saw, from its newest heal bundle, verified against its manifest. None when
+    nothing was stored (a redaction failure) -- the gate then has no DOM evidence, and says so."""
+    latest = next((h for h in reversed(heals) if h.evidence_uri is not None), None)
+    if latest is None or latest.evidence_uri is None:
+        return None
+    bundle = Path(latest.evidence_uri)
+    dom = verified_bytes(bundle, read_heal_manifest(bundle).files, AFTER_HTML).decode("utf-8")
+    return StaticPageSource(dom)
+
+
+def _candidate(run_key: str, data_uri: str, spec_version: int,
+               winners: Mapping[str, int]) -> CandidateExtraction:
+    """The held rows as the Claims the gate judged: values plus the provenance hold() stored."""
+    rows = []
+    for record in pq.read_table(data_uri).to_pylist():
+        prov = json.loads(record.pop(PROVENANCE_COL, None) or "{}")
+        rows.append({name: Claim.model_validate(prov[name] | {"value": value})
+                     for name, value in record.items() if name in prov})
+    trace = {name: CascadeTrace(attempts=(), winner=rung) for name, rung in winners.items()}
+    return CandidateExtraction(rows=rows, trace=trace, spec_version=spec_version, run_key=run_key)
+
+
+def rebuild_gate_inputs(run_key: str) -> GateInputs:
+    """Task 25's `Rebuild` (ledger 2026-09-26): the gate's inputs for a quarantined run, rebuilt
+    from what was stored -- the held parquet, the history, the heal bundle's `after` page, the
+    heal_events, and checks_for with the target's own warm-up and first-heal policy."""
+    target, version, _window = parse_run_key(run_key)
+    spec = load_spec(spec_file(f"{target}.yaml"))
+    if spec.version != version:
+        raise ValueError(f"{run_key} was judged under spec v{version}; the spec is now "
+                         f"v{spec.version} -- discard it and let the next run judge afresh")
+    record = load_scope(scope_file(spec.scope_ref))
+    with Session() as s:
+        q = s.get(Quarantine, run_key)
+        if q is None or not q.data_uri:
+            raise LookupError(f"{run_key} holds no quarantined data to promote")
+        data_uri = q.data_uri
+        heals = list(s.scalars(select(HealEvent).where(HealEvent.run_key == run_key)
+                               .order_by(HealEvent.id)))
+        history = history_for(s, target, spec)
+    healed = {h.field: h.winning_rung for h in heals}
+    page, cache = _page_of(heals), SelectorCache()
+    contexts = {t.name: HealContext(healed=t.name in healed, winning_rung=healed.get(t.name, 1),
+                                    page=page, target=t, cache=cache)
+                for t in spec.targets}
+    candidate = _candidate(run_key, data_uri, spec.version,
+                           {name: ctx.winning_rung for name, ctx in contexts.items()})
+    if not candidate.rows:
+        raise ValueError(f"{run_key} held no rows (escalated or misaligned): nothing to promote "
+                         "-- discard it")
+    checks = {t.name: checks_for(spec, t, CONFIRMERS, warmup_runs=record.warmup_runs,
+                                 first_heal_policy=record.first_heal_policy)
+              for t in spec.targets}
+    return GateInputs(candidate=candidate, history=history, contexts=contexts, checks=checks)
 
 
 def accept_promoted(run_key: str, validated: ValidatedExtraction, *,
@@ -24245,8 +25069,15 @@ def accept_promoted(run_key: str, validated: ValidatedExtraction, *,
 
 def build_quarantine_actions() -> QuarantineActions:
     def _promote(run_key: str, actor: str, reason: str) -> None:
-        validated = quarantine.promote(run_key, actor=actor, reason=reason)  # re-runs the gate
+        # Re-gate, land, THEN record (ledger 2026-09-26): the record never runs ahead of the data.
+        validated = quarantine.promote(run_key, actor=actor, reason=reason,
+                                       rebuild=rebuild_gate_inputs)
         accept_promoted(run_key, validated, cache=CacheWriter.for_run_key(run_key))
+        quarantine.mark_promoted(run_key, actor=actor, reason=reason,
+                                 verdicts=validated.verdicts)
+        record_intervention("manual_promote", actor, run_key.split(":", 1)[0], "*",   # Task 29A
+                            {"run_key": run_key, "state": "quarantined"},
+                            {"run_key": run_key, "state": "promoted"}, reason)
 
     def _discard(run_key: str, actor: str, reason: str) -> None:
         quarantine.discard(run_key, actor=actor, reason=reason)
@@ -24257,7 +25088,8 @@ def build_quarantine_actions() -> QuarantineActions:
 - [ ] **Step 10: Run the full check**
 
 Run: `uv run pytest tests/orchestrate -v -m "unit or integration" && uv run lint-imports`
-Expected: PASS — 6 Part 1 tests, 9 Part 2 tests, the 6 Task 6 tests. `resolver-cannot-write` and
+Expected: PASS — 8 Part 1 tests, 10 Part 2 tests, the Task 6 tests and Task 17 Step 8's 3
+cache-writer tests. `resolver-cannot-write` and
 `judged-cannot-call-judge` still kept (`orchestrate/` is the one package allowed to hold both halves).
 
 - [ ] **Step 11: Commit**
@@ -24268,71 +25100,103 @@ git commit -m "feat(orchestrate): evidence bundle and last-accepted move only on
 ```
 
 **The bench fixtures Part 1's tests use — defined (found 2026-09-26: `bench`, `bench_mutated`,
-`bench_decoy` and `flaky_bench` were used and never created).** They run the real portal in-process on
-a free port with a **fixed clock**, never the signed override: the product never sends one (bench spec
-§3). A test scope record, identical to the real one except for its origin, names the local server, so
-the scope gate is exercised rather than bypassed.
+`bench_decoy` and `flaky_bench` were used and never created).** They are **appended** to Task 6's
+`tests/orchestrate/conftest.py` in Part 1 Step 1 — never a whole-file write, which would delete Task
+6's `db`, `prefect_api`, `scope_dir`, `scope_record` and `write_scope` (ledger 2026-09-26). They run the
+real portal in-process on a free port with a **fixed clock**, never the signed override: the product
+never sends one (bench spec §3). The scope record is Task 6's `scope_record()` — the real bench record
+with a local origin — so the scope gate is exercised rather than bypassed; only its rate limit is
+raised (100 per second) so a six-field run does not sleep through the bench's production limit.
 
 ```python
-# tests/orchestrate/conftest.py
-from __future__ import annotations
+# tests/orchestrate/conftest.py  (APPEND to Task 6's file; its imports stay, these join them)
+import os
+from collections.abc import Callable
 
-import datetime as dt
-from collections.abc import Callable, Iterator
-from pathlib import Path
-
-import pytest
-import yaml
+from sqlalchemy.orm import Session as OrmSession
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 
+from pydantic import SecretStr
+
+from selector_drift.credentials.provider import Credentials, NotSupported
+from selector_drift.db.session import Session
 from testbench.mutations.catalogue import CATALOGUE
 from testbench.portal.app import create_app
 from tests.testbench.conftest import _serve                 # Task 7's in-thread uvicorn helper
 from tests.testbench.helpers import first_day_scheduling    # Task 8
 
 START = dt.date(2026, 1, 1)
+FAST = {"requests": 100, "per_seconds": 1}                  # the gate still runs; it just waits less
 
 
 def _clock(day: dt.date) -> Callable[[], dt.datetime]:
     return lambda: dt.datetime.combine(day, dt.time(4, 12), tzinfo=dt.UTC)
 
 
-def _point_product_at(url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = yaml.safe_load(Path("scopes/testbench.yaml").read_text(encoding="utf-8"))
-    rec["origins"] = [url]
-    scopes = tmp_path / "scopes"
-    scopes.mkdir(exist_ok=True)
-    (scopes / "testbench.yaml").write_text(yaml.safe_dump(rec), encoding="utf-8")
-    monkeypatch.setenv("SD_SCOPE_DIR", str(scopes))
+def _point_product_at(url: str, scopes: Path, tmp_path: Path,
+                      monkeypatch: pytest.MonkeyPatch) -> None:
+    write_scope(scopes, scope_record("testbench", url, rate_limit=FAST))
+    for name, sub in (("SD_LAKE_ROOT", "lake"), ("SD_EVIDENCE_ROOT", "evidence"),
+                      ("SD_SESSION_DIR", "sessions"), ("SD_ESCALATION_CORPUS", "corpus")):
+        monkeypatch.setenv(name, str(tmp_path / sub))
+    monkeypatch.setenv("SD_REDACTION_KEY", os.urandom(32).hex())   # per test, never in the repo
+    get_settings.cache_clear()                      # after SD_SCOPE_DIR and friends are set
     monkeypatch.setattr("selector_drift.browser.registry.url_for", lambda target: url)
+    # The bench's public demo account (bench spec §3.2: printed in its README, not a secret). The
+    # spec's login steps need a username and password; the default SessionInjection has neither.
+    monkeypatch.setattr("selector_drift.credentials.registry.provider_for",
+                        lambda target: _DemoAccount())
+    with engine.begin() as c:                       # Task 6's `db` cascades from runs; the cache
+        c.execute(text("TRUNCATE selector_cache"))  # has no FK to runs, so it is cleared here
 
 
-def _bench(day: dt.date, catalogue: tuple, tmp_path: Path,
+class _DemoAccount:
+    def get(self, target: object) -> Credentials:
+        return Credentials(cookies=None, username="demo", password=SecretStr("demo"))
+
+    def get_totp_code(self, target: object) -> str:
+        raise NotSupported("the bench has no second factor")
+
+
+def _bench(day: dt.date, catalogue: tuple, scopes: Path, tmp_path: Path,
            monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     for url in _serve(create_app(clock=_clock(day), catalogue=catalogue)):
-        _point_product_at(url, tmp_path, monkeypatch)
+        _point_product_at(url, scopes, tmp_path, monkeypatch)
         yield url
+    get_settings.cache_clear()
 
 
 @pytest.fixture
-def bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    yield from _bench(START, (), tmp_path, monkeypatch)             # no mutations at all
+def session(db: None) -> Iterator[OrmSession]:
+    with Session() as s:
+        yield s
 
 
 @pytest.fixture
-def bench_mutated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+def bench(db: None, scope_dir: Path, tmp_path: Path,
+          monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    yield from _bench(START, (), scope_dir, tmp_path, monkeypatch)       # no mutations at all
+
+
+@pytest.fixture
+def bench_mutated(db: None, scope_dir: Path, tmp_path: Path,
+                  monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     only = tuple(e for e in CATALOGUE if e.name == "LabelReword")
-    yield from _bench(first_day_scheduling("LabelReword", START), only, tmp_path, monkeypatch)
+    yield from _bench(first_day_scheduling("LabelReword", START), only, scope_dir, tmp_path,
+                      monkeypatch)
 
 
 @pytest.fixture
-def bench_decoy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    yield from _bench(first_day_scheduling("DecoyColumn", START), CATALOGUE, tmp_path, monkeypatch)
+def bench_decoy(db: None, scope_dir: Path, tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    yield from _bench(first_day_scheduling("DecoyColumn", START), CATALOGUE, scope_dir, tmp_path,
+                      monkeypatch)
 
 
 @pytest.fixture
-def flaky_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+def flaky_bench(db: None, scope_dir: Path, tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """503 for the first two requests, then normal service -- a retry must succeed and the
     failed attempts must survive in run_attempts (M13)."""
     app = create_app(clock=_clock(START), catalogue=())
@@ -24346,12 +25210,14 @@ def flaky_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str
         return await call_next(request)  # type: ignore[misc,no-any-return]
 
     for url in _serve(app):
-        _point_product_at(url, tmp_path, monkeypatch)
+        _point_product_at(url, scope_dir, tmp_path, monkeypatch)
         yield url
+    get_settings.cache_clear()
 ```
 
-`SD_SCOPE_DIR` is honoured by the scope loader (Task 5 reads `scopes/` by default; the variable exists
-for tests and is documented in `.env.example` as test-only).
+`scope_dir` (Task 6) sets `SD_SCOPE_DIR` and clears the settings cache; `_point_product_at` clears it
+again after the lake, evidence, session and corpus variables are set, because `get_settings()` is
+`lru_cache`d and a value read before those `setenv`s would otherwise stick for the whole test.
 
 ---
 
@@ -24384,26 +25250,20 @@ depends on; the I/O half is covered by Task 26A's end-to-end tests.
 - [ ] **Step 0: Add the helpers to `tests/suite/conftest.py`**
 
 ```python
-# tests/suite/conftest.py  (additions)
-from selector_drift.validate.gate import HealContext, ValidatedExtraction, gate_run
-from selector_drift.validate.quarantine import QuarantinedRun
+# tests/suite/conftest.py  (additions -- ALL_BENIGN_MUTATION_CLASSES, judge_run, all_checks and
+# the gate imports already exist from Task 26 Step 0; nothing here redefines them)
+from selector_drift.resolve.trace import Family
 from selector_drift.validate.verdict import Confirmation, Verdict
-
-ALL_BENIGN_MUTATION_CLASSES = [e for e in CATALOGUE if not e.adversarial]
 
 
 def run_pipeline_on(ev: Evidence, *, history: History | None,
                     cache: _DictCache) -> ValidatedExtraction | QuarantinedRun:
-    page = StaticPageSource(ev.dom.value)
-    resolved, contexts = {}, {}
-    for t in SPEC.targets:
-        el, trace = resolve_cascade(page, t, cache, record=False)
-        resolved[t.name] = el
-        contexts[t.name] = HealContext(healed=trace.winner != 1, winning_rung=trace.winner,
-                                       page=None, target=t, cache=cache)
-    candidate = read(ev.dom.value, resolved, SPEC, run_key=ev.run_key, snapshot_id=ev.sha256,
-                     traces={}, observed_at=AT)
-    return gate_run(candidate, history, contexts, {t.name: all_checks(t) for t in SPEC.targets})
+    """Task 26's judge_run, which builds each HealContext with page=StaticPageSource(dom) and
+    healed=trace.healed (2026-09-26: this helper passed page=None, so IndependentRungAgreement
+    could only ever say INSUFFICIENT). A benign page must never fail to resolve."""
+    _, result = judge_run(ev, history=history, cache=cache)
+    assert result is not None, "a benign mutation left a field unresolved or rows misaligned"
+    return result
 
 
 def verdicts_of(result: ValidatedExtraction | QuarantinedRun) -> list[Verdict]:
@@ -24450,8 +25310,8 @@ def test_each_acceptance_names_the_confirmer_that_carried_it(m, bench_evidence, 
 ```
 
 and the label-reword test asserts `confirmer_of(result, "claim_number").family is Family.VALUE`.
-`family_of(rung) -> Family` is `{2: TEXT_SEMANTIC, 3: TEXT_SEMANTIC, 4: STRUCTURAL}[rung]`, defined in
-the same conftest. `heals_under_blackout(m)` is
+`family_of(rung) -> Family` is `{2: Family.TEXT_SEMANTIC, 3: Family.TEXT_SEMANTIC, 4: Family.STRUCTURAL}[rung]`,
+defined in the same conftest additions. `heals_under_blackout(m)` is
 `isinstance(run_pipeline_on(bench_evidence[m.name], history=history, cache=warm_cache()),
 ValidatedExtraction)` evaluated inside `blackout()`; the degraded-mode test takes the same fixtures.
 
@@ -24641,7 +25501,7 @@ def test_redaction_does_not_move_nodes(redaction_key: bytes) -> None:
     # If this ever fails, every judgement the scorer makes is silently wrong.
     from bok_core.boundary.redact import redact
     from bok_core.boundary.sensitivity import Labelled, Sensitivity
-    from testbench.portal.data import render_results
+    from testbench.portal.render import render_results       # Task 7: render.py, not data.py
 
     raw = render_results(dt.date(2026, 10, 3))
     red = redact(Labelled(value=raw, sensitivity=Sensitivity.SYNTHETIC), key=redaction_key).text
@@ -24668,10 +25528,12 @@ def test_a_quarantined_decoy_heal_scores_as_a_correct_refusal(db, decoy_heal_qua
     from testbench.score import score_pending
     score_pending(db)
     detail = db.execute(
-        text("select detail from audit_log where action = 'scored' and subject = :s"),
+        text("select detail from audit_log where action = 'scored' and subject = :s "
+             "and actor = 'testbench.score'"),
         {"s": str(decoy_heal_quarantined.id)},
     ).scalar_one()
     assert detail["judgement"] == Judgement.CORRECT_REFUSAL.value
+    assert detail["run_key"] == decoy_heal_quarantined.run_key      # the pinned row shape
 ```
 
 `tests/testbench/conftest.py` provides:
@@ -24761,7 +25623,7 @@ def _meta_seed(after_html: str) -> str:
 
 
 _PENDING = text("""
-    select h.id, h.field, h.evidence_uri, r.node_id,
+    select h.id, h.run_key, h.field, h.evidence_uri, r.node_id,
            (q.run_key is null or q.resolved_as = 'promoted') as accepted
       from heal_events h
       join resolutions r on r.id = h.resolution_id
@@ -24791,9 +25653,11 @@ def score_pending(session: Session) -> list[int]:
                 "day": day.isoformat(), "field": row["field"], "resolved": resolved,
                 "expected_first": expected[0] if expected else None,
                 "judgement": judge(correct=correct, accepted=bool(row["accepted"])).value,
+                "run_key": row["run_key"],
             }
         except (UnscorableHeal, FileNotFoundError, KeyError) as exc:
-            detail = {"field": row["field"], "judgement": "unscorable", "reason": str(exc)}
+            detail = {"field": row["field"], "judgement": "unscorable", "reason": str(exc),
+                      "run_key": row["run_key"]}
         session.execute(
             text("insert into audit_log (at, actor, action, subject, detail) "
                  "values (now(), 'testbench.score', 'scored', :s, cast(:d as jsonb))"),
@@ -24806,14 +25670,20 @@ def score_pending(session: Session) -> list[int]:
 
 @flow(name="bench-scorer")
 def score_pending_flow() -> int:
-    from selector_drift.db.session import SessionLocal  # permitted: only-the-scorer-reads-the-product
-    with SessionLocal() as s:
+    from selector_drift.db.session import Session  # permitted: only-the-scorer-reads-the-product
+    with Session() as s:
         return len(score_pending(s))
 ```
 
 An `unscorable` heal is written, not skipped. Skipping would leave it pending forever and hide it;
 a published count of unscorable heals is honest, and a non-zero count is itself a finding about the
 bench.
+
+**The row shape is a contract (pinned 2026-09-26).** Every judgement is one `audit_log` row with
+`actor = 'testbench.score'`, `action = 'scored'`, `subject = str(heal_id)` and `detail` carrying
+`judgement`, `field` and **`run_key`** (added here: Task 29A's `notify_false_accepts` names the target
+from it, and Task 34B counts by `actor` and date window, never by parsing `subject`). Task 34B and
+Task 29A read exactly this shape.
 
 - [ ] **Step 4: Schedule it after each bench run**
 
@@ -27440,7 +28310,7 @@ cycle a reviewer could reject independently, and they run **in this order: 34 �
 - Test: `tests/api/__init__.py` (empty), `tests/api/conftest.py`, `tests/api/test_auth.py`, `tests/api/test_contract.py`
 
 **Interfaces:**
-- Consumes: `Operator`, `OperatorSession`, `AuditLog` (Task 3 + schema additions); `Settings`, `get_settings`, `ConfigError` (Task 33); `Verdict` (Task 20); `Family`, `AnchorEvidence` (`resolve/trace.py`, Task 13); `Basis`, `FirstHealPolicy` (Task 2); `BBox` (Task 19); `DiffSpan` (Task 33); `Severity` (`bok_core.findings`); `RailPayload` (`bok_core.provenance.render`); `Sensitivity`; `extraction_flow` (Task 6, for `run`).
+- Consumes: `Operator`, `OperatorSession`, `AuditLog` (Task 3 + schema additions); `Settings`, `get_settings`, `ConfigError` (Task 5 — the one definition); `Verdict` (Task 20); `Family`, `AnchorEvidence` (`resolve/trace.py`, Task 13); `Basis`, `FirstHealPolicy` (Task 2); `BBox` (Task 19); `DiffSpan` (Task 33); `Severity` (`bok_core.findings`); `RailPayload` (`bok_core.provenance.render`); `Sensitivity`; `extraction_flow` (Task 6, for `run`).
 - Produces:
   - `views.py`: `RequestModel`, `ViewModel`, `LoginRequest`, `DecisionRequest`, `OperatorView`, `RateLimitView`, `TargetView`, `RunView`, `AttemptView`, `RungAttemptView`, `ResolutionView`, `RunDetailView`, `DecisionView`, `EvidenceSideView`, `ExtractedValueView`, `HealView`, `QuarantineView`, `FindingView`, `SpecView`, `StatsView`, `Page[T]`; re-exports `BBox`, `DiffSpan`
   - `errors.py`: `PROBLEM_JSON`, `ProblemDetail`, `ApiProblem` and its subclasses `Unauthenticated` (401), `BadOrigin` (403), `NotFound` (404), `Invalid` (422), `StillInvalidProblem` (409), `AlreadyResolved` (409), `Throttled` (429), `EvidenceGone` (410); `problem_response(problem, base_url) -> JSONResponse`; `install_problem_handlers(app) -> None`
@@ -27484,6 +28354,13 @@ forbidden_modules =
     selector_drift.heallog.replay
     selector_drift.heallog.retention
 ```
+
+and, in the `[importlinter]` section at the top of the file, add `exclude_type_checking_imports = True`
+(import-linter ≥ 2.0). **Found 2026-09-26:** the API imports `validate/` (Task 25's `promote` result
+types), and `validate/gate.py` names `CacheReader` and `PageSource` in `HealContext`'s annotations.
+Those imports sit under `if TYPE_CHECKING:` (Task 20), so no runtime path runs from the API into
+`resolve.cache`; without this setting the graph would still count them and break the contract on an
+edge that never executes.
 
 The spec's wording is "must not import `resolve/`". The contract forbids `resolve.cascade`,
 `resolve.rungs` and `resolve.cache` rather than all of `resolve`, because `views.py` must import
@@ -28010,7 +28887,8 @@ class QuarantineView(ViewModel):
     target: str
     reason: str
     verdicts: list[Verdict]
-    failing: list[Verdict]                 # outcome != PASS -- what a human must resolve
+    failing: list[Verdict]                 # outcome FAIL -- INSUFFICIENT is tolerated once a
+                                           # human confirms (design 5.9), so it is not listed
     preview: list[dict[str, ExtractedValueView]]   # first 20 rows
     heal_ids: list[int]
     spec_excerpt: str                      # the FieldTarget YAML for each failing field (M11)
@@ -28044,11 +28922,14 @@ class StatsView(ViewModel):                # API spec 6.2 -- plain figures with 
     missed_runs: int
     fired_without_attempt: int
     run_success_rate: float                # completed+healed / attempted, from run_attempts
-    rung_shares: dict[str, float]          # rung1..rung5, from resolutions
+    rung_shares: dict[str, float]          # rung1..rung5, from resolutions; {} before the first
     heals: int
     quarantines: int
     quarantines_refused_correctly: int | None   # bench only; None without an answer key
-    manual_interventions: int
+    manual_interventions: int              # manual SELECTOR fixes: spec edits (not schedule) and
+                                           # cache edits -- the "zero manual fixes" headline
+    human_confirmations: int               # manual_promote rows: first-heal confirmations, a
+                                           # designed step, never counted as a fix (2026-09-26)
     method_url: str                        # docs/methodology.md anchor for these figures
 
 
@@ -28445,16 +29326,17 @@ def create_app(*, settings: Settings | None = None) -> FastAPI:
 `openapi_url=None`: the schema is exported by `scripts/gen-types.sh` calling `app.openapi()`
 directly (Task 34C), so no unauthenticated route serves it.
 
-- [ ] **Step 9: `create-operator` in `__main__.py`**
+- [ ] **Step 9: Add the `create-operator` subparser to `__main__.py`**
 
-Task 6's module becomes an argparse dispatcher; its original behaviour is the `run` subcommand.
+**An addition to Task 6's argparse, not a rewrite (2026-09-26).** Task 6's `__main__.py` already is
+the dispatcher: `main(argv)` with `add_subparsers(dest="command", required=True)`, the `run <spec>`
+subcommand and its help text, and `_run()`. This step adds one function and one subparser beside
+them and changes nothing else; Task 34C Step 7 adds `serve-api` the same way. The first draft
+replaced the file wholesale and dropped `run`'s help text.
+
+Add, above `main()`:
 
 ```python
-# selector_drift/__main__.py
-"""python -m selector_drift <command>. No Typer, no Click, no [project.scripts]."""
-from __future__ import annotations
-
-import argparse
 import getpass
 import sys
 
@@ -28480,34 +29362,25 @@ def _create_operator(username: str) -> int:
         s.commit()
     print(f"operator {username} created")
     return 0
-
-
-def _run(spec: str) -> int:
-    from selector_drift.orchestrate.flows import extraction_flow
-    print(extraction_flow(spec))
-    return 0
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m selector_drift")
-    sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("run", help="run one extraction now").add_argument("spec")
-    sub.add_parser("create-operator", help="create an API operator").add_argument("username")
-    args = parser.parse_args(argv)
-    if args.command == "run":
-        return _run(args.spec)
-    if args.command == "create-operator":
-        return _create_operator(args.username)
-    parser.error(f"unknown command {args.command}")
-    return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
 ```
 
-(Imports inside the two command functions are deliberate: `create-operator` must not import the
-orchestrator and its Playwright dependency tree just to hash a password.)
+and in `main()`, after Task 6's `run` subparser and before `args = parser.parse_args(argv)`:
+
+```python
+    op = sub.add_parser("create-operator", help="create an API operator (password from a TTY)")
+    op.add_argument("username")
+```
+
+with the dispatch, before Task 6's closing `parser.error(...)`:
+
+```python
+    if args.command == "create-operator":
+        return _create_operator(str(args.username))
+```
+
+(Imports inside the command functions are deliberate: `create-operator` must not import the
+orchestrator and its Playwright dependency tree just to hash a password.) Task 6's
+`tests/test_main.py` keeps passing unchanged, which is the check that this was an addition.
 
 - [ ] **Step 10: Add the contract** — append the `api-is-read-side` stanza above to `.importlinter`.
 
@@ -28531,23 +29404,24 @@ git commit -m "feat(api): read model, problem+json, argon2id sessions, origin ch
 - Create: `selector_drift/api/derive.py`
 - Create: `docs/proposals/interface-contract-querysource.md` — **a proposal only, flagged for sign-off; `backoffice-kit` is not edited**
 - Modify: `selector_drift/orchestrate/rung_stats.py` — `rung_stats()` delegates to `derive.rung_shares`
-- Modify: `pyproject.toml` (deps)
+- (No dependency change: `croniter` arrives in Task 29A)
 - Test: `tests/api/test_derive.py`, `tests/docs/test_querysource_proposal.py`
 
 **Interfaces:**
-- Consumes: `Heartbeat`, `Run`, `RunAttempt`, `Resolution`, `HealEvent`, `Quarantine`, `Intervention`, `AuditLog` (Task 3 + schema additions); `StatsView` (Task 34); `Verdict`, `Outcome` (Task 20); `Family` (Task 13); `load_spec` (Task 5); `get_settings` (Task 33).
+- Consumes: `Heartbeat`, `Run`, `RunAttempt`, `Resolution`, `HealEvent`, `Quarantine`, `Intervention`, `AuditLog`, `Deploy` (Task 3 + schema additions); `StatsView` (Task 34); `Verdict`, `Outcome` (Task 20); `Family` (Task 13); `load_spec` (Task 5); `get_settings` (Task 5); Task 26C's scorer rows (`actor="testbench.score"`, `action="scored"`, `subject=str(heal_id)`, `detail.judgement`, `detail.run_key`).
 - Produces (the spec's signatures; `now`/`today` are keyword-only additions so tests do not read the wall clock — M20):
   - `Window = tuple[date, date]` — inclusive UTC calendar dates
   - `run_success_rate(db, target: str | None, window: Window) -> float`
-  - `rung_shares(db, target: str | None, window: Window) -> dict[str, float]` — keys `rung1`…`rung5`
+  - `rung_shares(db, target: str | None, window: Window) -> dict[str, float]` — keys `rung1`…`rung5`; **`{}` when no resolution is recorded**, and unresolved rows (`winning_rung` null) in the denominator — exactly Task 6's `rung_stats()` semantics, which now delegates here
   - `expected_slots(db, target: str, window: Window, *, now: datetime | None = None) -> list[datetime]`
   - `scheduled_runs(db, target: str | None, window: Window, *, now: datetime | None = None) -> int`
   - `missed_runs(db, target: str | None, window: Window, *, now: datetime | None = None) -> int`
   - `fired_without_attempt(db, target: str | None, window: Window) -> int`
   - `elapsed_days(db, target: str | None, *, today: date | None = None) -> int` — `None` = the whole log
   - `heal_summary(heal: HealEvent) -> str`
-  - `quarantines_refused_correctly(db, target: str | None, window: Window) -> int | None`
-  - `stats(db, target: str | None, window: Window, *, now: datetime | None = None) -> StatsView`
+  - `quarantines_refused_correctly(db, target: str | None, window: Window) -> int | None` and `false_accepts(...)` — both count Task 26C's rows **by `actor = "testbench.score"` and date window**, never by `subject` prefix (`subject` is a heal id)
+  - `heals_following_deploy(db, target: str, window: Window) -> int` — the control-arm figure (design §8.1), computed in SQL here because `api/` may not import `orchestrate.deploys.preceding_deploy`
+  - `stats(db, target: str | None, window: Window, *, now: datetime | None = None) -> StatsView` — `manual_interventions` counts manual **selector** fixes (`spec_edit` except `field="schedule"`, and `cache_edit`); `human_confirmations` counts `manual_promote` rows separately
   - `METHOD_URL`, `RUNG_METHOD: dict[int, str]`
 
 **Why one module.** API spec §1 rule 1: a value that must be computed is computed in exactly one
@@ -28579,12 +29453,9 @@ with `judgement` one of `correct_refusal`, `false_refusal`, `correct_accept`, `f
 detail shape is the reading contract; the bench spec's `score.py` must write it. A target with no
 `scored` rows has no answer key and gets `None`, never `0`.
 
-- [ ] **Step 1: Add the dependency**
-
-```bash
-uv add croniter
-uv add --dev types-croniter
-```
+- [ ] **Step 1: Confirm the dependency — no install.** `croniter` and `types-croniter` were added in
+  Task 29A Step 1, their first consumer (`notify_missed_heartbeats`), which runs before this task
+  (moved 2026-09-26). Check: `uv run python -c "import croniter"` exits 0.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -28673,6 +29544,8 @@ def test_rung_shares_denominator_is_every_resolution(db):
     db.commit()
     shares = derive.rung_shares(db, "testbench", WINDOW)
     assert shares == {"rung1": 0.8, "rung2": 0.0, "rung3": 0.1, "rung4": 0.0, "rung5": 0.0}
+    # Task 6's semantics, kept (2026-09-26): nothing recorded is {}, not five zeros.
+    assert derive.rung_shares(db, "nobody", WINDOW) == {}
 
 
 @pytest.mark.integration
@@ -28755,14 +29628,64 @@ def test_quarantines_refused_correctly_is_none_without_an_answer_key(db):
     assert derive.quarantines_refused_correctly(db, "testbench", WINDOW) is None
 
 
+def scored(s, day: int, judgement: str, *, actor: str = "testbench.score") -> None:
+    """Task 26C's pinned row shape: subject is the heal id, detail carries the run_key."""
+    key = run(s, day)
+    s.add(AuditLog(at=at(day, 5, 0), actor=actor, action="scored", subject=str(day),
+                   detail={"judgement": judgement, "field": "amount", "run_key": key}))
+
+
 @pytest.mark.integration
 def test_quarantines_refused_correctly_counts_the_scorers_rows(db):
     for day, judgement in [(1, "correct_refusal"), (2, "correct_refusal"), (3, "false_refusal"),
-                           (4, "correct_accept")]:
-        db.add(AuditLog(at=at(day, 5, 0), actor="system:score", action="scored",
-                        subject=run(db, day), detail={"judgement": judgement}))
+                           (4, "true_accept")]:
+        scored(db, day, judgement)
     db.commit()
     assert derive.quarantines_refused_correctly(db, "testbench", WINDOW) == 2
+    assert derive.quarantines_refused_correctly(db, None, WINDOW) == 2
+    assert derive.quarantines_refused_correctly(db, "control-app", WINDOW) is None
+
+
+@pytest.mark.integration
+def test_only_the_scorers_rows_count_and_only_inside_the_window(db):
+    """Filtered by actor and date (2026-09-26) -- the first draft matched subject prefixes,
+    which never match a heal id."""
+    scored(db, 1, "correct_refusal")
+    scored(db, 2, "correct_refusal", actor="someone.else")
+    db.add(AuditLog(at=datetime(2026, 9, 9, 5, 0, tzinfo=UTC), actor="testbench.score",
+                    action="scored", subject="99",
+                    detail={"judgement": "correct_refusal", "run_key": "testbench:1:2026-09-09"}))
+    db.commit()
+    assert derive.quarantines_refused_correctly(db, "testbench", WINDOW) == 1
+
+
+@pytest.mark.integration
+def test_manual_interventions_count_selector_fixes_not_schedules_or_confirmations(db):
+    """The headline is 'zero manual SELECTOR fixes' (2026-09-26)."""
+    for kind, field in [("spec_edit", "targets.amount"), ("cache_edit", "amount"),
+                        ("spec_edit", "schedule"), ("manual_promote", "*"),
+                        ("manual_promote", "*")]:
+        db.add(Intervention(at=at(2, 9, 0), actor="op1", kind=kind, target="testbench",
+                            field=field, before={}, after={}, reason="test"))
+    db.commit()
+    s = derive.stats(db, "testbench", WINDOW, now=AFTER)
+    assert s.manual_interventions == 2 and s.human_confirmations == 2
+
+
+@pytest.mark.integration
+def test_heals_following_deploy_counts_only_heals_a_deploy_preceded(db):
+    """Design 8.1's control arm, in SQL (api/ may not import orchestrate/)."""
+    from selector_drift.db.models import Deploy
+    run(db, 1)
+    for day in (2, 3):
+        key = run(db, day)
+        db.add(HealEvent(run_key=key, target="testbench", field="claim_number",
+                         broke_at=at(day, 4, 20), winning_rung=3, selector_after="td",
+                         anchor_after={}, trace=[], verdicts=[]))
+    db.add(Deploy(target="testbench", deployed_at=at(2, 1, 0), source="self-host",
+                  ref="abc123", ingested_at=at(2, 1, 5)))       # after day 1's run, before day 2's heal
+    db.commit()
+    assert derive.heals_following_deploy(db, "testbench", WINDOW) == 1
 
 
 @pytest.mark.integration
@@ -28783,7 +29706,7 @@ def test_stats_assembles_every_figure_from_the_same_functions(db):
     assert s.run_success_rate == derive.run_success_rate(db, "testbench", WINDOW) == 0.0
     assert s.rung_shares == derive.rung_shares(db, "testbench", WINDOW)
     assert s.quarantines_refused_correctly is None
-    assert s.manual_interventions == 0
+    assert s.manual_interventions == 0 and s.human_confirmations == 0
     assert s.method_url == derive.METHOD_URL
 
 
@@ -28873,13 +29796,13 @@ from datetime import UTC, date, datetime, time, timedelta
 
 from croniter import croniter
 from pydantic import TypeAdapter
-from sqlalchemy import exists, func, select
+from sqlalchemy import Select, and_, exists, func, or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from selector_drift.api.views import StatsView
 from selector_drift.config import get_settings
-from selector_drift.db.models import (AuditLog, HealEvent, Heartbeat, Intervention, Quarantine,
-                                      Resolution, Run, RunAttempt)
+from selector_drift.db.models import (AuditLog, Deploy, HealEvent, Heartbeat, Intervention,
+                                      Quarantine, Resolution, Run, RunAttempt)
 from selector_drift.resolve.trace import Family
 from selector_drift.spec.loader import load_spec
 from selector_drift.validate.verdict import Outcome, Verdict
@@ -28929,7 +29852,9 @@ def rung_shares(db: OrmSession, target: str | None, window: Window) -> dict[str,
         q = q.where(Resolution.target == target)
     counts: dict[int | None, int] = {rung: n for rung, n in db.execute(q).all()}
     total = sum(counts.values())                # every resolution, won or not (C4)
-    return {f"rung{r}": (counts.get(r, 0) / total if total else 0.0) for r in RUNGS}
+    if total == 0:
+        return {}                               # Task 6's rung_stats semantics: {} before the first
+    return {f"rung{r}": counts.get(r, 0) / total for r in RUNGS}
 
 
 # --------------------------------------------------------------- the schedule and its slots
@@ -29055,26 +29980,76 @@ def _count_quarantines(db: OrmSession, target: str | None, window: Window) -> in
     return int(db.scalar(q) or 0)
 
 
-def _count_interventions(db: OrmSession, target: str | None, window: Window) -> int:
+def _interventions(db: OrmSession, target: str | None, window: Window) -> Select[tuple[int]]:
     start, end = _bounds(window)
     q = select(func.count()).select_from(Intervention).where(Intervention.at >= start,
                                                              Intervention.at < end)
-    if target is not None:
-        q = q.where(Intervention.target == target)
+    return q if target is None else q.where(Intervention.target == target)
+
+
+def _count_interventions(db: OrmSession, target: str | None, window: Window) -> int:
+    """Manual SELECTOR fixes (ledger 2026-09-26): spec edits other than the schedule, and cache
+    edits. A schedule edit changes when, not what; a first-heal confirmation is the designed
+    human step, counted separately -- neither is a fix, and counting them would make the "zero
+    manual selector fixes" headline false for the wrong reason."""
+    fixes = or_(and_(Intervention.kind == "spec_edit", Intervention.field != "schedule"),
+                Intervention.kind == "cache_edit")
+    return int(db.scalar(_interventions(db, target, window).where(fixes)) or 0)
+
+
+def _count_confirmations(db: OrmSession, target: str | None, window: Window) -> int:
+    """manual_promote rows: first-heal confirmations (design 5.8), published beside the fixes."""
+    q = _interventions(db, target, window).where(Intervention.kind == "manual_promote")
     return int(db.scalar(q) or 0)
+
+
+SCORER = "testbench.score"                       # Task 26C's actor on every judgement row
+
+
+def _scored(db: OrmSession, target: str | None, window: Window) -> list[AuditLog] | None:
+    """The bench scorer's judgement rows in the window (Task 26C's pinned shape: actor
+    testbench.score, action scored, subject the heal id, detail.judgement, detail.run_key).
+    Filtered by actor and date, never by parsing `subject`, which is a heal id. None -- not an
+    empty list -- where there is no answer key: a target other than the bench, or a bench the
+    scorer has never judged."""
+    if target not in (None, "testbench"):
+        return None
+    base = select(AuditLog).where(AuditLog.actor == SCORER, AuditLog.action == "scored")
+    if db.scalar(select(func.count()).select_from(base.subquery())) == 0:
+        return None
+    start, end = _bounds(window)
+    return list(db.scalars(base.where(AuditLog.at >= start, AuditLog.at < end)))
+
+
+def _judged(db: OrmSession, target: str | None, window: Window, judgement: str) -> int | None:
+    rows = _scored(db, target, window)
+    return None if rows is None else sum(
+        1 for r in rows if (r.detail or {}).get("judgement") == judgement)
 
 
 def quarantines_refused_correctly(db: OrmSession, target: str | None,
                                   window: Window) -> int | None:
-    """Counts testbench/score.py's judgements. None -- not 0 -- without an answer key."""
-    scored = select(AuditLog).where(AuditLog.action == "scored")
-    if target is not None:
-        scored = scored.where(AuditLog.subject.startswith(f"{target}:"))
-    if db.scalar(select(func.count()).select_from(scored.subquery())) == 0:
-        return None
+    """Counts testbench/score.py's correct refusals. None -- not 0 -- without an answer key."""
+    return _judged(db, target, window, "correct_refusal")
+
+
+def heals_following_deploy(db: OrmSession, target: str, window: Window) -> int:
+    """The control arm's claim (design 8.1): heals that followed an actual deploy -- a deploy of
+    the target after the previous run started and at or before the heal. Computed in SQL here,
+    not through orchestrate.deploys.preceding_deploy, because api/ must not import orchestrate/
+    (api-is-read-side); the rule is the same one, stated once in docs/methodology.md."""
     start, end = _bounds(window)
-    rows = db.scalars(scored.where(AuditLog.at >= start, AuditLog.at < end))
-    return sum(1 for r in rows if r.detail.get("judgement") == "correct_refusal")
+    previous_run = (select(func.max(Run.first_started_at))
+                    .where(Run.target == HealEvent.target, Run.run_key != HealEvent.run_key,
+                           Run.first_started_at < HealEvent.broke_at)
+                    .correlate(HealEvent).scalar_subquery())
+    deployed = exists().where(Deploy.target == HealEvent.target,
+                              Deploy.deployed_at <= HealEvent.broke_at,
+                              Deploy.deployed_at > func.coalesce(previous_run, _FAR_PAST))
+    q = (select(func.count()).select_from(HealEvent)
+         .where(HealEvent.target == target, HealEvent.broke_at >= start,
+                HealEvent.broke_at < end, deployed))
+    return int(db.scalar(q) or 0)
 
 
 # --------------------------------------------------------------- the heal-log sentence
@@ -29122,6 +30097,7 @@ def stats(db: OrmSession, target: str | None, window: Window, *,
         quarantines=_count_quarantines(db, target, window),
         quarantines_refused_correctly=quarantines_refused_correctly(db, target, window),
         manual_interventions=_count_interventions(db, target, window),
+        human_confirmations=_count_confirmations(db, target, window),
         method_url=METHOD_URL,
     )
 ```
@@ -29216,14 +30192,14 @@ ships until a decision is made.
 - [ ] **Step 8: Run them and make sure they pass**
 
 Run: `uv run pytest tests/api/test_derive.py tests/docs/test_querysource_proposal.py -v && uv run mypy --strict selector_drift/api`
-Expected: PASS, 18 tests. mypy clean.
+Expected: PASS, 21 tests. mypy clean.
 
 - [ ] **Step 9: Commit**
 
 ```bash
 git add selector_drift/api/derive.py selector_drift/orchestrate/rung_stats.py \
         docs/proposals/interface-contract-querysource.md docs/methodology.md \
-        pyproject.toml uv.lock tests/api/test_derive.py tests/docs/test_querysource_proposal.py
+        tests/api/test_derive.py tests/docs/test_querysource_proposal.py
 git commit -m "feat(api): derive.py computes every published figure once; QuerySource proposal for sign-off"
 ```
 
@@ -29233,14 +30209,11 @@ git commit -m "feat(api): derive.py computes every published figure once; QueryS
 Add to `selector_drift/api/derive.py` and to `StatsView` (`false_accepts: int | None`):
 
 ```python
-def false_accepts(db: Session, target: str | None, window: tuple[date, date]) -> int | None:
-    """Wrong heals the gate let through, per the bench scorer. None where no answer key exists."""
-    if target not in (None, "testbench"):
-        return None
-    return int(db.execute(text(
-        "select count(*) from audit_log where action = 'scored' "
-        "and detail->>'judgement' = 'false_accept' and at::date between :a and :b"),
-        {"a": window[0], "b": window[1]}).scalar_one())
+def false_accepts(db: OrmSession, target: str | None, window: Window) -> int | None:
+    """Wrong heals the gate let through, per the bench scorer. None where no answer key exists.
+    The same `_scored()` rows as quarantines_refused_correctly: actor testbench.score, date
+    window -- one reading of Task 26C's row shape (2026-09-26)."""
+    return _judged(db, target, window, "false_accept")
 ```
 
 `stats()` sets `false_accepts=false_accepts(db, target, window)`. Task 29A's `notify()` fires at `HIGH`
@@ -29268,8 +30241,8 @@ Runs after Task 34 and Task 34B.
 - Create: `selector_drift/api/evidence.py`, `selector_drift/api/rows.py`, `selector_drift/api/openapi_export.py`
 - Create: `selector_drift/api/routers/targets.py`, `runs.py`, `heals.py`, `quarantine.py`, `quality.py`, `specs.py`, `stats.py`, `_cursor.py`
 - Create: `scripts/gen-types.sh`, `web/lib/openapi.json` and `web/lib/api.d.ts` (both generated, both committed), `web/lib/api.ts`, `docs/api.md`
-- Modify: `selector_drift/api/main.py` (routers; `quarantine_actions=`), `selector_drift/api/deps.py` (`QuarantineActionsLike`, `quarantine_actions`), `selector_drift/__main__.py` (`serve-api`), `selector_drift/validate/quarantine.py` (`StillInvalid.verdicts`), `.github/workflows/ci.yml` (job `api-types`), `web/package.json`
-- Test: `tests/api/seed.py`, `tests/api/test_endpoints.py`, `tests/api/test_evidence.py`, `tests/api/test_types.py`, `tests/validate/test_quarantine.py` (one test added)
+- Modify: `selector_drift/api/main.py` (routers; `quarantine_actions=`), `selector_drift/api/deps.py` (`QuarantineActionsLike`, `quarantine_actions`), `selector_drift/__main__.py` (`serve-api`, added beside Task 6's `run` and Task 34's `create-operator`), `.github/workflows/ci.yml` (job `api-types`), `web/package.json`
+- Test: `tests/api/seed.py`, `tests/api/test_endpoints.py`, `tests/api/test_evidence.py`, `tests/api/test_types.py`
 
 **Interfaces:**
 - Consumes: everything in Task 34; `derive.stats`, `derive.heal_summary`, `derive.elapsed_days` (34B); `bundle.py` readers and `EvidenceCorrupted` (Task 19); `DiffSpan`, `dom_diff` (Task 33); `QuarantineActions` (Task 26A, handed in by `__main__`); `StillInvalid` (Task 25); `ScopeRecord` (Task 2); `load_spec` (Task 5); `Finding` (`bok_core.findings`), `Claim`, `DomSource`, `Method` (`bok_core.provenance`), `to_rail` (`bok_core.provenance.render`); `FindingRow`, `SelectorCacheEntry` (Task 3).
@@ -29281,7 +30254,7 @@ Runs after Task 34 and Task 34B.
   - `deps.py`: `QuarantineActionsLike` protocol, `quarantine_actions(request) -> QuarantineActionsLike`, alias `Actions`
   - `main.create_app(*, settings=None, quarantine_actions: QuarantineActionsLike | None = None) -> FastAPI`
   - `openapi_export.export() -> str`; `scripts/gen-types.sh`; `web/lib/api.ts` `apiClient(sessionCookie?: string)`
-  - `StillInvalid(verdicts: list[Verdict])` with `.verdicts`
+  - (`StillInvalid(verdicts)` with `.verdicts` / `.failing` is Task 25's, consumed unchanged)
   - `python -m selector_drift serve-api [--host H] [--port P]`
 
 **Five decisions, each closing something the first revision left open.**
@@ -29315,14 +30288,14 @@ Runs after Task 34 and Task 34B.
 **The JSON shape of a stored rung attempt.** `RungAttemptView` needs `rung`, `family`, `outcome`,
 `ms`; `heal_events.trace` and `resolutions.attempts` are JSONB. Both must hold a list of
 `{"rung": int, "family": str, "outcome": str, "ms": int}`, `outcome` one of the six literals in
-`RungAttemptView`. **This is a requirement on Task 13's `_record_resolution` and Task 26A's
-`record_heals`** — found 2026-09-26: `RungAttempt(rung_id, ok, reason, ms)` as Task 13 defines it
-carries neither `family` nor a closed-vocabulary outcome, and a view cannot invent them. The fix
-is in the writer, not the dataclass: `_record_resolution` serialises each attempt as
-`{"rung": a.rung_id, "family": <that rung's Family>, "outcome": a.reason, "ms": a.ms}`, and every
-rung sets `reason` from the six literals (Task 19's cascade change already emits
-`"resolved"` / `"no_match"`; rung 1 adds `"anchor_mismatch"`, the visibility filter
-`"not_visible"`, a multi-match `"ambiguous"`, rung 5 `"escalated"`).
+`RungAttemptView`. **That is already what is stored (reconciled 2026-09-26):** Task 13's
+`RungAttempt(rung, family, outcome, ms)` carries the family and the closed `AttemptOutcome`
+vocabulary, and `RungAttempt.as_json()` produces exactly this dict — `resolve/recording.py`'s
+`record_resolution` writes `trace.as_json()` into `resolutions.attempts`, and Task 26A's
+`record_heals` writes `[a.as_json() for a in trace.attempts]` into `heal_events.trace`. The runner,
+not the rungs, sets `outcome` (`"resolved"`, a `Miss`'s own outcome — `"ambiguous"`,
+`"anchor_mismatch"`, … — `"not_visible"` from the H9 filter, `"escalated"` for rung 5). So the views
+below validate the stored JSON directly with `RungAttemptView.model_validate`; nothing is mapped.
 
 **Task 25's audit rows are read by `subject = run_key`** to recover a decision's reason
 (`DecisionView.reason`). Task 25's tests assert `detail["reason"]`; they do not pin `subject`, so
@@ -29897,36 +30870,21 @@ def test_generated_ts_types_are_current(tmp_path):
     assert out.read_text() == Path("web/lib/api.d.ts").read_text()
 ```
 
-Add to `tests/validate/test_quarantine.py`:
-
-```python
-@pytest.mark.unit
-def test_still_invalid_carries_every_verdict():
-    """So the API's 409 can say which checks still fail (API spec 5)."""
-    verdicts = [Verdict(check="A", outcome=Outcome.FAIL, threshold="x", observed="y", reason="r"),
-                Verdict(check="B", outcome=Outcome.PASS, threshold=None, observed=None, reason="r")]
-    exc = StillInvalid(verdicts)
-    assert exc.verdicts == verdicts and "1 check" in str(exc)
-```
+`StillInvalid` already carries every verdict, and its `failing` list is exactly the `FAIL`
+outcomes (Task 25, with `test_still_invalid_carries_every_verdict` in `tests/validate/test_quarantine.py`).
+Nothing is added to it here (2026-09-26: this task's first draft re-added the attribute and a
+duplicate of that test).
 
 - [ ] **Step 3: Run them and watch them fail**
 
-Run: `uv run pytest tests/api tests/validate/test_quarantine.py -v -m "unit or integration"`
+Run: `uv run pytest tests/api -v -m "unit or integration"`
 Expected: FAIL — `ModuleNotFoundError: selector_drift.api.evidence`.
 
-- [ ] **Step 4: `StillInvalid` carries its verdicts** — in `selector_drift/validate/quarantine.py`:
-
-```python
-class StillInvalid(Exception):
-    """A re-run gate still fails. Carries every verdict so the caller can show which."""
-
-    def __init__(self, verdicts: list[Verdict]) -> None:
-        failing = [v for v in verdicts if v.outcome is not Outcome.PASS]
-        super().__init__(f"{len(failing)} check(s) still fail after human confirmation")
-        self.verdicts = verdicts
-```
-
-and `promote()` raises `StillInvalid(result.verdicts)` where it raised `StillInvalid(...)` before.
+- [ ] **Step 4: No-op, kept so later step numbers stay stable.** `StillInvalid.verdicts` exists since
+  Task 25. The API's `failing` is `[v for v in verdicts if v.outcome is Outcome.FAIL]` everywhere it
+  is built (Step 6's quarantine router and the 409 problem): `INSUFFICIENT` is tolerated once a human
+  confirms (design §5.9), so listing it as "still failing" would ask the operator to resolve something
+  the gate no longer holds against the run.
 
 - [ ] **Step 5: Implement `evidence.py`, `rows.py`, `_cursor.py`**
 
@@ -30455,7 +31413,7 @@ def quarantine_view(db: OrmSession, settings: Settings, q: Quarantine) -> Quaran
         preview.append(cells)
     return QuarantineView(
         run_key=q.run_key, target=target, reason=q.reason, verdicts=verdicts,
-        failing=[v for v in verdicts if v.outcome is not Outcome.PASS], preview=preview,
+        failing=[v for v in verdicts if v.outcome is Outcome.FAIL], preview=preview,
         heal_ids=[h.id for h in heals],
         spec_excerpt=_spec_excerpt(settings, target, set(by_field)), runbook_url=RUNBOOK,
         decision=decision_view(db, run, q, heals[0] if heals else None))
@@ -30485,7 +31443,7 @@ def promote(run_key: RunKey, body: DecisionRequest, db: Db, settings: AppSetting
     try:
         actions.promote(run_key, op.username, body.reason)      # actor: the session, never a body
     except StillInvalid as exc:
-        failing = [v for v in exc.verdicts if v.outcome is not Outcome.PASS]
+        failing = [v for v in exc.verdicts if v.outcome is Outcome.FAIL]    # INSUFFICIENT tolerated
         raise StillInvalidProblem(f"{len(failing)} checks still fail after human confirmation.",
                                   failing=failing) from exc
     db.expire_all()
@@ -30566,7 +31524,7 @@ from fastapi import APIRouter
 from selector_drift.api.deps import AppSettings, CurrentOperator, TargetName
 from selector_drift.api.errors import NotFound
 from selector_drift.api.views import SpecView
-from selector_drift.spec.loader import load_spec
+from selector_drift.spec.loader import load_spec, scope_file
 from selector_drift.validate.verdict import Outcome, Verdict
 
 router = APIRouter(tags=["specs"])
@@ -30577,23 +31535,38 @@ def _v(check: str, ok: bool, threshold: str, observed: str, reason: str) -> Verd
                    threshold=threshold, observed=observed, reason=reason)
 
 
+def _natural_key(raw: object) -> Verdict:
+    """Judged on the RAW YAML (2026-09-26): the loader already refuses a spec whose key is outside
+    expected_schema (Task 5), so on a loaded spec this could never fail. On the raw file it names
+    the exact reason a refused spec was refused."""
+    body = raw if isinstance(raw, dict) else {}
+    keys = body.get("natural_key") if isinstance(body.get("natural_key"), list) else []
+    schema = body.get("expected_schema") if isinstance(body.get("expected_schema"), dict) else {}
+    missing = sorted(str(k) for k in keys if k not in schema)
+    return _v("NaturalKeyInSchema", bool(keys) and not missing,
+              "natural_key non-empty and within expected_schema",
+              ", ".join(missing) or ("all present" if keys else "no natural_key"),
+              "M5: the lake dedups on this key")
+
+
 def spec_validation(path: Path) -> tuple[int, list[Verdict]]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     try:
         spec = load_spec(path)
     except Exception as exc:      # the loader's own error, reported as a verdict, never raised
-        raw = yaml.safe_load(path.read_text()) or {}
-        version = raw.get("version") if isinstance(raw.get("version"), int) else 0
+        body = raw if isinstance(raw, dict) else {}
+        version = body.get("version") if isinstance(body.get("version"), int) else 0
         return version, [_v("SpecSchema", False, "parses as a TaskSpec",
-                            str(exc).splitlines()[0][:200], "the loader refused this file")]
-    missing = set(spec.natural_key) - set(spec.expected_schema)
+                            str(exc).splitlines()[0][:200], "the loader refused this file"),
+                         _natural_key(raw)]
     unasserted = [t.name for t in spec.targets if not t.assertions]
     return spec.version, [
         _v("SpecSchema", True, "parses as a TaskSpec", "valid", "the loader accepted this file"),
-        _v("NaturalKeyInSchema", not missing, "natural_key within expected_schema",
-           ", ".join(sorted(missing)) or "all present", "M5: the lake dedups on this key"),
+        _natural_key(raw),
         _v("EveryTargetAsserted", not unasserted, "at least one assertion per target",
            ", ".join(unasserted) or "all asserted", "a target with no assertion cannot be judged"),
-        _v("ScopeRecordPresent", Path(spec.scope_ref).is_file(), "scope_ref names a file",
+        # scope_file() resolves under SD_SCOPE_DIR (Task 5); Path(scope_ref) was cwd-relative.
+        _v("ScopeRecordPresent", scope_file(spec.scope_ref).is_file(), "scope_ref names a file",
            spec.scope_ref, "no scope record means every run is refused"),
     ]
 
@@ -33029,7 +34002,10 @@ export function StatsRow({ stats: s }: { stats: StatsView }) {
     ["Fired, never started", String(s.fired_without_attempt), "fired-without-attempt"],
     ["Heals", String(s.heals), "heals"],
     ["Quarantines", String(s.quarantines), "quarantines"],
-    ["Manual interventions", String(s.manual_interventions), "manual-interventions"],
+    // A selector fix a human made vs a first heal a human confirmed -- two different claims,
+    // never one number (Task 34B, 2026-09-26).
+    ["Manual selector fixes", String(s.manual_interventions), "manual-interventions"],
+    ["First heals confirmed by a person", String(s.human_confirmations), "human-confirmations"],
   ];
   if (s.quarantines_refused_correctly !== null) {
     figures.push(["Quarantines refused correctly", String(s.quarantines_refused_correctly), "quarantines-refused-correctly"]);
@@ -35935,6 +36911,20 @@ git commit -m "feat(web): cmdk palette, density, print, 375px, reduced motion, a
 
 `docs/methodology.md` must state: per-target start dates · which arm ran under which first-heal regime · what counts as a UI change · what counts as a successful heal · the sample and the population · the measured rung distribution including the rung-5 figure · why rung 5 is an escalation in v1 · the PSI threshold and why that threshold · the warm-up length · the control arm's deploy-history ground truth.
 
+**Three statements added 2026-09-26, each a checklist item the test below enforces:**
+
+- **The steady-state collapse floor.** On a cache hit, `RowKeyContinuity` fails a field whose values
+  agree with the previous accepted run on fewer than **50%** of joined keys (`COLLAPSE_FLOOR = 0.50`,
+  Task 22); between 50% and 95% it is tolerated and alerted. State the number, why a steady-state
+  `FAIL` exists at all (a value swap under unchanged markup), and that it is not a tunable.
+- **The first-heal limitation.** The cache holds one selector per field, so a portal that flips
+  between two layouts asks a human to confirm a first heal **once per flip**, not once ever; on a
+  target with `first_heal_policy: required` that is a human step every time the layout changes back.
+- **The rung-4 limit on the bench.** Rung 4 finds a bench column by its `col-<field>` class or header
+  position (the bench has no `data-testid`), so a `ClassRename` and a `LabelReword` on the same day
+  leave it nothing to read for that field; the field escalates. Say how often the schedule produces
+  that pairing and how many escalations it accounts for.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
@@ -35954,7 +36944,14 @@ REQUIRED = ["start date", "what counts as a ui change", "what counts as a succes
             "reference window",           #        window; otherwise PSI 0.03 is not checkable
             "days elapsed",               # honest count at week 20, not "90 days"
             "missed runs",                # B3 -- gaps are stated, not hidden by the chart
-            "retention"]                  # 00 B7
+            "retention",                  # 00 B7
+            # added 2026-09-26 (reconciliation ledger)
+            "collapse floor",             # Task 22: steady-state RowKeyContinuity FAIL below 0.50
+            "0.50",                       #          -- the number itself, not only its name
+            "once per flip",              # one cached selector per field: a flipping layout
+                                          # costs one human confirmation per flip
+            "class rename and a label rewording",   # rung 4's known bench limit (Task 22)
+            "human confirmations"]        # counted apart from manual selector fixes (Task 34B)
 
 def test_methodology_answers_every_required_question():
     text = Path("docs/methodology.md").read_text().lower()
@@ -36002,7 +36999,7 @@ git commit -m "docs: methodology and security posture"
   module the operator UI uses**, so the public log and the screen cannot disagree, API spec §1);
   `HealEvent`, `Heartbeat`, `ScopeRecordRow` (Task 3); `read_heal_manifest`, `verified_bytes`,
   `EvidenceCorrupted`, `HEALS_DIR` (Task 19); `write_guarded`, `Plane`, `Labelled`, `Sensitivity`
-  (`bok_core.boundary`); `get_settings` (Task 33).
+  (`bok_core.boundary`); `get_settings` (Task 5).
 - Produces:
   - `PUBLISHABLE_TARGETS: frozenset[str]` — the explicit allowlist (H7)
   - `PublishedHeal`, `PublishedLog` (with `evidence_for(target) -> list[str]`, `counts_for(target) -> StatsView`, `numbers`, `elapsed_days`, `manual_interventions`)
@@ -36638,7 +37635,7 @@ def test_dod_11_the_pipeline_actually_runs_end_to_end():
 
 def test_dod_12_a_quarantined_heal_never_reaches_the_selector_cache():
     # C2. The one ordering bug that would make every later run silently wrong.
-    assert pytest_passed("tests/resolve/test_r1_cache.py::test_a_quarantined_heal_does_not_update_the_cache")
+    assert pytest_passed("tests/orchestrate/test_cache_writer.py::test_a_quarantined_heal_does_not_update_the_cache")
 
 def test_dod_13_the_browser_cannot_leave_the_authorised_origin():
     assert pytest_passed("tests/browser/test_driver.py::test_navigation_off_the_authorised_origin_is_aborted")
@@ -36783,3 +37780,26 @@ each fixed at its point of use and marked *"found 2026-09-26"*:
 **Flagged for your sign-off, not applied:** the `INTERFACE-CONTRACT.md` proposals in
 `docs/proposals/` (`QuerySource`; three `bok-ui` components delivered early with their props;
 `EmptyState` `headline`/`measuredVerb`; a `bok-ui/client` entry).
+
+**Round 2, same day — every remaining task to code level.** Tasks 5–6, 9–11A, 13–18, 20–25 and 28–32
+were rewritten with full tests and implementations; Tasks 9–11A and 13–18 were exercised in scratch
+harnesses (the Task 13–18 code against a real Chromium: 149 tests, static/live parity on visibility and
+headers). An 80-item cross-task ledger was then applied in one pass — names, signatures, ordering and
+ownership reconciled across all rounds. The notable outcomes:
+
+| Change | Where |
+|---|---|
+| **One `Settings`** in `config.py`, created in Task 5, holding every key the plan reads | 5; 28 and 33 no longer create it |
+| **One PSI** (`validate/stats.py`), used by both the gate and the quality contracts | 23, 29 |
+| **Promotion lands data before it is marked promoted** (`promote` re-gates; `mark_promoted` records after `accept_promoted`) | 25, 26A |
+| An escalated field **quarantines** the run instead of failing the flow; failed and timed-out runs are recorded and alerted | 26A |
+| **Adversarial suite asserts the invariant that matters:** no wrong value is ever written — the run quarantines, or every field resolved to its true node | 26 |
+| Scope-record hash defined as canonical JSON; the gate refuses a future `authorised_on`; the `scope_records` mirror has a writer | 2, 6 |
+
+**One design decision taken in this round, flagged for your review — the steady-state collapse floor.**
+A `ValueSwap` (two same-format columns exchange values, markup untouched) gives a rung-1 cache hit, so
+nothing "healed" and the strict path never engaged; with `RowKeyContinuity` non-blocking in steady
+state, the swapped values would have been **written**. Now, on a cache hit, key agreement below
+**0.50** is a `FAIL` (quarantine) — a collapse no overnight business change produces — while agreement
+between 0.50 and the 0.95 threshold is tolerated and alerted, so month-end churn does not block. Stated
+in design §5.7 and in `docs/methodology.md` (Task 40). Revert by removing the floor in Task 22.

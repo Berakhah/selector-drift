@@ -249,7 +249,9 @@ class QuarantineView(BaseModel):
     target: str
     reason: str
     verdicts: list[Verdict]
-    failing: list[Verdict]                  # verdicts with outcome != PASS — what a human must resolve
+    failing: list[Verdict]                  # verdicts with outcome FAIL — what still refuses after a
+                                            # human confirms; INSUFFICIENT is tolerated once confirmed
+                                            # (design §5.9), so it is not "failing" (amended 2026-09-26)
     preview: list[dict[str, ExtractedValueView]]   # first 20 rows
     heal_ids: list[int]
     spec_excerpt: str                       # the FieldTarget YAML for each failing field (M11)
@@ -280,11 +282,14 @@ class StatsView(BaseModel):                 # §6.2 — plain figures with a met
     missed_runs: int
     fired_without_attempt: int
     run_success_rate: float                 # completed+healed / attempted, from run_attempts
-    rung_shares: dict[str, float]           # rung1..rung5, from resolutions
+    rung_shares: dict[str, float]           # rung1..rung5, from resolutions; {} before the first
     heals: int
     quarantines: int
     quarantines_refused_correctly: int | None   # bench only; None for targets without an answer key
-    manual_interventions: int
+    manual_interventions: int               # manual SELECTOR fixes: spec_edit (except field
+                                            # "schedule") and cache_edit interventions
+    human_confirmations: int                # manual_promote interventions: first-heal confirmations,
+                                            # reported beside the fixes, never counted as one
     method_url: str                         # docs/methodology.md anchor for each figure
 
 class Page(BaseModel, Generic[T]):
@@ -301,8 +306,16 @@ it.
 
 **`quarantines_refused_correctly` is computed by the scorer, not by `api/`.** It needs the answer key,
 which `selector_drift/` may not import (design §3.4). The bench scorer (`testbench/score.py`) writes
-its per-run judgement into `audit_log` as `action="scored"`; `derive.py` counts those rows. The answer
-key stays unreachable from the product.
+its per-heal judgement into `audit_log` as `action="scored"`, `actor="testbench.score"`,
+`subject=str(heal_id)`, `detail={"judgement", "field", "run_key", ...}`; `derive.py` counts those rows
+by actor and date window, never by parsing `subject`. The answer key stays unreachable from the
+product.
+
+**`manual_interventions` and `human_confirmations` are two figures (amended 2026-09-26).** The
+headline claims zero manual *selector fixes*; a first-heal confirmation is the designed human step
+(design §5.8) and a schedule edit changes when, not what. Counting either as a fix would make the
+headline false for the wrong reason, so `manual_interventions` counts `spec_edit` (except
+`field="schedule"`) and `cache_edit` rows, and `human_confirmations` counts `manual_promote` rows.
 
 ### 4.4 A `findings` table joins the day-one schema (added 2026-09-26)
 
@@ -348,7 +361,7 @@ the example above is illustrative; the real base URL is set when P-2 names the a
 
 ```python
 def run_success_rate(db, target: str | None, window: tuple[date, date]) -> float
-def rung_shares(db, target: str | None, window) -> dict[str, float]      # denominator: every resolution
+def rung_shares(db, target: str | None, window) -> dict[str, float]      # denominator: every resolution; {} if none
 def missed_runs(db, target: str | None, window) -> int                   # expected cron slots with no heartbeat
 def fired_without_attempt(db, target: str | None, window) -> int         # heartbeat present, no run_attempts row
 def elapsed_days(db, target: str) -> int                                 # since the first heartbeat
