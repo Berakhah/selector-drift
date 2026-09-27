@@ -18,7 +18,17 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from sqlalchemy import CHAR, Boolean, Date, DateTime, ForeignKey, Index, Integer, Text
+from sqlalchemy import (
+    CHAR,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -40,8 +50,8 @@ class Run(Base):
 
     run_key: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
     target: Mapped[str] = mapped_column(Text, nullable=False)
-    spec_version: Mapped[str] = mapped_column(Text, nullable=False)
-    window: Mapped[str] = mapped_column(Text, nullable=False)
+    spec_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    window: Mapped[dt.date] = mapped_column(Date, nullable=False)
     first_started_at: Mapped[dt.datetime] = mapped_column(_TZ, nullable=False)
     last_finished_at: Mapped[dt.datetime | None] = mapped_column(_TZ, nullable=True)
     state: Mapped[str] = mapped_column(Text, nullable=False)
@@ -55,7 +65,10 @@ class RunAttempt(Base):
     from history rather than from whatever `runs` last happened to hold (M13)."""
 
     __tablename__ = "run_attempts"
-    __table_args__ = (Index("ix_run_attempts_run_key", "run_key"),)
+    __table_args__ = (
+        Index("ix_run_attempts_run_key", "run_key"),
+        UniqueConstraint("run_key", "attempt", name="uq_run_attempts_run_key_attempt"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
     run_key: Mapped[str] = mapped_column(Text, ForeignKey("runs.run_key"), nullable=False)
@@ -103,8 +116,10 @@ class HealEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
     run_key: Mapped[str] = mapped_column(Text, ForeignKey("runs.run_key"), nullable=False)
-    resolution_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("resolutions.id"), nullable=False
+    # Nullable (I-2): CascadeTrace.resolution_id is None on replay, so a heal event replayed
+    # from stored evidence rather than from a live resolution has no resolutions row to join.
+    resolution_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("resolutions.id"), nullable=True
     )
     target: Mapped[str] = mapped_column(Text, nullable=False)
     field: Mapped[str] = mapped_column(Text, nullable=False)
@@ -116,8 +131,8 @@ class HealEvent(Base):
     selector_after: Mapped[str] = mapped_column(Text, nullable=False)
     anchor_before: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     anchor_after: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    trace: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    verdicts: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    trace: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    verdicts: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     evidence_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     replayed_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     promoted_by: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -134,7 +149,7 @@ class SelectorCacheEntry(Base):
 
     target: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
     field: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
-    spec_version: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
+    spec_version: Mapped[int] = mapped_column(Integer, primary_key=True, nullable=False)
     selector: Mapped[str] = mapped_column(Text, nullable=False)
     anchor: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     node_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -154,7 +169,7 @@ class Quarantine(Base):
         Text, ForeignKey("runs.run_key"), primary_key=True, nullable=False
     )
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    verdicts: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    verdicts: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     data_uri: Mapped[str] = mapped_column(Text, nullable=False)
     resolved_as: Mapped[str | None] = mapped_column(Text, nullable=True)
     actor: Mapped[str | None] = mapped_column(Text, nullable=True)
