@@ -938,20 +938,65 @@ git commit -m "feat(browser): AuthorisedTarget-only driver, one context per run"
 
 ### Task 5: Three scope records and a one-field task spec per target
 
+**Blocked on P-2 and P-3 until they resolve.** Every scope record carries values only a person can
+supply — a contact URL that resolves (P-2), two self-owned control-arm hosts (P-3), the bench host
+(P-4) and the day-one date. They are written below as `<UPPER-CASE>` tokens, and
+`test_no_scope_record_carries_an_unresolved_placeholder` is red until every one is replaced. That is
+deliberate: a scope record with an invented date or a 404 contact is a compliance claim that fails
+the first time anyone checks it (B4, B5).
+
 **Files:**
+- Create: `selector_drift/config.py` — the minimal settings module. **Task 33 extends it** (Step 3
+  there replaces this file with its superset; the seven names here keep their meaning)
 - Create: `selector_drift/spec/schema.py`, `selector_drift/spec/loader.py`
 - Create: `scopes/testbench.yaml`, `scopes/agent-perimeter.yaml`, `scopes/ledger-sense.yaml`
 - Create: `specs/testbench.yaml`, `specs/agent-perimeter.yaml`, `specs/ledger-sense.yaml`
-- Test: `tests/spec/test_loader.py`, `tests/scope/test_records_load.py`
+- Modify: `.env.example`, `pyproject.toml` + `uv.lock` (dev dependency `types-PyYAML`)
+- Test: `tests/test_config.py`, `tests/spec/test_spec_schema.py`, `tests/spec/test_loader.py`,
+  `tests/scope/test_records_load.py`
 
 **Interfaces:**
-- Consumes: `ScopeRecord`, `authorise` (Task 2).
+- Consumes: `ScopeRecord`, `Basis`, `FirstHealPolicy` (`selector_drift.scope.record`),
+  `authorise(record, *, today)` (`selector_drift.scope.gate`), `ScopeRefusal(reason: str)` with
+  `.reason` (`selector_drift.scope.errors`) — all Task 2.
 - Produces:
-  - `TaskSpec` with `version: int`, `scope_ref: str`, `navigate: list[NavStep]`, `row_scope: str`, `natural_key: list[str]`, `expected_schema: dict[str, FieldType]`, `targets: list[FieldTarget]`, `schedule: str`
-  - `FieldTarget(name: str, description: str, relation: Relation | None, assertions: list[AssertionSpec], distributional: bool = False)` — `description` is the semantic target in plain language, never a DOM path
-  - `Relation` — `StrEnum` `RIGHT_OF`, `BELOW`, `WITHIN`
-  - `matches(target: FieldTarget, value: str) -> bool` — **the format matcher lives here, in `spec/` (R13/M23).** Task 17's rung 1 must check format assertions and Task 1's contract forbids `resolve` → `validate`, so the matcher cannot live in `validate/assertions/format.py`. Both packages import it from `spec/`.
-  - `load_spec(path: Path) -> TaskSpec`, `load_scope(path: Path) -> ScopeRecord` — **`yaml.safe_load` only** (R13/H5)
+  - `selector_drift/config.py`: `Settings` (frozen dataclass) with fields `env: str` (`SD_ENV`),
+    `database_url: str` (`SD_DATABASE_URL`), `spec_dir: Path` (`SD_SPEC_DIR`, default `specs`),
+    `scope_dir: Path` (`SD_SCOPE_DIR`, default `scopes`), `evidence_root: Path`
+    (`SD_EVIDENCE_ROOT`), `lake_root: Path` (`SD_LAKE_ROOT`), and the property
+    `redaction_key -> bytes` (`SD_REDACTION_KEY`, hex, ≥ 32 bytes, raises `ConfigError` when unset —
+    no secret has a default); `get_settings() -> Settings` (`lru_cache`d — tests call
+    `get_settings.cache_clear()` after changing the environment); `ConfigError(RuntimeError)`
+  - `selector_drift/spec/schema.py`:
+    - `SpecError(ValueError)`
+    - `Relation` — `StrEnum`: `RIGHT_OF = "right_of"`, `BELOW = "below"`, `WITHIN = "within"`
+    - `FieldType` — `StrEnum`: `STRING = "string"`, `INTEGER = "integer"`, `DECIMAL = "decimal"`, `DATE = "date"`
+    - `DomainRule` — `TypedDict(total=False)`: `min: float`, `max: float`, `enum: list[str]`,
+      `date_after: str`, `date_before: str` (ISO `YYYY-MM-DD`); unknown keys refused
+    - `AssertionSpec(type: Literal["format", "domain", "cross_field"], pattern: str | None = None, rule: DomainRule | None = None, expression: str | None = None)` — exactly the payload its `type` names
+    - `FieldTarget(name: str, description: str, relation: Relation | None = None, assertions: list[AssertionSpec], distributional: bool = False)` — `description` is the semantic target in plain language, never a DOM path
+    - `NavStep(step: Literal["goto", "fill", "click"], path: str | None = None, field: str | None = None, value_from: Literal["credentials.username", "credentials.password"] | None = None, role: str | None = None, name: str | None = None)` — exactly as Task 26A Step 3 pins it, validated per step kind
+    - `TaskSpec(version: int, scope_ref: str, schedule: str, row_scope: str, natural_key: list[str], expected_schema: dict[str, FieldType], navigate: list[NavStep], targets: list[FieldTarget])`
+    - `MAX_MATCH_LENGTH: int = 512`
+    - `matches(target: FieldTarget, value: str) -> bool` — **the format matcher lives here, in
+      `spec/` (R13/M23).** Task 17's rung 1 must check format assertions and Task 1's contract
+      forbids `resolve` → `validate`, so the matcher cannot live in `validate/assertions/format.py`.
+      Both packages import it from `spec/`.
+  - `selector_drift/spec/loader.py` — **`yaml.safe_load` only** (R13/H5):
+    - `load_spec_text(text: str) -> TaskSpec` — raises `yaml.YAMLError` for a YAML tag that would construct an object, `SpecError` for anything else
+    - `load_spec(path: Path) -> TaskSpec` — loads exactly `path`; raises `SpecError` (message names the file)
+    - `load_scope_text(text: str) -> ScopeRecord`, `load_scope(path: Path) -> ScopeRecord` — raise **`ScopeRefusal`**, never a parse error: a missing, malformed or out-of-enum scope record is a refusal (design §9.3)
+    - `spec_file(spec_path: str | Path) -> Path` — an absolute path as given; otherwise `get_settings().spec_dir / name`
+    - `scope_file(scope_ref: str) -> Path` — `get_settings().scope_dir / name`
+    - `target_of(spec_path: str | Path) -> str` — the file stem; spec files are named `<target>.yaml`
+
+**Why `config.py` is created here and not in Task 33.** Task 33 was the first task to write
+`config.py`, but Task 26A's bench fixtures, Task 34B's `derive` fixture and this task's loader all
+need `SD_SCOPE_DIR` / `SD_SPEC_DIR` honoured, and the loader is the first code that reads a
+directory. The minimal module holds only the seven names the rest of the plan already uses, in the
+shape Task 33 gives them (`redaction_key` is a property over the hex string, so a missing key is an
+error at use, never a silent default). Task 3's `db/session.py` predates this module and keeps
+reading `SD_DATABASE_URL` itself; both must use the same default.
 
 **Three fields added over the first draft, each because something downstream needs them and has no
 other source:**
@@ -966,27 +1011,934 @@ other source:**
 `False` because PSI over a high-cardinality identifier column is noise, and *"which fields get a
 distributional check at all"* was unspecified (M16).
 
-`scopes/testbench.yaml` — note `first_heal_policy: auto_promote`, permitted **only because the bench is synthetic with a known answer key** (spec §5.8):
+**Every model forbids unknown keys.** A misspelt `asertions:` that loaded silently would drop a
+field's checks without a trace — the green tick `00` §7 calls a lie. The loader refuses it instead.
+
+**The natural key is checked at load, not only by a repo test (M5).** A spec whose `natural_key`
+names a column outside `expected_schema`, or a column no target extracts, cannot be deduplicated
+(Task 28) and is refused as a `SpecError`. Task 38's `NaturalKeyInSchema` verdict therefore reports
+`PASS` for every spec that loads; a violating file is reported by its `SpecSchema` verdict instead.
+
+**A `goto` step takes a same-origin path, never a URL (R8/H2).** The route-handler allowlist
+(Task 4) aborts off-origin requests, but a spec that names `https://elsewhere/` is wrong before it
+ever reaches a browser, so the schema refuses it.
+
+**A cross-field `expression` is parsed at load and never evaluated here (R13/H5).**
+`ast.parse(..., mode="eval")` rejects garbage early; the restricted evaluator that decides what the
+expression may *do* is Task 21's `safe_eval`. `spec/` must not import `validate/` — `resolve` imports
+`spec`, so `spec → validate` would break the `judged-cannot-call-judge` contract indirectly.
+
+**The control arm's specs name one generic field** — the landing page's main heading — because P-3
+has not named the applications. It is honest on day one (the log records run succeeded / failed and
+nothing more) and is replaced by a version bump when P-3 resolves; the cache is keyed by
+`spec_version` (M14), so the bump cannot reuse a selector resolved for the old meaning.
+
+**Schedules are staggered five minutes apart** (`04:12`, `04:17`, `04:22` UTC). One worker container
+with a 2 GB limit runs every extraction (Task 6); three Chromium contexts starting in the same second
+is the memory spike B8 warns about, and the persistent rate limiter is per target, not per host.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_config.py
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+from selector_drift.config import ConfigError, get_settings
+
+VARS = ("SD_ENV", "SD_DATABASE_URL", "SD_SPEC_DIR", "SD_SCOPE_DIR", "SD_EVIDENCE_ROOT",
+        "SD_LAKE_ROOT", "SD_REDACTION_KEY")
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    for name in VARS:
+        monkeypatch.delenv(name, raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+def test_defaults_are_repo_relative_and_hold_no_secret() -> None:
+    s = get_settings()
+    assert (s.env, s.spec_dir, s.scope_dir) == ("development", Path("specs"), Path("scopes"))
+    assert (s.evidence_root, s.lake_root) == (Path("evidence"), Path("lake"))
+    assert s.database_url.startswith("postgresql+psycopg://")
+
+
+@pytest.mark.unit
+def test_every_directory_is_overridable_from_the_environment(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SD_SPEC_DIR", str(tmp_path / "sp"))
+    monkeypatch.setenv("SD_SCOPE_DIR", str(tmp_path / "sc"))
+    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(tmp_path / "ev"))
+    monkeypatch.setenv("SD_LAKE_ROOT", str(tmp_path / "lk"))
+    monkeypatch.setenv("SD_DATABASE_URL", "postgresql+psycopg://u@db:5432/x")
+    s = get_settings()
+    assert s.spec_dir == tmp_path / "sp" and s.scope_dir == tmp_path / "sc"
+    assert s.evidence_root == tmp_path / "ev" and s.lake_root == tmp_path / "lk"
+    assert s.database_url == "postgresql+psycopg://u@db:5432/x"
+
+
+@pytest.mark.unit
+def test_a_missing_redaction_key_is_an_error_not_a_default() -> None:
+    with pytest.raises(ConfigError, match="SD_REDACTION_KEY"):
+        _ = get_settings().redaction_key
+
+
+@pytest.mark.unit
+def test_a_short_redaction_key_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SD_REDACTION_KEY", "ab" * 16)          # 16 bytes
+    with pytest.raises(ConfigError, match="32 bytes"):
+        _ = get_settings().redaction_key
+
+
+@pytest.mark.unit
+def test_a_32_byte_hex_key_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SD_REDACTION_KEY", "ab" * 32)          # test-only, not a secret
+    assert get_settings().redaction_key == bytes.fromhex("ab" * 32)
+```
+
+```python
+# tests/spec/test_spec_schema.py
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from pydantic import ValidationError
+
+from selector_drift.spec.schema import (MAX_MATCH_LENGTH, AssertionSpec, FieldTarget, NavStep,
+                                        Relation, TaskSpec, matches)
+
+CLAIM = FieldTarget(name="claim_number", description="the claim number cell",
+                    relation=Relation.RIGHT_OF,
+                    assertions=[AssertionSpec(type="format", pattern=r"^[A-Z]{2}\d{8}$")])
+
+
+def _spec(**overrides: Any) -> TaskSpec:
+    base: dict[str, Any] = {
+        "version": 1, "scope_ref": "scopes/testbench.yaml", "schedule": "12 4 * * *",
+        "row_scope": "each row of the results table", "natural_key": ["claim_number"],
+        "expected_schema": {"claim_number": "string"},
+        "navigate": [{"step": "goto", "path": "/results"}],
+        "targets": [{"name": "claim_number", "description": "the claim number cell",
+                     "assertions": [{"type": "format", "pattern": r"^[A-Z]{2}\d{8}$"}]}],
+    }
+    return TaskSpec.model_validate(base | overrides)
+
+
+@pytest.mark.unit
+def test_a_format_assertion_needs_a_compilable_pattern() -> None:
+    with pytest.raises(ValidationError, match="does not compile"):
+        AssertionSpec(type="format", pattern="([A-Z")
+
+
+@pytest.mark.unit
+def test_an_assertion_carries_exactly_the_payload_its_type_names() -> None:
+    """A format assertion with a stray `rule` is a spec author's mistake, not a second check."""
+    with pytest.raises(ValidationError, match="takes exactly `pattern`"):
+        AssertionSpec(type="format", pattern="^x$", rule={"min": 1.0})
+    with pytest.raises(ValidationError, match="takes exactly `rule`"):
+        AssertionSpec(type="domain")
+
+
+@pytest.mark.unit
+def test_an_unknown_assertion_type_is_refused_at_load() -> None:
+    """An unknown type is a refusal, not a skip (00 section 7)."""
+    with pytest.raises(ValidationError):
+        AssertionSpec.model_validate({"type": "vibes"})
+
+
+@pytest.mark.unit
+def test_a_domain_rule_is_checked_for_sense() -> None:
+    with pytest.raises(ValidationError, match="min"):
+        AssertionSpec(type="domain", rule={"min": 10.0, "max": 1.0})
+    with pytest.raises(ValidationError, match="at least one"):
+        AssertionSpec(type="domain", rule={})
+    with pytest.raises(ValidationError):
+        AssertionSpec(type="domain", rule={"date_after": "01/01/2023"})    # not ISO
+    with pytest.raises(ValidationError):
+        AssertionSpec.model_validate({"type": "domain", "rule": {"between": [1, 2]}})
+
+
+@pytest.mark.unit
+def test_a_cross_field_expression_must_parse_and_is_never_evaluated_here() -> None:
+    """R13/H5. Parsing proves it is an expression; Task 21's safe_eval decides what it may do."""
+    with pytest.raises(ValidationError, match="does not parse"):
+        AssertionSpec(type="cross_field", expression="net + ")
+    ok = AssertionSpec(type="cross_field", expression="net + tax == gross")
+    assert ok.expression == "net + tax == gross"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["https://evil.example/x", "//evil.example/x", "login"])
+def test_a_goto_step_takes_a_same_origin_path_never_a_url(path: str) -> None:
+    """R8/H2. An absolute URL in a spec walks off the authorised target."""
+    with pytest.raises(ValidationError, match="never a URL"):
+        NavStep(step="goto", path=path)
+
+
+@pytest.mark.unit
+def test_each_step_kind_takes_exactly_its_own_keys() -> None:
+    assert NavStep(step="goto", path="/").path == "/"
+    assert NavStep(step="fill", field="username", value_from="credentials.username").field
+    assert NavStep(step="click", role="button", name="Sign in").name == "Sign in"
+    with pytest.raises(ValidationError):
+        NavStep(step="fill", field="username")                         # no value_from
+    with pytest.raises(ValidationError):
+        NavStep(step="click", role="button", name="Go", path="/x")     # stray path
+    with pytest.raises(ValidationError):
+        NavStep(step="fill", field="input[name=user]", value_from="credentials.username")
+    with pytest.raises(ValidationError):
+        NavStep.model_validate({"step": "fill", "field": "pw", "value_from": "env.PASSWORD"})
+
+
+@pytest.mark.unit
+def test_a_description_with_selector_syntax_is_refused() -> None:
+    with pytest.raises(ValidationError, match="in words"):
+        FieldTarget(name="x", description="table#results > td[2]", assertions=[])
+
+
+@pytest.mark.unit
+def test_unknown_keys_are_refused_not_ignored() -> None:
+    """A misspelt `asertions` would otherwise load with no checks at all."""
+    with pytest.raises(ValidationError):
+        FieldTarget.model_validate({"name": "x", "description": "x", "assertions": [],
+                                    "asertions": [{"type": "format", "pattern": "^x$"}]})
+    with pytest.raises(ValidationError):
+        _spec(sensitivity="SYNTHETIC")
+
+
+@pytest.mark.unit
+def test_the_natural_key_must_be_in_the_schema_and_extracted() -> None:
+    """M5. Task 28 upserts on it; a key nobody extracts cannot deduplicate anything."""
+    with pytest.raises(ValidationError, match="expected_schema"):
+        _spec(natural_key=["policy_id"])
+    with pytest.raises(ValidationError, match="names no target"):
+        _spec(expected_schema={"claim_number": "string", "policy_id": "string"},
+              natural_key=["policy_id"])
+
+
+@pytest.mark.unit
+def test_duplicate_target_names_are_refused() -> None:
+    t = {"name": "claim_number", "description": "the claim number cell", "assertions": []}
+    with pytest.raises(ValidationError, match="duplicate"):
+        _spec(targets=[t, t])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("ref", ["../scopes/x.yaml", "/etc/scopes/x.yaml", "scopes/x.yml"])
+def test_scope_ref_names_a_file_under_scopes(ref: str) -> None:
+    with pytest.raises(ValidationError, match="scope_ref"):
+        _spec(scope_ref=ref)
+
+
+@pytest.mark.unit
+def test_schedule_is_five_cron_fields() -> None:
+    assert _spec(schedule="12 4 * * *").schedule == "12 4 * * *"
+    for bad in ("12 4 * *", "@daily", "12 4 * * * *"):
+        with pytest.raises(ValidationError, match="five-field"):
+            _spec(schedule=bad)
+
+
+@pytest.mark.unit
+def test_matches_checks_every_format_assertion() -> None:
+    two = CLAIM.model_copy(update={"assertions": [
+        *CLAIM.assertions, AssertionSpec(type="format", pattern=r"^AB.*$")]})
+    assert matches(CLAIM, "AB12345678") and matches(CLAIM, "  AB12345678 ")
+    assert not matches(CLAIM, "12345678")
+    assert matches(two, "AB12345678") and not matches(two, "CD12345678")
+
+
+@pytest.mark.unit
+def test_matches_bounds_its_input() -> None:
+    """A crafted page value against a backtracking pattern must not hang rung 1."""
+    evil = FieldTarget(name="x", description="x",
+                       assertions=[AssertionSpec(type="format", pattern=r"^(a+)+$")])
+    assert not matches(evil, "a" * (MAX_MATCH_LENGTH + 1))
+
+
+@pytest.mark.unit
+def test_matches_with_no_format_assertion_has_nothing_to_contradict() -> None:
+    only_domain = FieldTarget(name="x", description="x",
+                              assertions=[AssertionSpec(type="domain", rule={"min": 0.0})])
+    assert matches(only_domain, "anything")
+```
+
+```python
+# tests/spec/test_loader.py
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+import yaml
+
+from selector_drift.config import get_settings
+from selector_drift.spec.loader import (load_scope, load_spec, load_spec_text, scope_file,
+                                        spec_file, target_of)
+from selector_drift.spec.schema import SpecError
+
+REPO = Path(__file__).resolve().parents[2]
+SPECS = sorted((REPO / "specs").glob("*.yaml"))
+UNSAFE_YAML = {"load", "unsafe_load", "full_load", "load_all", "unsafe_load_all",
+               "full_load_all", "Loader", "UnsafeLoader", "FullLoader"}
+
+
+@pytest.mark.unit
+def test_a_target_is_described_in_words_not_a_dom_path() -> None:
+    for p in SPECS:
+        for t in load_spec(p).targets:
+            assert " " in t.description and "#" not in t.description, (p.name, t.name)
+            assert "." not in t.description, (p.name, t.name)
+
+
+@pytest.mark.unit
+def test_every_target_declares_at_least_one_assertion() -> None:
+    for p in SPECS:
+        assert all(t.assertions for t in load_spec(p).targets), p.name
+
+
+@pytest.mark.unit
+def test_every_spec_declares_a_natural_key_that_exists_in_its_schema() -> None:
+    """M5. Task 28 upserts on it, Task 30 diffs on it, Task 22 joins on it."""
+    for p in SPECS:
+        spec = load_spec(p)
+        assert spec.natural_key
+        assert set(spec.natural_key) <= set(spec.expected_schema)
+
+
+@pytest.mark.unit
+def test_the_loader_refuses_a_yaml_tag_that_would_construct_an_object() -> None:
+    """R13/H5. yaml.safe_load, always. A task spec is config; config must never be code."""
+    with pytest.raises(yaml.YAMLError):
+        load_spec_text("!!python/object/apply:os.system ['echo pwned']")
+
+
+@pytest.mark.unit
+def test_an_invalid_spec_is_a_spec_error_naming_the_file(tmp_path: Path) -> None:
+    bad = tmp_path / "ghost.yaml"
+    bad.write_text("version: [not, an, int]\n", encoding="utf-8")
+    with pytest.raises(SpecError, match="ghost.yaml"):
+        load_spec(bad)
+
+
+@pytest.mark.unit
+def test_a_missing_spec_is_a_spec_error(tmp_path: Path) -> None:
+    with pytest.raises(SpecError, match="no task spec"):
+        load_spec(tmp_path / "absent.yaml")
+
+
+@pytest.mark.unit
+def test_every_spec_file_is_named_for_its_scope_records_target() -> None:
+    """Task 6 writes the heartbeat before the spec loads, keyed by the file stem."""
+    for p in SPECS:
+        spec = load_spec(p)
+        assert Path(spec.scope_ref).stem == target_of(p)
+        assert load_scope(REPO / spec.scope_ref).target == target_of(p)
+
+
+@pytest.mark.unit
+def test_every_schedule_is_distinct_so_runs_never_share_a_worker_minute() -> None:
+    schedules = [load_spec(p).schedule for p in SPECS]
+    assert len(set(schedules)) == len(schedules)
+
+
+@pytest.mark.unit
+def test_spec_and_scope_paths_honour_the_settings(tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SD_SPEC_DIR", str(tmp_path / "sp"))
+    monkeypatch.setenv("SD_SCOPE_DIR", str(tmp_path / "sc"))
+    get_settings.cache_clear()
+    try:
+        assert spec_file("specs/testbench.yaml") == tmp_path / "sp" / "testbench.yaml"
+        assert spec_file("testbench.yaml") == tmp_path / "sp" / "testbench.yaml"
+        assert spec_file(tmp_path / "x.yaml") == tmp_path / "x.yaml"      # absolute: as given
+        assert scope_file("scopes/testbench.yaml") == tmp_path / "sc" / "testbench.yaml"
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.unit
+def test_no_module_calls_an_unsafe_yaml_loader() -> None:
+    """Global constraint: every YAML loader is yaml.safe_load (R13/H5)."""
+    offenders = []
+    for path in (REPO / "selector_drift").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                    and node.value.id == "yaml" and node.attr in UNSAFE_YAML):
+                offenders.append(f"{path.relative_to(REPO)}:{node.lineno} yaml.{node.attr}")
+    assert not offenders, offenders
+```
+
+```python
+# tests/scope/test_records_load.py
+from __future__ import annotations
+
+import datetime as dt
+import re
+from pathlib import Path
+
+import pytest
+import yaml
+
+from selector_drift.scope.errors import ScopeRefusal
+from selector_drift.scope.gate import authorise
+from selector_drift.spec.loader import load_scope, load_scope_text
+
+REPO = Path(__file__).resolve().parents[2]
+SCOPES = sorted((REPO / "scopes").glob("*.yaml"))
+PLACEHOLDER = re.compile(r"<[A-Z0-9][A-Z0-9-]*>|\bUSER\b")
+
+
+@pytest.mark.unit
+def test_all_three_day_one_targets_authorise() -> None:
+    """`today` is pinned to the record's own authorised_on, not to the wall clock (M20):
+    a test that compares dt.date.today() to a hardcoded expires_on is green until that
+    date and red afterwards for no reason anyone will remember."""
+    # PLACEHOLDER -- P-3 replaces the two control-arm names before day one (OQ1).
+    names = {"testbench", "agent-perimeter", "ledger-sense"}
+    got = {authorise(r, today=r.authorised_on).target for r in map(load_scope, SCOPES)}
+    assert got == names
+
+
+@pytest.mark.unit
+def test_every_scope_record_names_at_least_one_https_origin() -> None:
+    """H2. The origins are the browser's allowlist; a deployed target is reached over TLS."""
+    for p in SCOPES:
+        origins = load_scope(p).origins
+        assert origins and all(o.startswith("https://") for o in origins), p.name
+
+
+@pytest.mark.unit
+def test_no_scope_record_carries_an_unresolved_placeholder() -> None:
+    """B5/P-2/P-3. Brief 3.3 requires the agent to identify itself with a working contact URL;
+    a 404 is a compliance claim that fails the first time anyone checks it. The first draft
+    checked only for the string USER and so passed with `<real-account>` still in place."""
+    for p in SCOPES:
+        found = PLACEHOLDER.findall(p.read_text(encoding="utf-8"))
+        assert not found, f"{p.name}: {found}"
+
+
+@pytest.mark.unit
+def test_only_the_bench_auto_promotes() -> None:
+    auto = {load_scope(p).target for p in SCOPES
+            if load_scope(p).first_heal_policy == "auto_promote"}
+    assert auto == {"testbench"}
+
+
+@pytest.mark.unit
+def test_only_the_bench_warms_up_fast() -> None:
+    """M18. Five runs is permitted only because the bench has an answer key."""
+    fast = {load_scope(p).target for p in SCOPES if load_scope(p).warmup_runs < 30}
+    assert fast == {"testbench"}
+
+
+@pytest.mark.unit
+def test_no_scope_record_is_dated_in_the_future() -> None:
+    """B4. authorised_on is the day the record was signed. A past date stays past, so this
+    reads the wall clock without becoming a time bomb."""
+    today = dt.datetime.now(dt.UTC).date()
+    for p in SCOPES:
+        assert load_scope(p).authorised_on <= today, p.name
+
+
+@pytest.mark.unit
+def test_no_scope_record_authors_its_own_sensitivity() -> None:
+    """R4/H7. Sensitivity is derived from basis; a typo in an authored label publishes a
+    client portal."""
+    for p in SCOPES:
+        assert "sensitivity" not in yaml.safe_load(p.read_text(encoding="utf-8")), p.name
+
+
+@pytest.mark.unit
+def test_an_unknown_target_is_refused_by_the_loader(tmp_path: Path) -> None:
+    """Design 4.3: unknown target -> refuse. A missing file is a refusal, not a crash."""
+    with pytest.raises(ScopeRefusal, match="unknown target"):
+        load_scope(tmp_path / "nobody.yaml")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("text", [
+    "!!python/object/apply:os.system ['echo pwned']",
+    "target: x\nbasis: public-permissive\n",
+])
+def test_a_malformed_scope_record_is_a_refusal(text: str) -> None:
+    """R13/H5 and design 4.2: a YAML object tag and a basis outside the v1 enum both refuse."""
+    with pytest.raises(ScopeRefusal):
+        load_scope_text(text)
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `uv run pytest tests/test_config.py tests/spec tests/scope/test_records_load.py -v`
+Expected: FAIL — collection errors `ModuleNotFoundError: No module named 'selector_drift.config'`
+and `No module named 'selector_drift.spec.schema'` / `'selector_drift.spec.loader'`.
+
+- [ ] **Step 3: Add the YAML type stubs** (`mypy --strict` rejects `import yaml` without them)
+
+```bash
+uv add --dev types-PyYAML
+```
+
+- [ ] **Step 4: Write `config.py`**
+
+```python
+# selector_drift/config.py
+"""Process settings, from the environment only. No secret has a default.
+
+Created in Task 5 with the names day one needs. Task 33 replaces this file with its superset
+(fixture mode, web origin, public base URL, typegen settings); every name here keeps its meaning.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+DEFAULT_DATABASE_URL = "postgresql+psycopg://selector_drift@localhost:5432/selector_drift"
+MIN_REDACTION_KEY_BYTES = 32
+
+
+class ConfigError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class Settings:
+    env: str                          # SD_ENV: development | production | test
+    database_url: str                 # SD_DATABASE_URL -- Task 3's db/session.py reads it too
+    spec_dir: Path                    # SD_SPEC_DIR
+    scope_dir: Path                   # SD_SCOPE_DIR -- tests point it at a tmp copy
+    evidence_root: Path               # SD_EVIDENCE_ROOT
+    lake_root: Path                   # SD_LAKE_ROOT
+    _redaction_key_hex: str           # SD_REDACTION_KEY -- hex, >= 32 bytes, never committed
+
+    @property
+    def redaction_key(self) -> bytes:
+        if not self._redaction_key_hex:
+            raise ConfigError("SD_REDACTION_KEY is not set; evidence cannot be redacted")
+        key = bytes.fromhex(self._redaction_key_hex)
+        if len(key) < MIN_REDACTION_KEY_BYTES:
+            raise ConfigError(f"SD_REDACTION_KEY must be at least {MIN_REDACTION_KEY_BYTES} bytes")
+        return key
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    e = os.environ.get
+    return Settings(
+        env=e("SD_ENV", "development"),
+        database_url=e("SD_DATABASE_URL", DEFAULT_DATABASE_URL),
+        spec_dir=Path(e("SD_SPEC_DIR", "specs")),
+        scope_dir=Path(e("SD_SCOPE_DIR", "scopes")),
+        evidence_root=Path(e("SD_EVIDENCE_ROOT", "evidence")),
+        lake_root=Path(e("SD_LAKE_ROOT", "lake")),
+        _redaction_key_hex=e("SD_REDACTION_KEY", ""),
+    )
+```
+
+Append to `.env.example` (names and non-secret defaults only — gitleaks stays clean):
+
+```bash
+# selector_drift settings (Task 5). The worker container gets SD_DATABASE_URL from compose
+# (Task 6); for a local `uv run`, export it yourself -- no process reads this file for you.
+SD_DATABASE_URL=
+SD_SPEC_DIR=specs
+SD_SCOPE_DIR=scopes           # tests point this at a tmp copy; production never changes it
+```
+
+- [ ] **Step 5: Write `spec/schema.py`**
+
+```python
+# selector_drift/spec/schema.py
+"""The task spec: what to extract, described in words. Config, never code (R13/H5).
+
+A spec names each field by its meaning -- "the claim number cell in the results table" -- never
+by a DOM path; the cascade (Tasks 13-18) turns a meaning into an element. Every model forbids
+unknown keys: a misspelt `asertions:` that loaded silently would drop a field's checks.
+"""
+from __future__ import annotations
+
+import ast
+import re
+from datetime import date
+from enum import StrEnum
+from functools import lru_cache
+from pathlib import PurePosixPath
+from typing import Annotated, Literal, Self, TypedDict
+
+from pydantic import (AfterValidator, BaseModel, ConfigDict, Field, field_validator,
+                      model_validator, with_config)
+
+MAX_MATCH_LENGTH = 512
+"""Longest value `matches()` will test. A spec pattern meeting a page value is untrusted input on
+both sides; bounding the input bounds catastrophic backtracking. Task 21's FormatAssertion uses
+the same cap."""
+
+
+class SpecError(ValueError):
+    """A task spec that cannot be used as written. Refused, never repaired."""
+
+
+class Relation(StrEnum):
+    RIGHT_OF = "right_of"
+    BELOW = "below"
+    WITHIN = "within"
+
+
+class FieldType(StrEnum):
+    STRING = "string"
+    INTEGER = "integer"
+    DECIMAL = "decimal"
+    DATE = "date"
+
+
+def _iso_date(value: str) -> str:
+    if date.fromisoformat(value).isoformat() != value:
+        raise ValueError(f"{value!r} is not a YYYY-MM-DD date")
+    return value
+
+
+IsoDate = Annotated[str, AfterValidator(_iso_date)]
+FieldName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
+
+
+@with_config(ConfigDict(extra="forbid"))
+class DomainRule(TypedDict, total=False):
+    min: float
+    max: float
+    enum: list[str]
+    date_after: IsoDate
+    date_before: IsoDate
+
+
+def _check_rule(rule: DomainRule) -> None:
+    if not rule:
+        raise ValueError("a domain rule needs at least one of min, max, enum, date_after, "
+                         "date_before")
+    lo, hi = rule.get("min"), rule.get("max")
+    if lo is not None and hi is not None and lo > hi:
+        raise ValueError(f"domain rule has min {lo} above max {hi}")
+    if "enum" in rule and not rule["enum"]:
+        raise ValueError("a domain enum lists at least one value")
+    after, before = rule.get("date_after"), rule.get("date_before")
+    if after is not None and before is not None and after >= before:
+        raise ValueError(f"domain rule date_after {after} is not before date_before {before}")
+
+
+_PAYLOAD: dict[str, str] = {"format": "pattern", "domain": "rule", "cross_field": "expression"}
+
+
+class AssertionSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["format", "domain", "cross_field"]
+    pattern: str | None = None
+    rule: DomainRule | None = None
+    expression: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def _exactly_its_own_payload(self) -> Self:
+        given = {k for k in _PAYLOAD.values() if getattr(self, k) is not None}
+        needed = _PAYLOAD[self.type]
+        if given != {needed}:
+            raise ValueError(f"a {self.type} assertion takes exactly `{needed}`, "
+                             f"got {sorted(given) or 'nothing'}")
+        if self.pattern is not None:
+            try:
+                re.compile(self.pattern)
+            except re.error as exc:
+                raise ValueError(f"pattern does not compile: {exc}") from exc
+        if self.rule is not None:
+            _check_rule(self.rule)
+        if self.expression is not None:
+            try:
+                ast.parse(self.expression, mode="eval")       # parsed, NEVER evaluated here
+            except SyntaxError as exc:
+                raise ValueError(f"cross_field expression does not parse: {exc.msg}") from exc
+        return self
+
+
+_DOM_SYNTAX = re.compile(r"[#\[\]>=]|//|::")
+
+
+class FieldTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: FieldName
+    description: str = Field(min_length=1, max_length=200)
+    relation: Relation | None = None
+    assertions: list[AssertionSpec]
+    distributional: bool = False
+
+    @field_validator("description")
+    @classmethod
+    def _words_not_a_selector(cls, value: str) -> str:
+        if _DOM_SYNTAX.search(value):
+            raise ValueError("describe the field in words; selector syntax (# [ ] > = // ::) "
+                             "is a DOM path")
+        return value
+
+
+_NAV_KEYS: dict[str, frozenset[str]] = {
+    "goto": frozenset({"path"}),
+    "fill": frozenset({"field", "value_from"}),
+    "click": frozenset({"role", "name"}),
+}
+_PATH = re.compile(r"^/(?!/)[^\s\\]*$")               # one leading '/', no scheme, no host
+_PLAIN_FIELD = re.compile(r"^[A-Za-z0-9_-]{1,64}$")    # a form field name, never a selector
+_ROLE = re.compile(r"^[a-z]{2,20}$")                   # an ARIA role name
+
+
+class NavStep(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    step: Literal["goto", "fill", "click"]
+    path: str | None = None
+    field: str | None = None
+    value_from: Literal["credentials.username", "credentials.password"] | None = None
+    role: str | None = None
+    name: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_the_keys_its_kind_takes(self) -> Self:
+        given = {k for k in ("path", "field", "value_from", "role", "name")
+                 if getattr(self, k) is not None}
+        wanted = _NAV_KEYS[self.step]
+        if given != wanted:
+            raise ValueError(f"a {self.step} step takes exactly {sorted(wanted)}, "
+                             f"got {sorted(given)}")
+        if self.path is not None and not _PATH.fullmatch(self.path):
+            raise ValueError("goto takes a same-origin path starting with a single '/', "
+                             "never a URL (H2)")
+        if self.field is not None and not _PLAIN_FIELD.fullmatch(self.field):
+            raise ValueError("fill takes a plain form field name, never a selector")
+        if self.role is not None and not _ROLE.fullmatch(self.role):
+            raise ValueError("click takes an ARIA role name such as `button`")
+        if self.name is not None and not 1 <= len(self.name) <= 80:
+            raise ValueError("click takes an accessible name of 1-80 characters")
+        return self
+
+
+_CRON_FIELD = re.compile(r"^[0-9*/,-]+$")
+
+
+class TaskSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: int = Field(ge=1)
+    scope_ref: str
+    schedule: str
+    row_scope: str = Field(min_length=1, max_length=200)
+    natural_key: list[FieldName] = Field(min_length=1)
+    expected_schema: dict[FieldName, FieldType] = Field(min_length=1)
+    navigate: list[NavStep]
+    targets: list[FieldTarget] = Field(min_length=1)
+
+    @field_validator("scope_ref")
+    @classmethod
+    def _a_file_under_scopes(cls, value: str) -> str:
+        parts = PurePosixPath(value).parts
+        if ("\\" in value or len(parts) != 2 or parts[0] != "scopes"
+                or not parts[1].endswith(".yaml")):
+            raise ValueError("scope_ref is scopes/<target>.yaml")
+        return value
+
+    @field_validator("schedule")
+    @classmethod
+    def _five_field_cron(cls, value: str) -> str:
+        fields = value.split()
+        if len(fields) != 5 or not all(_CRON_FIELD.fullmatch(f) for f in fields):
+            raise ValueError("schedule is a five-field cron expression, evaluated in UTC (M20)")
+        return value
+
+    @model_validator(mode="after")
+    def _keys_and_names_agree(self) -> Self:
+        names = [t.name for t in self.targets]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            raise ValueError(f"duplicate target names: {dupes}")
+        outside = sorted(set(self.natural_key) - set(self.expected_schema))
+        if outside:
+            raise ValueError(f"natural_key {outside} is not in expected_schema (M5)")
+        unextracted = sorted(set(self.natural_key) - set(names))
+        if unextracted:
+            raise ValueError(f"natural_key {unextracted} names no target: the lake cannot "
+                             "deduplicate on a column nobody extracts (M5)")
+        return self
+
+
+@lru_cache(maxsize=256)
+def _compiled(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern)
+
+
+def matches(target: FieldTarget, value: str) -> bool:
+    """True when `value` satisfies every format assertion on `target`.
+
+    A value longer than MAX_MATCH_LENGTH never matches. A field with no format assertion has
+    nothing to contradict, so it matches; rung 1 then relies on its anchor checks (Task 17).
+    """
+    text = value.strip()
+    if len(text) > MAX_MATCH_LENGTH:
+        return False
+    return all(_compiled(a.pattern).fullmatch(text) is not None
+               for a in target.assertions if a.type == "format" and a.pattern is not None)
+```
+
+- [ ] **Step 6: Write `spec/loader.py`**
+
+```python
+# selector_drift/spec/loader.py
+"""YAML in, typed config out. `yaml.safe_load` and nothing else (R13/H5).
+
+A scope record that is missing, malformed or outside the v1 enum is a refusal, never a crash:
+design 9.3 lists "unknown target" and "basis outside the v1 enum" as Refuse, and a refusal is
+what the run record and the alert channel report.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+from pydantic import ValidationError
+
+from selector_drift.config import get_settings
+from selector_drift.scope.errors import ScopeRefusal
+from selector_drift.scope.record import ScopeRecord
+from selector_drift.spec.schema import SpecError, TaskSpec
+
+
+def load_spec_text(text: str) -> TaskSpec:
+    data = yaml.safe_load(text)          # yaml.YAMLError propagates: an object tag is refused here
+    if not isinstance(data, dict):
+        raise SpecError("a task spec is a YAML mapping")
+    try:
+        return TaskSpec.model_validate(data)
+    except ValidationError as exc:
+        raise SpecError(f"invalid task spec: {exc}") from exc
+
+
+def load_spec(path: Path) -> TaskSpec:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise SpecError(f"no task spec at {path}") from exc
+    try:
+        return load_spec_text(text)
+    except SpecError as exc:
+        raise SpecError(f"{path}: {exc}") from exc
+
+
+def load_scope_text(text: str) -> ScopeRecord:
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ScopeRefusal(f"scope record is not valid YAML: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ScopeRefusal("a scope record is a YAML mapping")
+    try:
+        return ScopeRecord.model_validate(data)
+    except ValidationError as exc:
+        raise ScopeRefusal(f"invalid scope record: {exc}") from exc
+
+
+def load_scope(path: Path) -> ScopeRecord:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ScopeRefusal(f"unknown target: no scope record at {path}") from exc
+    try:
+        return load_scope_text(text)
+    except ScopeRefusal as exc:
+        raise ScopeRefusal(f"{path}: {exc.reason}") from exc
+
+
+def spec_file(spec_path: str | Path) -> Path:
+    """An absolute path as given; anything else by file name under SD_SPEC_DIR."""
+    p = Path(spec_path)
+    return p if p.is_absolute() else get_settings().spec_dir / p.name
+
+
+def scope_file(scope_ref: str) -> Path:
+    """A spec's `scopes/<target>.yaml`, resolved under SD_SCOPE_DIR."""
+    return get_settings().scope_dir / Path(scope_ref).name
+
+
+def target_of(spec_path: str | Path) -> str:
+    """Spec files are named `<target>.yaml`; test_loader pins it for every file in specs/."""
+    return Path(spec_path).stem
+```
+
+- [ ] **Step 7: Write the six YAML files**
+
+`scopes/testbench.yaml` — `first_heal_policy: auto_promote` and `warmup_runs: 5` are permitted
+**only because the bench is synthetic with a known answer key** (design §5.7, §5.8):
 
 ```yaml
 target: testbench
 basis: self-owned
-authorising_party: <your name>
-authorised_on: <day one, UTC>          # P-4: not a guess. The date the first cron fires.
-expires_on: <authorised_on + 1 year>
+authorising_party: <AUTHORISING-PARTY>
+authorised_on: <DAY-ONE-UTC>             # the date this record is signed -- never a future date (B4)
+expires_on: <DAY-ONE-UTC-PLUS-ONE-YEAR>
 evidence_uri: null
 evidence_sha256: null
-origins: [ https://<bench-host> ]      # H2: the browser may reach nothing else
+origins: [ "https://<BENCH-HOST>" ]      # H2: the browser may reach nothing else
 rate_limit: { requests: 1, per_seconds: 30 }
-user_agent_contact: https://github.com/<real-account>/selector-drift   # P-2: must resolve
+user_agent_contact: https://github.com/<REAL-ACCOUNT>/selector-drift   # P-2: must resolve
 first_heal_policy: auto_promote
+warmup_runs: 5
 legal_review: self_drafted
 # no `sensitivity:` -- it is derived from `basis` and cannot be authored (R4/H7)
+# no `evidence_retention_days:` -- self-owned evidence is kept for the life of the log
 ```
 
-The other two are identical but `first_heal_policy: required`.
+`scopes/agent-perimeter.yaml` (P-3 placeholder name — the control arm is unnamed):
 
-`specs/testbench.yaml`:
+```yaml
+target: agent-perimeter
+basis: self-owned
+authorising_party: <AUTHORISING-PARTY>
+authorised_on: <DAY-ONE-UTC>
+expires_on: <DAY-ONE-UTC-PLUS-ONE-YEAR>
+evidence_uri: null
+evidence_sha256: null
+origins: [ "https://<CONTROL-1-HOST>" ]  # P-3: a self-owned deployment whose deploy history we can read
+rate_limit: { requests: 1, per_seconds: 30 }
+user_agent_contact: https://github.com/<REAL-ACCOUNT>/selector-drift
+first_heal_policy: required
+warmup_runs: 30                          # explicit, so the value is visible in review
+legal_review: self_drafted
+```
+
+`scopes/ledger-sense.yaml` (P-3 placeholder name):
+
+```yaml
+target: ledger-sense
+basis: self-owned
+authorising_party: <AUTHORISING-PARTY>
+authorised_on: <DAY-ONE-UTC>
+expires_on: <DAY-ONE-UTC-PLUS-ONE-YEAR>
+evidence_uri: null
+evidence_sha256: null
+origins: [ "https://<CONTROL-2-HOST>" ]
+rate_limit: { requests: 1, per_seconds: 30 }
+user_agent_contact: https://github.com/<REAL-ACCOUNT>/selector-drift
+first_heal_policy: required
+warmup_runs: 30
+legal_review: self_drafted
+```
+
+`specs/testbench.yaml` (Task 12 Step 0 bumps it to version 2 with all six columns once the bench is up):
 
 ```yaml
 version: 1
@@ -1011,321 +1963,1537 @@ targets:
       - { type: format, pattern: '^[A-Z]{2}\d{8}$' }
 ```
 
-- [ ] **Step 1: Write the failing tests**
+`specs/agent-perimeter.yaml`:
 
-```python
-# tests/scope/test_records_load.py
-import datetime as dt
-from pathlib import Path
-from selector_drift.spec.loader import load_scope
-from selector_drift.scope.gate import authorise
-
-def test_all_three_day_one_targets_authorise():
-    """`today` is pinned to the record's own authorised_on, not to the wall clock (M20):
-    a test that compares dt.date.today() to a hardcoded expires_on is green until that
-    date and red afterwards for no reason anyone will remember."""
-    names = {"testbench", "agent-perimeter", "ledger-sense"}   # PLACEHOLDER — P-3 replaces the two
-                                                               # control-arm names before day one (OQ1)
-    got = {authorise(r, today=r.authorised_on).target
-           for r in map(load_scope, Path("scopes").glob("*.yaml"))}
-    assert got == names
-
-def test_every_scope_record_names_at_least_one_origin():
-    assert all(load_scope(p).origins for p in Path("scopes").glob("*.yaml"))
-
-def test_no_scope_record_authorises_a_placeholder_contact_url():
-    """B5. Brief 3.3 requires the agent to identify itself with a contact URL; a 404 is a
-    compliance claim that fails the first time anyone checks it."""
-    assert not any("USER" in load_scope(p).user_agent_contact
-                   for p in Path("scopes").glob("*.yaml"))
-
-def test_only_the_bench_auto_promotes():
-    auto = {load_scope(p).target for p in Path("scopes").glob("*.yaml")
-            if load_scope(p).first_heal_policy == "auto_promote"}
-    assert auto == {"testbench"}
+```yaml
+version: 1
+scope_ref: scopes/agent-perimeter.yaml
+schedule: "17 4 * * *"                 # UTC, five minutes after the bench -- never the same minute
+row_scope: the landing page
+natural_key: [ page_heading ]
+expected_schema:
+  page_heading: string
+navigate:
+  - { step: goto, path: / }
+targets:
+  - name: page_heading
+    description: the main heading of the landing page
+    assertions:
+      - { type: format, pattern: '^\S.{0,119}$' }
 ```
 
-```python
-# tests/spec/test_loader.py
-from pathlib import Path
-from selector_drift.spec.loader import load_spec
+`specs/ledger-sense.yaml`:
 
-def test_a_target_is_described_in_words_not_a_dom_path():
-    t = load_spec(Path("specs/testbench.yaml")).targets[0]
-    assert " " in t.description and "#" not in t.description and "." not in t.description
-
-def test_every_target_declares_at_least_one_assertion():
-    for p in Path("specs").glob("*.yaml"):
-        assert all(t.assertions for t in load_spec(p).targets)
-
-def test_every_spec_declares_a_natural_key_that_exists_in_its_schema():
-    """M5. Task 28 upserts on it, Task 30 diffs on it, Task 22 joins on it."""
-    for p in Path("specs").glob("*.yaml"):
-        spec = load_spec(p)
-        assert spec.natural_key
-        assert set(spec.natural_key) <= set(spec.expected_schema)
-
-def test_the_loader_refuses_a_yaml_tag_that_would_construct_an_object():
-    """R13/H5. yaml.safe_load, always. A task spec is config; config must never be code."""
-    with pytest.raises(yaml.YAMLError):
-        load_spec_text("!!python/object/apply:os.system ['echo pwned']")
+```yaml
+version: 1
+scope_ref: scopes/ledger-sense.yaml
+schedule: "22 4 * * *"                 # UTC
+row_scope: the landing page
+natural_key: [ page_heading ]
+expected_schema:
+  page_heading: string
+navigate:
+  - { step: goto, path: / }
+targets:
+  - name: page_heading
+    description: the main heading of the landing page
+    assertions:
+      - { type: format, pattern: '^\S.{0,119}$' }
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [ ] **Step 8: Replace every placeholder with its real value**
 
-Run: `uv run pytest tests/spec tests/scope/test_records_load.py -v`
-Expected: FAIL — `scopes/` and `specs/` are empty.
+| Token | Files | Value | Source |
+|---|---|---|---|
+| `<AUTHORISING-PARTY>` | all three scopes | your full name | brief §3.1 |
+| `<DAY-ONE-UTC>` | all three scopes | `date -u +%F` on the day you sign | M20, B4 |
+| `<DAY-ONE-UTC-PLUS-ONE-YEAR>` | all three scopes | `date -u -d '+1 year' +%F` (GNU) | brief §3.1 |
+| `<REAL-ACCOUNT>` | all three scopes | the GitHub account that owns this repo | P-2 |
+| `<BENCH-HOST>` | `scopes/testbench.yaml` | the bench's hostname on the P-4 VM | P-4, Task 12 |
+| `<CONTROL-1-HOST>`, `<CONTROL-2-HOST>` | the two control-arm scopes | the two self-owned deployments | P-3 |
 
-- [ ] **Step 3: Write the schema, the loader, and the six YAML files**
-
-- [ ] **Step 4: Run the tests and make sure they pass**
-
-Run: `uv run pytest tests/spec tests/scope -v`
-Expected: PASS, 9 tests.
-
-- [ ] **Step 5: Commit**
+If P-3 names applications other than `agent-perimeter` and `ledger-sense`, rename both files in
+`scopes/` and `specs/`, their `target:` and `scope_ref:` lines, and the `names` set in
+`test_all_three_day_one_targets_authorise` — the stem, the scope target and the test must agree
+(`test_every_spec_file_is_named_for_its_scope_records_target`). Then confirm nothing is left:
 
 ```bash
-git add selector_drift/spec scopes specs tests/spec tests/scope
-git commit -m "feat(spec): three day-one scope records and task specs"
+grep -rnE '<[A-Z0-9][A-Z0-9-]*>' scopes specs
+curl -fsS -o /dev/null -w '%{http_code}\n' "$(grep -h '^user_agent_contact:' scopes/testbench.yaml | awk '{print $2}')"
 ```
+
+Expected: `grep` prints nothing; `curl` prints `200` (a private repo returns `404` to an anonymous
+request — if so, point `user_agent_contact` at a public page that says who runs the agent and how to
+reach them, and use that URL in all three records).
+
+- [ ] **Step 9: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/test_config.py tests/spec tests/scope -v -m unit`
+Expected: PASS — 5 config, 20 schema (parametrised cases counted), 10 loader, 10 records-load, plus
+Task 2's 17 gate tests: **62 passed**.
+
+Then the fast check:
+
+```bash
+uv run ruff check . && uv run ruff format --check .
+uv run mypy --strict selector_drift
+uv run lint-imports
+```
+
+Expected: clean.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add selector_drift/config.py selector_drift/spec scopes specs .env.example pyproject.toml uv.lock \
+        tests/test_config.py tests/spec tests/scope/test_records_load.py
+git commit -m "feat(spec): day-one scope records, task specs, and the safe_load-only loader"
+```
+
+**Corrections to the first draft of this task.** Its `test_the_loader_refuses_a_yaml_tag...` used
+`pytest`, `yaml` and `load_spec_text` without importing any of them; its placeholder test passed with
+`<real-account>` still in the file; its "PASS, 9 tests" counted tests that did not exist; and it
+listed `load_scope` as producing parse errors, which would have turned "unknown target" into a crash
+rather than the refusal design §4.3 requires.
 
 ---
 
 ### Task 6: The cron fires and writes a run record — the log has started
 
 **Files:**
-- Create: `selector_drift/orchestrate/flows.py`, `selector_drift/orchestrate/deployments.py`, `selector_drift/orchestrate/rung_stats.py`
+- Create: `selector_drift/orchestrate/run_record.py`, `selector_drift/orchestrate/flows.py`,
+  `selector_drift/orchestrate/deployments.py`, `selector_drift/orchestrate/rung_stats.py`
+- Create: `selector_drift/quality/alerts.py` (the one alert channel — Task 29A builds `notify()` on it)
 - Create: `selector_drift/__main__.py`
-- Test: `tests/orchestrate/test_run_record.py`
+- Create: `Dockerfile`, `.dockerignore`, `docker/postgres-init/10-prefect-database.sql`
+- Create: `docs/methodology.md`
+- Modify: `docker-compose.yml` (add `prefect-server`; give Task 4's `worker` its command, restart
+  policy, init and environment; mount the Postgres init directory), `.env.example`
+- Test: `tests/orchestrate/conftest.py`, `tests/orchestrate/test_run_key.py`,
+  `tests/orchestrate/test_run_record.py`, `tests/orchestrate/test_rung_stats.py`,
+  `tests/orchestrate/test_deployments.py`, `tests/quality/test_alert_channel.py`,
+  `tests/test_main.py`, `tests/test_methodology_log_start.py`
 
 **Interfaces:**
-- Consumes: `authorise`, `browser.driver.open`, `load_spec`, the `runs` table.
-- Produces:
-  - `run_key(target: str, spec_version: int, window: str) -> str` — deterministic, `f"{target}:{spec_version}:{window}"`. **Every later task uses this exact function for idempotency.**
-  - `extraction_flow(spec_path: str) -> str` — Prefect flow, returns the `run_key`
-  - `rung_stats() -> dict[str, float]` — proportion of resolutions won by each rung, keys `rung1`…`rung5`, **computed from the `resolutions` table (R5/C4)**, not from `heal_events`. Empty until Phase C. Task 26 and Task 41 both read it; it is the source of a published claim (B11), so its denominator is every resolution attempted, including rung-1 cache hits.
-  - `record_attempt(run_key, attempt, state, error, scope_record_sha256)` — one `run_attempts` row per try (M13). `runs` holds the terminal state; a retry must not erase the failure it retried.
-  - `heartbeat()` — writes a row every scheduled fire, successful or not, so a **missing** run is distinguishable from a run that never fired. A ninety-day log with silent holes is worth less than a shorter one with none (B3).
+- Consumes: `authorise`, `ScopeRefusal`, `AuthorisedTarget` (Task 2 — `target.record_sha256`,
+  `target.target`); `Run`, `RunAttempt`, `Heartbeat`, `Resolution`, `AuditLog`, `Session`, `engine`
+  (Task 3); `selector_drift.browser.driver.open(target, credentials=None)` — async context manager
+  yielding a session whose `page.content()` returns the HTML — and `selector_drift.browser.registry.url_for`
+  (Task 4); `load_spec`, `load_scope`, `spec_file`, `scope_file`, `target_of`, `SpecError`,
+  `get_settings` (Task 5).
+- Produces — `selector_drift/orchestrate/run_record.py` (**not** `flows.py`: Task 26A's `pipeline.py`
+  needs these and `flows.py` imports `pipeline.py`, so keeping them in `flows.py` would make the
+  import circular):
+  - `run_key(target: str, spec_version: int, window: str) -> str` — deterministic,
+    `f"{target}:{spec_version}:{window}"`, `window` an ISO `YYYY-MM-DD`; raises `ValueError` for a
+    target that is not `^[a-z0-9][a-z0-9-]{0,62}$` or a window that is not exactly ISO. **Every
+    later task uses this exact function for idempotency.**
+  - `parse_run_key(key: str) -> tuple[str, int, date]`
+  - `window_for(slot: datetime) -> str` — the UTC date of the cron slot, not of the fire (M20);
+    refuses a naive datetime
+  - `TerminalState = Literal["completed", "healed", "quarantined", "failed", "refused"]` — the frozen five;
+    `AttemptState = Literal["started", "completed", "healed", "quarantined", "failed"]`
+  - `heartbeat(target: str, scheduled_for: datetime, run_key: str | None, *, fired_at: datetime | None = None) -> int`
+    — one `Heartbeat` row per `(target, scheduled_for)`, idempotent (a Prefect retry of the same
+    slot returns the existing id rather than counting the fire twice); returns the row id
+  - `link_heartbeat(heartbeat_id: int, run_key: str) -> None`
+  - `next_attempt(run_key: str) -> int` — `1 + max(attempt)` for the key, so a retry **or a second
+    run in the same window** appends an attempt rather than overwriting attempt 1 (M13)
+  - `record_attempt(run_key: str, attempt: int, state: AttemptState, error: str | None, scope_record_sha256: str) -> None`
+    — upserts one `run_attempts` row on `(run_key, attempt)`; `"started"` also marks the `runs` row
+    `failed` with `NO_TERMINAL_STATE` until a terminal state replaces it, so a crash, kill or timeout
+    reads as a failure, never as a missing row. **Called only after `authorise()` returns.**
+  - `record_run(key: str, *, target: str, spec_version: int, window: date, state: TerminalState, rows_written: int | None = None, error: str | None = None) -> None`
+    — the terminal state on `runs`, upserted; `first_started_at` survives
+  - `record_authorisation(run_key: str, target: str, record_sha256: str) -> None` — one `audit_log`
+    row (`action="scope_authorised"`), the promise Task 2 makes: *"which authorisation was in force
+    when we accessed this system"* is answerable from the database
+  - `NO_TERMINAL_STATE: str`
+- Produces — `selector_drift/orchestrate/flows.py`:
+  - `extraction_flow(spec_path: str) -> str` — Prefect flow (`retries=2`, `retry_delay_seconds=300`,
+    `timeout_seconds=600`), returns the `run_key`
+  - `scheduled_slot() -> datetime` — `prefect.runtime.flow_run.scheduled_start_time` as a UTC
+    `datetime` (the cron slot, not the wall clock)
+  - `load_start_page(target: AuthorisedTarget) -> int` (async), `StartPageError(RuntimeError)`
+- Produces — `selector_drift/orchestrate/rung_stats.py`: `rung_stats() -> dict[str, float]` —
+  proportion of resolutions won by each rung, keys `rung1`…`rung5`, **computed from the
+  `resolutions` table (R5/C4)**, not from `heal_events`; `{}` until the first resolution (Phase C).
+  Its denominator is every resolution attempted, including rung-1 cache hits and resolutions no
+  rung won (B11). Task 34B makes it delegate to `derive.rung_shares()`.
+- Produces — `selector_drift/orchestrate/deployments.py`: `JOB_LIMITS`,
+  `extraction_deployments() -> list[RunnerDeployment]`, `main() -> None` (registers and serves;
+  blocks)
+- Produces — `selector_drift/quality/alerts.py`: `AlertKind`, `WEBHOOK_ENV = "SD_ALERT_WEBHOOK_URL"`,
+  `webhook_url() -> str | None`, `post_alert(kind: AlertKind, target: str, run_key: str | None, summary: str) -> bool`
+- Produces — `selector_drift/__main__.py`: `main(argv: list[str] | None = None) -> int` with one
+  subcommand, `run <spec>`. Task 34 adds `create-operator`.
+
+**Day one does exactly this, in this order, and nothing else** (design §8 — no cascade exists yet;
+Task 26A replaces everything after the authorisation block):
+
+```
+heartbeat(stem, slot, None)          FIRST: before the spec loads, before any authorisation (API spec 6.1)
+load_spec(spec_file(spec_path))      SpecError -> raise; the heartbeat stays, unlinked (run_key NULL)
+key = run_key(stem, version, window_for(slot));  link_heartbeat(beat, key)
+load_scope + stem check + authorise  ScopeRefusal -> runs.state=refused, alert, NO run_attempts row
+next_attempt; record_attempt(started); record_authorisation
+driver.open(target) -> page.content()   any exception -> attempt failed, runs failed, alert, re-raise
+record_attempt(completed); record_run(completed)
+```
+
+**Why the heartbeat comes before the spec loads (B3, API spec §6.1).** The first amendment loaded
+the spec first and wrote the heartbeat afterwards, so a spec that loaded but whose *scope* file was
+missing left no heartbeat at all — a fire indistinguishable from a host that was down. The heartbeat
+is now the flow's first statement, keyed by the spec file's stem (Task 5 pins stem = target for every
+spec), and `link_heartbeat()` attaches the run key once it is known. A refused, crashed or
+misconfigured run leaves a heartbeat; a host that was down leaves nothing, which `missed_runs`
+(Task 34B) counts as missed — the honest reading (design §9.2).
+
+**Why a refusal writes no `run_attempts` row.** `derive.fired_without_attempt` (Task 34B) tells "the
+scope gate refused" from "the scheduler never fired" by exactly that absence. `record_attempt()` is
+called only after `authorise()` returns.
+
+**Why the attempt number is `next_attempt(key)`, not `flow_run.run_count` (M13).** `run_count` is 1
+for every *new* flow run, so a second run in the same UTC window — a manual re-run, or a late run
+after a host restart — would upsert over attempt 1 and erase the failure it retried. Counting the
+rows that exist appends instead.
+
+**Why a started attempt marks the run `failed` until it finishes.** `runs.state` holds the frozen
+five (API spec §4.3), so there is no "running" state to leave behind. A worker killed by the memory
+limit or the 10-minute timeout never reaches its `except` block; with this rule its run reads
+`failed: attempt started; no terminal state was recorded`, which is true, instead of the previous
+day's `completed`, which is not.
+
+**Why the limits live on the container, and are also declared on the deployment (B8).** The worker
+runs `serve()` — a process runner — so Prefect's `job_variables` are not applied by anything on the
+VM today. The enforcement is the `worker` service's `mem_limit: 2g` / `pids_limit: 512` (Task 4) and
+the flow's `timeout_seconds=600`. `job_variables` carry the same values so a later move to a Docker
+work pool keeps them, and `test_the_container_enforces_the_limits_the_deployment_declares` fails if
+the two ever disagree — a declared limit nothing enforces is a green tick with no test behind it.
+
+**Why the first alert channel lands on day one (M2).** A refusal or a failed run at 04:12 that
+notifies nobody stalls the log silently, and DoD 7 requires *"data-quality contracts **and
+alerting**"*. One webhook is enough for v1. Task 29A adds dedup, findings, quarantines and missed
+heartbeats on top of `post_alert()`; nothing later has to invent a channel. An unset webhook is
+logged loudly at startup and at every alert, because an alerting system nobody configured is worse
+than none.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
+# tests/orchestrate/conftest.py
+"""Fixtures for the orchestrate tests. Task 26A APPENDS its bench fixtures to this file.
+
+Nothing here is autouse: the unit tests in this directory (run keys, deployments) must not touch
+Postgres or start a Prefect server (M26)."""
+from __future__ import annotations
+
+import datetime as dt
+import functools
+import socket
+import threading
+from collections.abc import Iterator
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+from prefect.testing.utilities import prefect_test_harness
+from sqlalchemy import text
+
+from selector_drift.config import get_settings
+from selector_drift.db.session import engine
+
+REPO = Path(__file__).resolve().parents[2]
+PAGE = ("<!doctype html><html><head><title>Day one</title></head>"
+        "<body><h1>Day one</h1></body></html>")
+
+
+class _QuietHandler(SimpleHTTPRequestHandler):
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+
+def _today() -> dt.date:
+    return dt.datetime.now(dt.UTC).date()
+
+
+def scope_record(target: str, origin: str, **overrides: object) -> dict[str, object]:
+    """The real bench record with a local origin: the gate is exercised, never bypassed."""
+    rec: dict[str, object] = yaml.safe_load(
+        (REPO / "scopes" / "testbench.yaml").read_text(encoding="utf-8"))
+    rec.update(target=target, origins=[origin], rate_limit={"requests": 1, "per_seconds": 1},
+               authorised_on=_today() - dt.timedelta(days=1),
+               expires_on=_today() + dt.timedelta(days=365))
+    rec.update(overrides)
+    return rec
+
+
+def write_scope(directory: Path, rec: dict[str, object]) -> None:
+    (directory / f"{rec['target']}.yaml").write_text(yaml.safe_dump(rec, sort_keys=False),
+                                                     encoding="utf-8")
+
+
+@pytest.fixture(scope="session")
+def prefect_api() -> Iterator[None]:
+    with prefect_test_harness():
+        yield
+
+
+@pytest.fixture
+def db() -> Iterator[None]:
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE runs, run_attempts, heartbeats, resolutions, audit_log "
+                       "RESTART IDENTITY CASCADE"))
+    yield
+
+
+@pytest.fixture
+def scope_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    d = tmp_path / "scopes"
+    d.mkdir()
+    monkeypatch.setenv("SD_SCOPE_DIR", str(d))
+    get_settings.cache_clear()
+    yield d
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def local_site(tmp_path: Path, scope_dir: Path,
+               monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    root = tmp_path / "site"
+    root.mkdir()
+    (root / "index.html").write_text(PAGE, encoding="utf-8")
+    server = ThreadingHTTPServer(("127.0.0.1", 0),
+                                 functools.partial(_QuietHandler, directory=str(root)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    write_scope(scope_dir, scope_record("testbench", url))
+    monkeypatch.setattr("selector_drift.browser.registry.url_for", lambda target: url)
+    try:
+        yield url
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture
+def dead_site(scope_dir: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    with socket.socket() as s:                   # a port that was free a moment ago, now closed
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    url = f"http://127.0.0.1:{port}"
+    write_scope(scope_dir, scope_record("testbench", url))
+    monkeypatch.setattr("selector_drift.browser.registry.url_for", lambda target: url)
+    return url
+
+
+@pytest.fixture
+def expired_spec(tmp_path: Path, scope_dir: Path) -> str:
+    specs = tmp_path / "specs"
+    specs.mkdir(exist_ok=True)
+    body = (REPO / "specs" / "testbench.yaml").read_text(encoding="utf-8")
+    (specs / "expired.yaml").write_text(body.replace("scopes/testbench.yaml",
+                                                     "scopes/expired.yaml"), encoding="utf-8")
+    write_scope(scope_dir, scope_record("expired", "https://expired.example.invalid",
+                                        authorised_on=_today() - dt.timedelta(days=400),
+                                        expires_on=_today() - dt.timedelta(days=1)))
+    return str(specs / "expired.yaml")
+```
+
+```python
+# tests/orchestrate/test_run_key.py
+from __future__ import annotations
+
+import datetime as dt
+
+import pytest
+
+from selector_drift.orchestrate.run_record import parse_run_key, run_key, window_for
+
+
+@pytest.mark.unit
+def test_run_key_format_is_target_version_window() -> None:
+    assert run_key("testbench", 2, "2026-09-07") == "testbench:2:2026-09-07"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("target", ["a:b", "", "TestBench"])
+def test_run_key_refuses_a_target_that_would_break_the_format(target: str) -> None:
+    with pytest.raises(ValueError, match="target"):
+        run_key(target, 1, "2026-09-07")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("window", ["2026-9-7", "20260907", "2026-09-07T04:12"])
+def test_run_key_refuses_a_window_that_is_not_an_iso_date(window: str) -> None:
+    with pytest.raises(ValueError, match="window"):
+        run_key("testbench", 1, window)
+
+
+@pytest.mark.unit
+def test_parse_run_key_round_trips() -> None:
+    assert parse_run_key("ledger-sense:3:2026-09-07") == ("ledger-sense", 3, dt.date(2026, 9, 7))
+
+
+@pytest.mark.unit
+def test_the_window_is_the_utc_date_of_the_slot() -> None:
+    """M20. 23:30 in UTC-5 is already tomorrow in UTC; the window follows UTC."""
+    slot = dt.datetime(2026, 9, 7, 23, 30, tzinfo=dt.timezone(dt.timedelta(hours=-5)))
+    assert window_for(slot) == "2026-09-08"
+
+
+@pytest.mark.unit
+def test_a_naive_slot_is_refused() -> None:
+    with pytest.raises(ValueError, match="UTC"):
+        window_for(dt.datetime(2026, 9, 7, 4, 12))
+```
+
+```python
 # tests/orchestrate/test_run_record.py
-from selector_drift.orchestrate.flows import extraction_flow, run_key
+from __future__ import annotations
+
+import datetime as dt
+from pathlib import Path
+
+import pytest
+
+from selector_drift.db.models import AuditLog, Heartbeat, Run, RunAttempt
 from selector_drift.db.session import Session
-from selector_drift.db.models import Run
+from selector_drift.orchestrate.flows import extraction_flow
+from selector_drift.orchestrate.run_record import (NO_TERMINAL_STATE, heartbeat, record_attempt,
+                                                   run_key)
+from selector_drift.spec.loader import load_spec
+from selector_drift.spec.schema import SpecError
 
-def test_flow_writes_a_run_record():
-    key = extraction_flow("specs/testbench.yaml")
+REPO = Path(__file__).resolve().parents[2]
+# A failing test must not sleep through two 300 s retries. The retry policy itself is pinned
+# in test_deployments.py.
+ONCE = extraction_flow.with_options(retries=0)
+
+
+def _today() -> str:
+    return dt.datetime.now(dt.UTC).date().isoformat()
+
+
+def _bench_key() -> str:
+    return run_key("testbench", load_spec(REPO / "specs" / "testbench.yaml").version, _today())
+
+
+@pytest.mark.integration
+def test_flow_writes_a_run_record(prefect_api, db, local_site) -> None:
+    """Tightened from the first draft, which accepted `failed` as a pass."""
+    key = ONCE("specs/testbench.yaml")
     with Session() as s:
-        assert s.get(Run, key).state in {"completed", "failed"}
+        assert s.get(Run, key).state == "completed"
+        (attempt,) = s.query(RunAttempt).filter_by(run_key=key).all()
+        assert (attempt.attempt, attempt.state, attempt.error) == (1, "completed", None)
+        assert s.query(Heartbeat).filter_by(run_key=key).count() == 1
 
-def test_run_key_is_deterministic():
+
+@pytest.mark.unit
+def test_run_key_is_deterministic() -> None:
     assert run_key("t", 1, "2026-09-07") == run_key("t", 1, "2026-09-07")
 
-def test_a_refused_target_never_opens_a_browser(monkeypatch, expired_spec):
-    opened = []
-    monkeypatch.setattr("selector_drift.browser.driver.open", lambda *a, **k: opened.append(1))
-    key = extraction_flow(expired_spec)
+
+@pytest.mark.integration
+def test_a_refused_target_never_opens_a_browser(prefect_api, db, expired_spec,
+                                                monkeypatch) -> None:
+    opened: list[int] = []
+    monkeypatch.setattr("selector_drift.browser.driver.open",
+                        lambda *a, **k: opened.append(1))
+    key = ONCE(expired_spec)
     with Session() as s:
-        assert s.get(Run, key).state == "refused"
+        run = s.get(Run, key)
+        assert run.state == "refused" and "expired" in (run.error or "")
+        # Task 34B's fired_without_attempt depends on this absence.
+        assert s.query(RunAttempt).filter_by(run_key=key).count() == 0
     assert opened == []
+
+
+@pytest.mark.integration
+def test_every_fire_writes_a_heartbeat_even_when_refused(prefect_api, db, expired_spec) -> None:
+    key = ONCE(expired_spec)
+    with Session() as s:
+        hb = s.query(Heartbeat).filter_by(run_key=key).one()
+    assert hb.target == "expired"
+    assert hb.fired_at >= hb.scheduled_for.replace(second=0, microsecond=0)
+
+
+@pytest.mark.integration
+def test_the_heartbeat_is_written_before_authorisation(prefect_api, db, local_site,
+                                                       monkeypatch) -> None:
+    def boom(*a: object, **k: object) -> None:
+        raise RuntimeError("scope gate unreachable")
+    monkeypatch.setattr("selector_drift.orchestrate.flows.authorise", boom)
+    with pytest.raises(RuntimeError, match="unreachable"):
+        ONCE("specs/testbench.yaml")
+    with Session() as s:
+        hb = s.query(Heartbeat).filter_by(target="testbench").one()
+        assert hb.run_key == _bench_key()
+        assert s.get(Run, _bench_key()) is None               # no runs row, no attempt row
+
+
+@pytest.mark.integration
+def test_an_unloadable_spec_still_leaves_a_heartbeat(prefect_api, db, tmp_path) -> None:
+    bad = tmp_path / "ghost.yaml"
+    bad.write_text("version: [not, an, int]\n", encoding="utf-8")
+    with pytest.raises(SpecError):
+        ONCE(str(bad))
+    with Session() as s:
+        hb = s.query(Heartbeat).filter_by(target="ghost").one()
+    assert hb.run_key is None
+
+
+@pytest.mark.integration
+def test_an_unknown_target_is_refused_not_failed(prefect_api, db, tmp_path, scope_dir) -> None:
+    """Design 4.3: no scope record -> Refuse, with a runs row the log can count."""
+    specs = tmp_path / "specs"
+    specs.mkdir()
+    body = (REPO / "specs" / "testbench.yaml").read_text(encoding="utf-8")
+    (specs / "nowhere.yaml").write_text(body.replace("scopes/testbench.yaml",
+                                                     "scopes/nowhere.yaml"), encoding="utf-8")
+    key = ONCE(str(specs / "nowhere.yaml"))
+    with Session() as s:
+        run = s.get(Run, key)
+        assert run.state == "refused" and "unknown target" in (run.error or "")
+
+
+@pytest.mark.integration
+def test_a_page_that_will_not_load_is_a_failed_attempt_and_the_flow_raises(
+        prefect_api, db, dead_site) -> None:
+    """Design 9.3 Fail: marked failed, alerted, and raised so Prefect's retry policy applies."""
+    # The exception type is Task 4's; any failure that carries a reason will do.
+    with pytest.raises(Exception, match=r"\S"):
+        ONCE("specs/testbench.yaml")
+    with Session() as s:
+        run = s.get(Run, _bench_key())
+        assert run.state == "failed" and run.error and run.error != NO_TERMINAL_STATE
+        (attempt,) = s.query(RunAttempt).filter_by(run_key=_bench_key()).all()
+        assert attempt.state == "failed" and attempt.finished_at is not None
+
+
+@pytest.mark.integration
+def test_a_second_run_in_the_same_window_is_a_second_attempt_not_an_overwrite(
+        prefect_api, db, local_site) -> None:
+    """M13. A retry must not erase the attempt it retried."""
+    first = ONCE("specs/testbench.yaml")
+    second = ONCE("specs/testbench.yaml")
+    assert first == second
+    with Session() as s:
+        attempts = s.query(RunAttempt).filter_by(run_key=first).order_by(RunAttempt.attempt).all()
+    assert [(a.attempt, a.state) for a in attempts] == [(1, "completed"), (2, "completed")]
+
+
+@pytest.mark.integration
+def test_a_crash_after_start_leaves_a_failed_run_not_a_missing_one(db) -> None:
+    key = "testbench:1:2026-09-07"
+    record_attempt(key, 1, "started", None, "0" * 64)
+    with Session() as s:
+        run = s.get(Run, key)
+        assert (run.state, run.error) == ("failed", NO_TERMINAL_STATE)
+        assert run.window == dt.date(2026, 9, 7) and run.spec_version == 1
+        assert s.query(RunAttempt).filter_by(run_key=key).one().finished_at is None
+
+
+@pytest.mark.integration
+def test_a_retry_of_the_same_slot_does_not_double_count_its_heartbeat(db) -> None:
+    slot = dt.datetime(2026, 9, 7, 4, 12, tzinfo=dt.UTC)
+    first = heartbeat("testbench", slot, None)
+    assert heartbeat("testbench", slot, None) == first
+    with Session() as s:
+        assert s.query(Heartbeat).count() == 1
+
+
+@pytest.mark.integration
+def test_every_authorised_run_audits_the_scope_record_hash(prefect_api, db, local_site) -> None:
+    """Task 2: which authorisation was in force is answerable from the database."""
+    key = ONCE("specs/testbench.yaml")
+    with Session() as s:
+        row = s.query(AuditLog).filter_by(action="scope_authorised", subject=key).one()
+        attempt = s.query(RunAttempt).filter_by(run_key=key).one()
+    assert row.detail["record_sha256"] == attempt.scope_record_sha256
+    assert row.detail["target"] == "testbench"
+```
+
+```python
+# tests/orchestrate/test_rung_stats.py
+from __future__ import annotations
+
+import datetime as dt
+
+import pytest
+
+from selector_drift.db.models import Resolution, Run
+from selector_drift.db.session import Session
+from selector_drift.orchestrate.rung_stats import rung_stats
+
+AT = dt.datetime(2026, 9, 7, 4, 12, tzinfo=dt.UTC)
+KEY = "testbench:1:2026-09-07"
+
+
+@pytest.mark.integration
+def test_rung_stats_is_empty_before_any_resolution(db) -> None:
+    assert rung_stats() == {}
+
+
+@pytest.mark.integration
+def test_the_denominator_is_every_resolution_including_unresolved(db) -> None:
+    """C4/B11. A resolution no rung won still counts; otherwise the published shares inflate."""
+    with Session() as s:
+        s.add(Run(run_key=KEY, target="testbench", spec_version=1, window=dt.date(2026, 9, 7),
+                  first_started_at=AT, state="completed"))
+        s.flush()
+        for rung in (1, 1, 3, None):
+            s.add(Resolution(run_key=KEY, target="testbench", field="claim_number",
+                             winning_rung=rung, attempts=[],
+                             node_id="n1" if rung else None, ms=3, at=AT))
+        s.commit()
+    assert rung_stats() == {"rung1": 0.5, "rung2": 0.0, "rung3": 0.25,
+                            "rung4": 0.0, "rung5": 0.0}
+```
+
+```python
+# tests/orchestrate/test_deployments.py
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+import yaml
+
+from selector_drift.config import get_settings
+from selector_drift.orchestrate.deployments import JOB_LIMITS, extraction_deployments
+from selector_drift.orchestrate.flows import extraction_flow
+from selector_drift.spec.loader import load_spec
+
+REPO = Path(__file__).resolve().parents[2]
+COMPOSE = yaml.safe_load((REPO / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+
+
+@pytest.fixture(autouse=True)
+def repo_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.chdir(REPO)
+    monkeypatch.delenv("SD_SPEC_DIR", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+def test_one_deployment_per_spec_on_its_own_cron_in_utc() -> None:
+    deployments = {d.name: d for d in extraction_deployments()}
+    specs = sorted((REPO / "specs").glob("*.yaml"))
+    assert set(deployments) == {f"extract-{p.stem}" for p in specs}
+    for p in specs:
+        d = deployments[f"extract-{p.stem}"]
+        (schedule,) = d.schedules
+        assert schedule.schedule.cron == load_spec(p).schedule
+        assert schedule.schedule.timezone == "UTC"                 # M20
+        assert d.parameters == {"spec_path": p.name}
+
+
+@pytest.mark.unit
+def test_the_flow_has_the_ten_minute_timeout_and_bounded_retries() -> None:
+    """B8: a hard timeout at the deployment level; two retries, five minutes apart."""
+    assert extraction_flow.timeout_seconds == 600
+    assert extraction_flow.retries == 2 and extraction_flow.retry_delay_seconds == 300
+
+
+@pytest.mark.unit
+def test_the_container_enforces_the_limits_the_deployment_declares() -> None:
+    worker = COMPOSE["worker"]
+    assert worker["mem_limit"] == JOB_LIMITS["mem_limit"]
+    assert worker["pids_limit"] == JOB_LIMITS["pids_limit"]
+    assert all(d.job_variables == JOB_LIMITS for d in extraction_deployments())
+    assert worker["init"] is True                                  # reaps zombie Chromiums (B8)
+    assert "seccomp=unconfined" not in worker["security_opt"]      # H1
+
+
+@pytest.mark.unit
+def test_the_scheduler_survives_a_restart_and_runs_in_utc() -> None:
+    """B3/B8: real orchestrator persistence, never a `while true` loop."""
+    worker, server = COMPOSE["worker"], COMPOSE["prefect-server"]
+    assert worker["restart"] == server["restart"] == "unless-stopped"
+    assert worker["command"] == ["python", "-m", "selector_drift.orchestrate.deployments"]
+    assert worker["environment"]["TZ"] == "UTC"
+    assert worker["environment"]["PREFECT_API_URL"] == "http://prefect-server:4200/api"
+    assert "postgresql+asyncpg://" in server["environment"]["PREFECT_API_DATABASE_CONNECTION_URL"]
+
+
+@pytest.mark.unit
+def test_every_deployment_is_tagged_with_its_target() -> None:
+    for d in extraction_deployments():
+        assert d.tags == ["extraction", d.name.removeprefix("extract-")]
+```
+
+```python
+# tests/quality/test_alert_channel.py
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from selector_drift.quality.alerts import WEBHOOK_ENV, post_alert
+
+HOOK = "https://hooks.example.invalid/sd"
+
+
+@pytest.mark.unit
+def test_an_unset_webhook_is_loud_and_sends_nothing(monkeypatch, caplog) -> None:
+    monkeypatch.delenv(WEBHOOK_ENV, raising=False)
+    assert post_alert("failed", "testbench", "testbench:1:2026-09-07", "boom") is False
+    assert "ALERT NOT SENT" in caplog.text
+
+
+@pytest.mark.unit
+def test_an_alert_posts_one_json_body_and_nothing_from_the_page(monkeypatch, httpx_mock) -> None:
+    monkeypatch.setenv(WEBHOOK_ENV, HOOK)
+    httpx_mock.add_response(url=HOOK, method="POST")
+    assert post_alert("refused", "testbench", "testbench:1:2026-09-07", "expired") is True
+    (request,) = httpx_mock.get_requests()
+    body = json.loads(request.content)
+    assert set(body) == {"kind", "target", "run_key", "summary", "at"}
+    assert (body["kind"], body["target"], body["summary"]) == ("refused", "testbench", "expired")
+
+
+@pytest.mark.unit
+def test_a_failing_webhook_never_fails_the_run(monkeypatch, httpx_mock) -> None:
+    monkeypatch.setenv(WEBHOOK_ENV, HOOK)
+    httpx_mock.add_response(url=HOOK, method="POST", status_code=500)
+    assert post_alert("failed", "testbench", None, "boom") is False
+```
+
+```python
+# tests/test_main.py
+from __future__ import annotations
+
+import ast
+import tomllib
+from pathlib import Path
+
+import pytest
+
+from selector_drift.__main__ import main
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.unit
+def test_run_dispatches_one_extraction_and_prints_its_key(monkeypatch, capsys) -> None:
+    seen: list[str] = []
+
+    def fake_flow(spec: str) -> str:
+        seen.append(spec)
+        return "testbench:1:2026-09-07"
+    monkeypatch.setattr("selector_drift.orchestrate.flows.extraction_flow", fake_flow)
+    assert main(["run", "testbench.yaml"]) == 0
+    assert seen == ["testbench.yaml"]
+    assert capsys.readouterr().out.strip() == "testbench:1:2026-09-07"
+
+
+@pytest.mark.unit
+def test_no_command_is_a_usage_error() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main([])
+    assert exc.value.code == 2
+
+
+@pytest.mark.unit
+def test_there_is_no_cli_framework_and_no_console_script() -> None:
+    """Global constraint: no [project.scripts], no Typer/Click."""
+    project = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert "scripts" not in project
+    for path in (REPO / "selector_drift").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                     else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+            assert not {n.split(".")[0] for n in names} & {"typer", "click"}, path
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/orchestrate -v`
-Expected: FAIL — `ModuleNotFoundError: selector_drift.orchestrate.flows`.
+Run: `uv run pytest tests/orchestrate tests/quality/test_alert_channel.py tests/test_main.py -v`
+Expected: FAIL — collection errors `ModuleNotFoundError: No module named
+'selector_drift.orchestrate.run_record'`, `'selector_drift.orchestrate.flows'`,
+`'selector_drift.orchestrate.rung_stats'`, `'selector_drift.orchestrate.deployments'`,
+`'selector_drift.quality.alerts'`, `'selector_drift.__main__'`.
 
-- [ ] **Step 3: Implement the flow**
-
-`extraction_flow` authorises the target, opens the page, records `started_at`, does **nothing else** — no cascade exists yet — then writes `state="completed"` or `state="failed"` with the error. `ScopeRefusal` writes `state="refused"` and never opens a browser.
-
-- [ ] **Step 4: Register the deployments with container limits**
-
-```bash
-uv run python -m selector_drift.orchestrate.deployments
-uv run prefect deployment ls
-```
-
-Each deployment sets `job_variables={"mem_limit": "2g", "pids_limit": 512}` and a 10-minute timeout (B8).
-
-- [ ] **Step 5: Verify the cron actually fires — on the host that will still be running in ninety days**
-
-```bash
-docker compose up -d
-uv run prefect flow-run ls --limit 5
-psql -c "select run_key, state, first_started_at from runs order by first_started_at desc limit 5"
-```
-
-Expected: at least one row per target. **The ninety-day log has now started. Record today's UTC date
-in `docs/methodology.md` as the per-target start date for all three targets.**
-
-**This step is not done on a laptop (B3/P-4).** Prefect's persistence solves *host restarts*, which is
-what B8 asks for; it does not solve a host that is switched off. Ninety consecutive daily runs need a
-machine that is on at 04:12 every night.
-
-**Decided 2026-08-29 (OQ2): a free always-on VM — Oracle Cloud Always Free, or Fly.io.** It also hosts
-the bench (OQ4), so the browser reaches the bench over the VM's own network and the H2 origin allowlist
-names one host. Three consequences the plan otherwise misses:
-
-- **Build the image on the VM, or push a matching architecture to GHCR.** The free Oracle shape is
-  `arm64`; a locally built `amd64` Playwright image will not run on it. Pin the browser for the VM's
-  architecture (B8) and prove it before day one, not on the first night.
-- **Set the host clock to UTC** and confirm the schedule fires with nobody logged in. 04:12 in a
-  timezone assumed to be UTC silently shifts the whole log.
-- **Free tiers reclaim idle instances.** Oracle Always Free reclaims instances it judges idle, and one
-  nightly run may not clear that bar (**VERIFY** the current policy on the day). If it applies, keep
-  the instance above the threshold or publish the gaps.
-
-Record in `docs/methodology.md`:
-
-- the host, and who can restart it;
-- the retention policy for evidence and the lake, with a disk budget (`00` B7, M30);
-- **what happens to the log if the host is down for a day** — the honest answer is a gap, and the
-  methodology says so rather than the chart hiding it.
-
-- [ ] **Step 5b: Wire one alert channel before anything can quarantine**
-
-A quarantined run at 04:12 that notifies nobody stalls the log silently, and the plan otherwise has no
-notification path at all (M2) while DoD 7 requires *"data-quality contracts **and alerting**"*. One
-webhook is enough for v1 — a `Finding` at `HIGH` or above, a quarantine, or a missed heartbeat posts
-to it. Fully expanded in Task 29A; a stub here so nothing later has to invent one.
-
-- [ ] **Step 6: Run the tests and make sure they pass**
-
-Run: `uv run pytest tests/orchestrate -v`
-Expected: PASS, 3 tests.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add selector_drift/orchestrate selector_drift/__main__.py tests/orchestrate docs/methodology.md
-git commit -m "feat(orchestrate): scheduled runs writing run records — 90-day log start"
-```
-
-#### Task 6 amendment: `heartbeat()`
-
-**`heartbeat()` writes to `heartbeats(target, scheduled_for, fired_at, run_key)` — the table the
-first draft never named (API spec §6.1).** Replace the Task 6 interface line with:
-
-- `heartbeat(target: str, scheduled_for: datetime, run_key: str | None, *, fired_at: datetime | None = None) -> int` —
-  inserts one `Heartbeat` row and returns its id. `scheduled_for` is **the cron slot**, read from
-  `prefect.runtime.flow_run.scheduled_start_time` — not the wall clock — because `missed_runs`
-  (Task 34B) matches heartbeats to the slots the cron expected. `fired_at` defaults to
-  `datetime.now(UTC)`. It is **the first statement `extraction_flow` executes**, before the spec is
-  authorised and before a browser exists, so a refused, crashed or misconfigured run still leaves a
-  heartbeat; a host that was down leaves nothing, which `missed_runs` counts as missed — the honest
-  reading (design §9.2). `run_key` is `None` only when the spec itself failed to load.
-
-Implementation, in `selector_drift/orchestrate/flows.py`:
+- [ ] **Step 3: Implement `run_record.py`**
 
 ```python
-from datetime import UTC, datetime
-from pathlib import Path
+# selector_drift/orchestrate/run_record.py
+"""Run bookkeeping: the run key, one row per attempt, one heartbeat per fire, the terminal state.
 
-from prefect.runtime import flow_run
+Separate from flows.py so that pipeline.py (Task 26A), which flows.py imports, can use it too.
+"""
+from __future__ import annotations
 
-from selector_drift.db.models import Heartbeat
+import re
+from datetime import UTC, date, datetime
+from typing import Literal
+
+from sqlalchemy import func, select
+
+from selector_drift.db.models import AuditLog, Heartbeat, Run, RunAttempt
 from selector_drift.db.session import Session
+
+TerminalState = Literal["completed", "healed", "quarantined", "failed", "refused"]
+AttemptState = Literal["started", "completed", "healed", "quarantined", "failed"]
+
+NO_TERMINAL_STATE = "attempt started; no terminal state was recorded (crash, kill or timeout)"
+MAX_ERROR = 2000
+_TARGET = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def run_key(target: str, spec_version: int, window: str) -> str:
+    if not _TARGET.fullmatch(target):
+        raise ValueError(f"target {target!r} is not a run-key target (lower-case, digits, '-')")
+    if spec_version < 1:
+        raise ValueError(f"spec_version {spec_version} is below 1")
+    try:
+        exact = date.fromisoformat(window).isoformat() == window
+    except ValueError:
+        exact = False
+    if not exact:
+        raise ValueError(f"window {window!r} is not a YYYY-MM-DD date")
+    return f"{target}:{spec_version}:{window}"
+
+
+def parse_run_key(key: str) -> tuple[str, int, date]:
+    parts = key.split(":")
+    if len(parts) != 3 or not parts[1].isdigit():
+        raise ValueError(f"{key!r} is not target:spec_version:YYYY-MM-DD")
+    target, version, window = parts[0], int(parts[1]), parts[2]
+    run_key(target, version, window)                          # same rules both ways
+    return target, version, date.fromisoformat(window)
+
+
+def window_for(slot: datetime) -> str:
+    """The UTC date of the cron slot, not of the fire (M20)."""
+    if slot.tzinfo is None:
+        raise ValueError("a naive datetime cannot be placed in a UTC window (M20)")
+    return slot.astimezone(UTC).date().isoformat()
+
+
+def _clip(error: str | None) -> str | None:
+    return None if error is None else error[:MAX_ERROR]
 
 
 def heartbeat(target: str, scheduled_for: datetime, run_key: str | None,
               *, fired_at: datetime | None = None) -> int:
-    row = Heartbeat(target=target, scheduled_for=scheduled_for,
-                    fired_at=fired_at or datetime.now(UTC), run_key=run_key)
+    """One row per (target, cron slot). A retry of the same slot returns the existing row."""
+    if scheduled_for.tzinfo is None:
+        raise ValueError("scheduled_for must be timezone-aware (M20)")
     with Session() as s:
+        existing = s.scalar(select(Heartbeat).where(Heartbeat.target == target,
+                                                    Heartbeat.scheduled_for == scheduled_for))
+        if existing is not None:
+            if run_key is not None and existing.run_key is None:
+                existing.run_key = run_key
+                s.commit()
+            return existing.id
+        row = Heartbeat(target=target, scheduled_for=scheduled_for,
+                        fired_at=fired_at or datetime.now(UTC), run_key=run_key)
         s.add(row)
         s.commit()
         return row.id
 
 
-def _scheduled_for() -> datetime:
-    slot = flow_run.scheduled_start_time          # pendulum DateTime, tz-aware
-    return datetime.fromisoformat(slot.isoformat()) if slot is not None else datetime.now(UTC)
+def link_heartbeat(heartbeat_id: int, run_key: str) -> None:
+    with Session() as s:
+        row = s.get(Heartbeat, heartbeat_id)
+        if row is None:
+            raise LookupError(f"no heartbeat {heartbeat_id}")
+        row.run_key = run_key
+        s.commit()
+
+
+def next_attempt(run_key: str) -> int:
+    with Session() as s:
+        latest = s.scalar(select(func.max(RunAttempt.attempt))
+                          .where(RunAttempt.run_key == run_key))
+    return (latest or 0) + 1
+
+
+def record_attempt(run_key: str, attempt: int, state: AttemptState, error: str | None,
+                   scope_record_sha256: str) -> None:
+    """Call only after authorise() returns: a refusal has no attempt (Task 34B)."""
+    now = datetime.now(UTC)
+    with Session() as s:
+        run = s.get(Run, run_key)
+        if run is None:
+            target, version, window = parse_run_key(run_key)
+            run = Run(run_key=run_key, target=target, spec_version=version, window=window,
+                      first_started_at=now, last_finished_at=None, state="failed",
+                      rows_written=None, error=NO_TERMINAL_STATE)
+            s.add(run)
+            s.flush()
+        if state == "started":
+            run.state, run.error = "failed", NO_TERMINAL_STATE   # until a terminal state lands
+        row = s.scalar(select(RunAttempt).where(RunAttempt.run_key == run_key,
+                                                RunAttempt.attempt == attempt))
+        if row is None:
+            row = RunAttempt(run_key=run_key, attempt=attempt, started_at=now,
+                             finished_at=None, state=state, error=None,
+                             scope_record_sha256=scope_record_sha256)
+            s.add(row)
+        row.state = state
+        row.error = _clip(error)
+        row.finished_at = None if state == "started" else now
+        s.commit()
+
+
+def record_run(key: str, *, target: str, spec_version: int, window: date, state: TerminalState,
+               rows_written: int | None = None, error: str | None = None) -> None:
+    if run_key(target, spec_version, window.isoformat()) != key:
+        raise ValueError(f"run key {key!r} does not match {target}/{spec_version}/{window}")
+    now = datetime.now(UTC)
+    with Session() as s:
+        run = s.get(Run, key)
+        if run is None:
+            run = Run(run_key=key, target=target, spec_version=spec_version, window=window,
+                      first_started_at=now)
+            s.add(run)
+        run.state = state
+        run.last_finished_at = now
+        run.rows_written = rows_written
+        run.error = _clip(error)
+        s.commit()
+
+
+def record_authorisation(run_key: str, target: str, record_sha256: str) -> None:
+    with Session() as s:
+        s.add(AuditLog(at=datetime.now(UTC), actor="scheduler", action="scope_authorised",
+                       subject=run_key,
+                       detail={"target": target, "record_sha256": record_sha256}))
+        s.commit()
 ```
 
-and the first lines of `extraction_flow`:
+- [ ] **Step 4: Implement the alert channel**
 
 ```python
+# selector_drift/quality/alerts.py
+"""The one alert channel v1 has (M2). Task 29A builds notify() -- dedup, findings, quarantines,
+missed heartbeats -- on top of post_alert(). The body never carries page content or credentials:
+a target, a run key and a one-line summary."""
+from __future__ import annotations
+
+import logging
+import os
+from datetime import UTC, datetime
+from typing import Literal
+
+import httpx
+
+AlertKind = Literal["refused", "failed", "quarantined", "missed_heartbeat", "finding"]
+WEBHOOK_ENV = "SD_ALERT_WEBHOOK_URL"
+TIMEOUT_SECONDS = 10.0
+MAX_SUMMARY = 500
+
+_log = logging.getLogger(__name__)
+
+
+def webhook_url() -> str | None:
+    return os.environ.get(WEBHOOK_ENV, "").strip() or None
+
+
+def post_alert(kind: AlertKind, target: str, run_key: str | None, summary: str) -> bool:
+    """True when the webhook accepted the alert. Never raises: a broken channel must not turn a
+    refusal into a crash -- it is logged at ERROR instead."""
+    url = webhook_url()
+    if url is None:
+        _log.error("ALERT NOT SENT (%s is unset): %s %s %s", WEBHOOK_ENV, kind, target, summary)
+        return False
+    payload = {"kind": kind, "target": target, "run_key": run_key,
+               "summary": summary[:MAX_SUMMARY], "at": datetime.now(UTC).isoformat()}
     try:
-        spec = load_spec(Path(spec_path))
-    except Exception:
-        heartbeat(Path(spec_path).stem, _scheduled_for(), None)   # spec files are named <target>.yaml
-        raise
-    key = run_key(load_scope(Path(spec.scope_ref)).target, spec.version, window_for(_scheduled_for()))
-    heartbeat(load_scope(Path(spec.scope_ref)).target, _scheduled_for(), key)
+        httpx.post(url, json=payload, timeout=TIMEOUT_SECONDS).raise_for_status()
+    except httpx.HTTPError as exc:
+        _log.error("alert webhook failed (%s): %s %s", type(exc).__name__, kind, target)
+        return False
+    return True
 ```
 
-where `window_for(slot: datetime) -> str` returns `slot.astimezone(UTC).date().isoformat()` (M20: the
-window is the UTC date of the slot, not of the fire).
-
-Add to `tests/orchestrate/test_run_record.py`:
+- [ ] **Step 5: Implement the day-one flow**
 
 ```python
-from selector_drift.db.models import Heartbeat
+# selector_drift/orchestrate/flows.py
+"""Day one: the cron fires, the target is authorised, the start page loads, a run record is
+written. No cascade exists yet. Task 26A replaces everything after the authorisation block with
+pipeline.run_once(); the heartbeat prologue stays first."""
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, date, datetime
+
+from prefect import flow
+from prefect.runtime import flow_run
+
+from selector_drift.browser import driver   # attribute access, so tests can patch driver.open
+from selector_drift.orchestrate.run_record import (heartbeat, link_heartbeat, next_attempt,
+                                                   record_attempt, record_authorisation,
+                                                   record_run, run_key, window_for)
+from selector_drift.quality.alerts import post_alert
+from selector_drift.scope.errors import ScopeRefusal
+from selector_drift.scope.gate import authorise
+from selector_drift.scope.record import AuthorisedTarget
+from selector_drift.spec.loader import load_scope, load_spec, scope_file, spec_file, target_of
+
+FLOW_TIMEOUT_SECONDS = 600            # B8: ten minutes, then Prefect cancels the run
+RETRIES = 2
+RETRY_DELAY_SECONDS = 300
 
 
-@pytest.mark.integration
-def test_every_fire_writes_a_heartbeat_even_when_refused(expired_spec):
-    key = extraction_flow(expired_spec)
-    with Session() as s:
-        hb = s.query(Heartbeat).filter_by(run_key=key).one()
-    assert hb.fired_at >= hb.scheduled_for.replace(second=0, microsecond=0)
+class StartPageError(RuntimeError):
+    """The authorised start page did not return an HTML document."""
 
 
-@pytest.mark.integration
-def test_the_heartbeat_is_written_before_authorisation(monkeypatch):
-    def boom(*a, **k):
-        raise RuntimeError("scope gate unreachable")
-    monkeypatch.setattr("selector_drift.orchestrate.flows.authorise", boom)
-    with pytest.raises(RuntimeError):
-        extraction_flow("specs/testbench.yaml")
-    with Session() as s:
-        assert s.query(Heartbeat).filter_by(target="testbench").count() == 1
+def scheduled_slot() -> datetime:
+    """The cron slot this run belongs to, in UTC. Outside a flow run Prefect returns now()."""
+    slot = flow_run.scheduled_start_time
+    return datetime.fromtimestamp(slot.timestamp(), tz=UTC)
 
 
-@pytest.mark.integration
-def test_an_unloadable_spec_still_leaves_a_heartbeat(tmp_path):
-    bad = tmp_path / "ghost.yaml"
-    bad.write_text("version: [not, an, int]")
-    with pytest.raises(Exception):
-        extraction_flow(str(bad))
-    with Session() as s:
-        hb = s.query(Heartbeat).filter_by(target="ghost").one()
-    assert hb.run_key is None
+def _describe(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+async def load_start_page(target: AuthorisedTarget) -> int:
+    async with driver.open(target) as session:
+        html = await session.page.content()
+    if "<html" not in html.lower():
+        raise StartPageError("the start page did not return an HTML document")
+    return len(html)
+
+
+@flow(name="extraction", retries=RETRIES, retry_delay_seconds=RETRY_DELAY_SECONDS,
+      timeout_seconds=FLOW_TIMEOUT_SECONDS)
+def extraction_flow(spec_path: str) -> str:
+    slot = scheduled_slot()
+    stem = target_of(spec_path)
+    beat = heartbeat(stem, slot, None)                  # FIRST statement (API spec 6.1, B3)
+    spec = load_spec(spec_file(spec_path))              # SpecError: heartbeat stays, run_key NULL
+    window = window_for(slot)
+    key = run_key(stem, spec.version, window)
+    link_heartbeat(beat, key)
+    day = date.fromisoformat(window)
+
+    try:
+        record = load_scope(scope_file(spec.scope_ref))
+        if record.target != stem:
+            raise ScopeRefusal(f"spec {spec_path} is for target {stem!r} but its scope record "
+                               f"names {record.target!r}")
+        target = authorise(record, today=day)           # UTC date of the slot (M20)
+    except ScopeRefusal as exc:
+        record_run(key, target=stem, spec_version=spec.version, window=day, state="refused",
+                   error=exc.reason)
+        post_alert("refused", stem, key, exc.reason)
+        return key                                      # no attempt row, no browser
+
+    attempt = next_attempt(key)
+    record_attempt(key, attempt, "started", None, target.record_sha256)
+    record_authorisation(key, target.target, target.record_sha256)
+    try:
+        asyncio.run(load_start_page(target))
+    except Exception as exc:
+        error = _describe(exc)
+        record_attempt(key, attempt, "failed", error, target.record_sha256)
+        record_run(key, target=stem, spec_version=spec.version, window=day, state="failed",
+                   error=error)
+        post_alert("failed", stem, key, error)
+        raise                                           # Prefect's retry policy applies
+    record_attempt(key, attempt, "completed", None, target.record_sha256)
+    record_run(key, target=stem, spec_version=spec.version, window=day, state="completed")
+    return key
 ```
 
-The three existing tests in that file gain `@pytest.mark.integration`. Step 6's expected count
-becomes **PASS, 6 tests**. `expired_spec` is the Task 6 fixture already used by
-`test_a_refused_target_never_opens_a_browser`. Each test runs against truncated tables — add to
-`tests/orchestrate/conftest.py`:
+- [ ] **Step 6: Implement `rung_stats.py`**
 
 ```python
+# selector_drift/orchestrate/rung_stats.py
+"""Share of resolutions won by each rung, over every resolution recorded (R5/C4, B11).
+
+Task 34B replaces the body with a call to derive.rung_shares(); the semantics are fixed here:
+keys rung1..rung5, denominator every row in `resolutions` including rows no rung won, and an
+empty dict before the first resolution.
+"""
+from __future__ import annotations
+
+from sqlalchemy import func, select
+
+from selector_drift.db.models import Resolution
+from selector_drift.db.session import Session
+
+RUNGS = (1, 2, 3, 4, 5)
+SEPARATOR = " · "
+
+
+def rung_stats() -> dict[str, float]:
+    with Session() as s:
+        rows = s.execute(select(Resolution.winning_rung, func.count())
+                         .group_by(Resolution.winning_rung)).tuples().all()
+    counts = {rung: n for rung, n in rows}
+    total = sum(counts.values())
+    if total == 0:
+        return {}
+    return {f"rung{r}": counts.get(r, 0) / total for r in RUNGS}
+
+
+def format_stats(stats: dict[str, float]) -> str:
+    return SEPARATOR.join(f"{k} {v:.1%}" for k, v in stats.items()) or "no resolutions yet"
+
+
+if __name__ == "__main__":
+    print(format_stats(rung_stats()))
+```
+
+- [ ] **Step 7: Implement the deployments, the image and the compose services**
+
+```python
+# selector_drift/orchestrate/deployments.py
+"""One Prefect deployment per (target, spec), served by the worker container (design 9.2).
+
+`python -m selector_drift.orchestrate.deployments` registers them with the Prefect server and
+serves them; it blocks. Tasks 26C and 33 add their deployments to the serve() call.
+"""
+from __future__ import annotations
+
+import logging
+
+from prefect import serve
+from prefect.deployments.runner import RunnerDeployment
+from prefect.schedules import Cron
+
+from selector_drift.config import get_settings
+from selector_drift.orchestrate.flows import extraction_flow
+from selector_drift.quality.alerts import WEBHOOK_ENV, webhook_url
+from selector_drift.spec.loader import load_spec
+
+# Enforced by the worker container (docker-compose.yml, Task 4) under serve(); declared here so
+# a move to a Docker work pool keeps them. test_deployments pins that the two agree.
+JOB_LIMITS: dict[str, str | int] = {"mem_limit": "2g", "pids_limit": 512}
+SCHEDULE_TIMEZONE = "UTC"
+
+_log = logging.getLogger(__name__)
+
+
+def extraction_deployments() -> list[RunnerDeployment]:
+    out: list[RunnerDeployment] = []
+    for path in sorted(get_settings().spec_dir.glob("*.yaml")):
+        spec = load_spec(path)
+        out.append(extraction_flow.to_deployment(
+            name=f"extract-{path.stem}",
+            schedules=[Cron(spec.schedule, timezone=SCHEDULE_TIMEZONE)],
+            parameters={"spec_path": path.name},
+            job_variables=dict(JOB_LIMITS),
+            tags=["extraction", path.stem],
+            description=f"{path.stem} v{spec.version}: {spec.row_scope}",
+        ))
+    return out
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    if webhook_url() is None:
+        _log.error("%s is unset: refusals and failures will alert nobody", WEBHOOK_ENV)
+    deployments = extraction_deployments()
+    if not deployments:
+        raise SystemExit(f"no task specs in {get_settings().spec_dir}")
+    serve(*deployments)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+`Dockerfile` (repo root; Task 4's `worker` service builds it). Browsers are installed as root at
+build time into `PLAYWRIGHT_BROWSERS_PATH`, and the service runs as `10001:10001` on a read-only
+rootfs (B8). **Build it on the P-4 VM, or push an `arm64` image** — the free Oracle shape is `arm64`
+and a laptop-built `amd64` image will not run there.
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers \
+    PATH=/opt/venv/bin:$PATH
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /usr/local/bin/uv
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY selector_drift ./selector_drift
+COPY alembic.ini ./
+COPY alembic ./alembic
+COPY specs ./specs
+COPY scopes ./scopes
+RUN uv sync --frozen --no-dev \
+ && playwright install --with-deps chromium \
+ && chmod -R a+rX /opt/pw-browsers \
+ && useradd --uid 10001 --home-dir /home/app --create-home app
+
+USER 10001:10001
+CMD ["python", "-m", "selector_drift.orchestrate.deployments"]
+```
+
+`.dockerignore` — the image must never carry a secret, evidence or the lake:
+
+```
+.git
+.venv
+.env
+.env.*
+!.env.example
+evidence
+lake
+web
+docs
+tests
+**/__pycache__
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.import_linter_cache
+.claude
+```
+
+`docker/postgres-init/10-prefect-database.sql` — Prefect's own state lives in the same Postgres
+instance, in its own database, so a host restart loses no schedule (design §9.2):
+
+```sql
+-- Runs once, when the postgres volume is first initialised.
+CREATE DATABASE prefect;
+```
+
+In `docker-compose.yml`, the `postgres` service gains the init mount (its other keys unchanged):
+
+```yaml
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+```
+
+Add the Prefect server:
+
+```yaml
+  prefect-server:
+    image: prefecthq/prefect:3.8.4-python3.12      # matches pyproject's prefect pin; multi-arch
+    restart: unless-stopped
+    command: [ "prefect", "server", "start", "--host", "0.0.0.0" ]
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://${POSTGRES_USER:-selector_drift}:${POSTGRES_PASSWORD:-changeme_local_dev_only}@postgres:5432/prefect
+      PREFECT_SERVER_ANALYTICS_ENABLED: "false"
+      PREFECT_UI_API_URL: http://127.0.0.1:4200/api
+      TZ: UTC
+    ports: [ "127.0.0.1:4200:4200" ]                # UI over an SSH tunnel only
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4200/api/health')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      postgres: { condition: service_healthy }
+```
+
+Replace Task 4's `worker` block with (Task 4's lines kept verbatim; the command, restart policy,
+`init` and environment are new):
+
+```yaml
+  worker:
+    build: .
+    restart: unless-stopped
+    command: [ "python", "-m", "selector_drift.orchestrate.deployments" ]
+    init: true                # PID 1 reaps zombie Chromium processes (B8)
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ ALL ]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./docker/chromium-seccomp.json   # NOT unconfined -- see Task 4
+    tmpfs: [ "/tmp", "/home/app/.cache" ]
+    shm_size: 1g
+    mem_limit: 2g
+    pids_limit: 512
+    environment:
+      PLAYWRIGHT_BROWSERS_PATH: /opt/pw-browsers
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PREFECT_HOME: /tmp/prefect                 # the rootfs is read-only
+      SD_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-selector_drift}:${POSTGRES_PASSWORD:-changeme_local_dev_only}@postgres:5432/${POSTGRES_DB:-selector_drift}
+      SD_SPEC_DIR: /app/specs
+      SD_SCOPE_DIR: /app/scopes
+      SD_ALERT_WEBHOOK_URL: ${SD_ALERT_WEBHOOK_URL:-}
+      TZ: UTC
+    depends_on:
+      postgres: { condition: service_healthy }
+      prefect-server: { condition: service_healthy }
+```
+
+Append to `.env.example`:
+
+```bash
+# The one alert channel (Task 6, M2). Empty means every alert is logged as NOT SENT.
+SD_ALERT_WEBHOOK_URL=
+```
+
+- [ ] **Step 8: Implement the dev entrypoint**
+
+```python
+# selector_drift/__main__.py
+"""python -m selector_drift <command>. No Typer, no Click, no [project.scripts].
+
+The buyer's entrypoint is the Prefect scheduler (`python -m selector_drift.orchestrate.deployments`);
+this is the developer's. Task 34 adds `create-operator`.
+"""
+from __future__ import annotations
+
+import argparse
+
+
+def _run(spec: str) -> int:
+    # Imported here, not at module top: `python -m selector_drift --help` needs no Playwright.
+    from selector_drift.orchestrate.flows import extraction_flow
+    print(extraction_flow(spec))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m selector_drift")
+    sub = parser.add_subparsers(dest="command", required=True)
+    run = sub.add_parser("run", help="run one extraction now, outside the schedule")
+    run.add_argument("spec",
+                     help="a spec file name such as testbench.yaml, resolved under SD_SPEC_DIR")
+    args = parser.parse_args(argv)
+    if args.command == "run":
+        return _run(str(args.spec))
+    parser.error(f"unknown command {args.command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 9: Run the tests and make sure they pass**
+
+```bash
+docker compose up -d postgres
+uv run alembic upgrade head
+uv run pytest tests/orchestrate tests/quality/test_alert_channel.py tests/test_main.py -v
+```
+
+Expected: PASS — 10 run-key (parametrised cases counted), 12 run-record (11 integration, 1 unit),
+2 rung-stats, 5 deployments, 3 alert-channel, 3 main: **35 passed**. Then the fast check (ruff, mypy
+--strict, lint-imports, `pytest -m unit`) and the full check (`-m "unit or integration"`), both clean.
+
+- [ ] **Step 10: Commit the code**
+
+```bash
+git add selector_drift/orchestrate selector_drift/quality/alerts.py selector_drift/__main__.py \
+        Dockerfile .dockerignore docker/postgres-init docker-compose.yml .env.example \
+        tests/orchestrate tests/quality/test_alert_channel.py tests/test_main.py
+git commit -m "feat(orchestrate): scheduled runs writing heartbeats, attempts and run records"
+```
+
+- [ ] **Step 11: Deploy to the P-4 VM and let the cron fire — on the host that will still be running in ninety days**
+
+**This step is not done on a laptop (B3/P-4).** Prefect's persistence solves *host restarts*, which
+is what B8 asks for; it does not solve a host that is switched off. Ninety consecutive daily runs need
+a machine that is on at 04:12 UTC every night. **Decided 2026-08-29 (OQ2): a free always-on VM —
+Oracle Cloud Always Free, or Fly.io.** It also hosts the bench (OQ4), so the browser reaches the bench
+over the VM's own network and the H2 origin allowlist names one host.
+
+Precondition (P-1): the image runs `uv sync --frozen`, so `bok-core` must resolve **on the VM** — from
+PyPI, or from a path that exists there. The worktree's absolute Windows path does not. Check before
+building:
+
+```bash
+ssh "$SD_VM" 'cd /srv/selector-drift && uv lock --check && grep -A1 "^bok-core" pyproject.toml'
+```
+
+On the VM (`SD_VM` is `user@host` for the P-4 instance; the repo is private, so clone with a
+read-only deploy key):
+
+```bash
+timedatectl show -p Timezone --value      # expect Etc/UTC; if not: sudo timedatectl set-timezone Etc/UTC
+uname -m                                  # expect aarch64 on the Oracle Ampere shape
+systemctl is-enabled docker               # expect enabled -- containers return after a reboot
+cd /srv/selector-drift
+cp .env.example .env && chmod 600 .env    # set POSTGRES_PASSWORD and SD_ALERT_WEBHOOK_URL in it
+docker compose build worker
+docker compose run --rm --no-deps worker python -c "import platform; print(platform.machine())"
+docker compose up -d postgres
+docker compose exec postgres psql -U selector_drift -Atc "select datname from pg_database where datname = 'prefect'"
+docker compose run --rm worker alembic upgrade head
+docker compose up -d prefect-server worker
+docker compose exec worker prefect deployment ls
+```
+
+Expected: `aarch64` twice (host and image), `prefect` from the `pg_database` query, and three
+deployments — `extraction/extract-testbench`, `extraction/extract-agent-perimeter`,
+`extraction/extract-ledger-sense` — each with its cron.
+
+**Do not trigger a run by hand on the VM.** The log's start date is the first *scheduled* fire (B4);
+a manual run writes a heartbeat at a slot the cron never had. Instead, prove restart survival before
+the first fire:
+
+```bash
+sudo reboot
+# reconnect, then:
+docker compose ps --format '{{.Service}} {{.State}}'
+```
+
+Expected: `postgres running`, `prefect-server running`, `worker running` with nobody logged in.
+
+After 04:22 UTC the next morning:
+
+```bash
+docker compose exec postgres psql -U selector_drift -c \
+  "select target, scheduled_for, fired_at, run_key from heartbeats order by scheduled_for desc limit 6"
+docker compose exec postgres psql -U selector_drift -c \
+  "select run_key, state, first_started_at, error from runs order by first_started_at desc limit 6"
+docker compose exec postgres psql -U selector_drift -c \
+  "select run_key, attempt, state, error from run_attempts order by started_at desc limit 6"
+```
+
+Expected: one heartbeat per target at `04:12`, `04:17` and `04:22` UTC with a `run_key` each; one
+`runs` row per target (`completed`, or `refused` / `failed` with a reason — each also posted to the
+webhook). **The ninety-day log has now started.** (`window` is a reserved word in Postgres; quote it
+as `"window"` in any hand-written query.)
+
+Three consequences of the VM the plan otherwise misses:
+
+- **Build the image on the VM, or push a matching architecture to GHCR.** Pin the browser for the
+  VM's architecture (B8) and prove it before day one — the `platform.machine()` check above — not on
+  the first night.
+- **The host clock is UTC and the schedules say UTC.** 04:12 in a timezone assumed to be UTC silently
+  shifts the whole log; `Cron(..., timezone="UTC")` and `TZ: UTC` remove the assumption from both
+  sides.
+- **Free tiers reclaim idle instances.** Oracle Always Free reclaims instances it judges idle, and
+  three short nightly runs may not clear that bar (**VERIFY** the current policy on the day). If it
+  applies, keep the instance above the threshold or publish the gaps — they will show up as missed
+  runs either way, because a reclaimed host writes no heartbeat.
+
+- [ ] **Step 12: Record the start in `docs/methodology.md` — failing test first**
+
+```python
+# tests/test_methodology_log_start.py
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
 import pytest
-from sqlalchemy import text
 
-from selector_drift.db.session import engine
+from selector_drift.spec.loader import load_scope
+
+REPO = Path(__file__).resolve().parents[1]
+TEXT = (REPO / "docs" / "methodology.md").read_text(encoding="utf-8") \
+    if (REPO / "docs" / "methodology.md").exists() else ""
 
 
-@pytest.fixture(autouse=True)
-def clean_tables():
-    with engine.begin() as c:
-        c.execute(text("TRUNCATE runs, run_attempts, heartbeats RESTART IDENTITY CASCADE"))
-    yield
+@pytest.mark.unit
+def test_methodology_records_a_utc_start_date_for_every_scoped_target() -> None:
+    """B4. The only start date the log ever claims is the one the first heartbeat recorded."""
+    for p in (REPO / "scopes").glob("*.yaml"):
+        target = load_scope(p).target
+        row = rf"^\| `{re.escape(target)}` \|.*\| (\d{{4}}-\d{{2}}-\d{{2}}) \|\s*$"
+        assert re.search(row, TEXT, re.MULTILINE), f"no start date for {target}"
+
+
+@pytest.mark.unit
+def test_methodology_says_a_down_host_is_a_gap_and_names_the_host() -> None:
+    lower = TEXT.lower()
+    assert "## missed runs" in lower and "gap" in lower
+    assert "## host" in lower and "disk budget" in lower
 ```
 
-**Amended 2026-09-26.**
-- `heartbeat()` writes `heartbeats(target, scheduled_for, fired_at, run_key)` — see
-  *"Task 6 amendment: `heartbeat()`"* below.
-- **`run_key()`, `record_attempt()` and `heartbeat()` live in `selector_drift/orchestrate/run_record.py`, not `flows.py`.** Task 26A's `pipeline.py` needs them and `flows.py` imports `pipeline.py`; keeping them in `flows.py` would make the import circular. `flows.py` imports them from `run_record.py`. Add `selector_drift/orchestrate/run_record.py` to this task's Create list.
-- **`record_attempt()` is called only after `authorise()` returns.** A refused run writes a `runs` row
-  with `state="refused"` and no `run_attempts` row — which is what lets `derive.fired_without_attempt`
-  (Task 34B) tell "the scope gate refused" from "the scheduler never fired".
-- **`rung_stats()` delegates to `selector_drift.api.derive.rung_shares()`** once Task 34B exists (its
-  last step makes the change). Until then it computes from `resolutions` as written. One published
-  number, one function.
+Run: `uv run pytest tests/test_methodology_log_start.py -v`
+Expected: FAIL — `no start date for testbench` (the file does not exist yet).
+
+Read the dates from the database, never from memory:
+
+```bash
+docker compose exec postgres psql -U selector_drift -Atc \
+  "select target, min(scheduled_for)::date from heartbeats group by target order by target"
+```
+
+Write `docs/methodology.md`, putting each printed date in the table (the three rows below show the
+shape; the dates are the ones the query printed):
+
+```markdown
+# Methodology
+
+## Log start
+
+Each target's start date is the UTC date of its first scheduled heartbeat, read from the
+`heartbeats` table (`select target, min(scheduled_for)::date from heartbeats group by target`).
+No other start date is claimed anywhere.
+
+| Target | Arm | First-heal policy | Schedule (UTC) | Start date (UTC) |
+|---|---|---|---|---|
+| `agent-perimeter` | control | required | 04:17 daily | 2026-10-05 |
+| `ledger-sense` | control | required | 04:22 daily | 2026-10-05 |
+| `testbench` | treatment | auto_promote | 04:12 daily | 2026-10-05 |
+
+Day one records *run succeeded / run failed / refused* and nothing more. Heal events begin when
+the cascade lands (build week 3); the start date stays honest because the run record was always there.
+
+## Host
+
+One always-on VM (P-4): provider, shape and region as provisioned; architecture `aarch64`; clock
+`Etc/UTC`. Postgres, the Prefect server and the worker run under `docker compose` with
+`restart: unless-stopped`; Docker is enabled at boot, so a reboot resumes the schedule with nobody
+logged in. Who can restart it: the repository owner, over SSH with a key only.
+
+**Disk budget.** Postgres (run history, Prefect state) and the lake together are budgeted at 20 GB of
+the VM's disk; `du -sh` of the Postgres volume and `lake/` is checked at each weekly publish.
+Evidence retention is defined in the Retention section (Task 33).
+
+## Missed runs
+
+Every scheduled fire writes a heartbeat before anything else can fail. A slot the cron expected with
+no heartbeat is a **missed run**: the host was down, reclaimed or the scheduler was not running.
+**If the host is down for a day, the log has a gap for that day.** The gap is counted and published
+(`missed_runs`, Task 34B); no chart interpolates across it. A heartbeat with no attempt is published
+separately (`fired_without_attempt`): the scheduler fired and the scope gate refused, or the run died
+before it began.
+```
+
+Run: `uv run pytest tests/test_methodology_log_start.py -v`
+Expected: PASS, 2 tests.
+
+- [ ] **Step 13: Commit the start of the log**
+
+```bash
+git add docs/methodology.md tests/test_methodology_log_start.py
+git commit -m "docs(methodology): the ninety-day log has started"
+```
+
+**Do not begin Task 7 until Step 11's queries show a heartbeat and a run record for every target.**
+
+**Corrections to the first draft of this task and its 2026-09-26 amendments.**
+- `test_flow_writes_a_run_record` accepted `failed` as a pass; it now requires `completed` against a
+  local page, and a separate test covers the failed path.
+- The amendment's heartbeat tests called the flow with its default `retries=2`, so every failing test
+  slept through two five-minute retries; they call `extraction_flow.with_options(retries=0)`.
+- The amendment's `clean_tables` fixture was `autouse` in a directory that also holds unit tests,
+  giving them a Postgres dependency (M26); it is now the explicit `db` fixture.
+- The amendment wrote the heartbeat *after* the spec and scope loaded, so a missing scope file left
+  no heartbeat; it is now the first statement.
+- Step 4's `prefect deployment ls` after `python -m selector_drift.orchestrate.deployments` never
+  ran: `serve()` blocks. Registration happens when the `worker` service starts.
+- Task 4's `worker` service named `depends_on: prefect-server`, which no task defined, and
+  `build: .`, for which no task wrote a `Dockerfile`; both are created here.
 
 ---
 
@@ -3773,53 +5941,868 @@ executing them; each is required for the task to run against Tasks 7–8 as writ
 ### Task 9: Structural mutation classes
 
 **Files:**
-- Create: `testbench/mutations/class_rename.py`, `dom_restructure.py`, `column_reorder.py`, `table_to_div.py`
-- Test: `tests/testbench/test_structural_mutations.py`
+- Create (if absent): `testbench/__init__.py`, `testbench/mutations/__init__.py`
+- Create: `testbench/mutations/grid.py`, `testbench/mutations/class_rename.py`, `testbench/mutations/dom_restructure.py`, `testbench/mutations/column_reorder.py`, `testbench/mutations/table_to_div.py`
+- Modify: `testbench/mutations/catalogue.py` (register the four)
+- Test: `tests/testbench/test_mutation_grid.py`, `tests/testbench/test_structural_mutations.py`, `tests/testbench/test_mutation_contract.py`
 
 **Interfaces:**
-- Consumes: `Mutation` (Task 8).
-- Produces: `ClassRename`, `DomRestructure`, `ColumnReorder`, `TableToDiv`. Task 26 asserts the cascade heals each.
+- Consumes: `MutationBase`, `Mutation`, `CatalogueEntry`, `entry(cls, *, adversarial)`, `parse(html) -> HtmlElement`, `serialise(root) -> str`, `CATALOGUE` (Task 8) · `COLUMNS`, `dataset_for`, `render_results(day, page=1, query=None, *, mark_truth=False)`, `render_detail`, `render_login`, `render_search`, `render_error`, `PAGE_SIZE` (Task 7) · `FIXTURE_DAY`, `root`, `headers`, `rows`, `cells`, `column` (`tests.testbench.helpers`, Task 7).
+- Produces:
+  - `testbench.mutations.grid`: `GRID_XPATH` · `elements(found: object) -> list[HtmlElement]` · `grids(doc) -> list[HtmlElement]` · `rows(grid)` · `header_row(grid) -> HtmlElement | None` · `header_cells(row)` · `data_rows(grid)` · `data_cells(row)` · `text_of(el) -> str` · `innermost(el) -> HtmlElement` · `set_text(el, value: str) -> None` · `clone(el, *, id_suffix: str) -> HtmlElement` · `wrap(el, tag, attrs) -> HtmlElement` · `wrap_contents(el, tag, attrs) -> HtmlElement` · `detach(el) -> None` · `permute(cells: Sequence[HtmlElement], order: Sequence[int]) -> None` · `digest(*parts: str) -> int` · `all_elements(root) -> Iterable[HtmlElement]` — every `el`/`doc`/`row`/`grid` is an `lxml.html.HtmlElement`
+  - `ClassRename(scheme: str = "hashed", salt: str = "k3x9q")` with `rename(token: str) -> str`; schemes `hashed` · `prefixed` · `bem`
+  - `DomRestructure(wrappers: tuple[str, ...] = ("table-responsive", "card-body"), inner_tag: str = "span")`
+  - `ColumnReorder(order: tuple[int, ...] = (0, 2, 3, 1, 5, 4))`
+  - `TableToDiv()`
+  - each a frozen dataclass (except the parameterless `TableToDiv`) subclassing `MutationBase`, with `from_rng(rng: random.Random) -> Self`; `CATALOGUE` holds their four entries, `adversarial=False`. Task 26 asserts the cascade heals each.
 
-- [ ] **Step 1: Write the failing tests**
+**Why one shared `grid.py` (bench spec §5, Task 8's schedule).** A day applies one or two benign
+classes in a random order and then, about one day in seven, one adversarial class on top. So every
+class meets markup another class has already changed: a `<table>`, or `TableToDiv`'s role-annotated
+`<div>`s; cells wrapped by `DomRestructure`; headers reworded by `LabelReword`. `grid.py` finds the
+grid, its rows and its cells by element **or** ARIA role — the same XPaths `tests.testbench.helpers`
+reads with — so a mutation and a test see the same page. A class that only understood `<table>`
+would pass its own test and silently do nothing on the days the schedule pairs it with `TableToDiv`.
+
+**Why the answer key survives every class (C5, Task 8).** The key is the absolute XPath of each
+node carrying `data-sd-truth` in a marked twin of the page, and Task 13 pins `node_id` to the same
+`getpath()` call. That comparison is only sound if a mutation never re-creates a true cell: cells are
+moved (`permute`), wrapped around (`wrap_contents`), or re-tagged **in place** (`TableToDiv` sets
+`.tag`, it does not build new `<div>`s), so the attribute stays on the node it marked. The one path
+that copies a node, `clone()`, strips every `data-sd-*` attribute from the copy. Task 8's
+`test_the_truth_marker_changes_attributes_only` enrols each class the moment it is registered.
+
+**Why the first draft's tests are replaced, not kept.** (1) They imported `render_fixture`, which no
+longer exists (amendment 1), and carried no marker (amendment 7). (2) `before != after` compared
+Jinja's raw output with lxml's serialisation — those differ for a mutation that does nothing, so the
+assertion could not fail. The "markup changed" check now compares against `serialise(parse(before))`.
+(3) `sorted(cells(before)) == sorted(cells(after))` passes for a `ColumnReorder` that scrambles
+values across rows. Every column is now compared under its own header, which is the property a
+resolver that verifies headers depends on.
+
+**Why a catalogue-wide contract file (M26).** `test_mutation_contract.py` is parametrised over
+`CATALOGUE`, so each class Tasks 10–11A register is held to Task 8's rules with no new test code:
+one `Random` seed builds one page (the schedule's promise), the entry's name is the class name,
+every page the hook mutates — login, search, detail, error — survives, the login form keeps its
+fields (amendment 4), and no class ever mints a `data-sd-*` attribute. All of it is `unit`: no
+browser, no network, well inside the tier's 60-second budget.
+
+**Why every class draws from the `Random` (amendment 2).** The bench exists to produce ninety days
+of *different* UI changes. Each class's day-to-day variety — the rename scheme, the wrapper depth,
+the permutation — comes from `from_rng`, which the schedule calls with its seeded `Random`; the
+no-argument constructor is a fixed, non-trivial instance the tests name directly.
+
+- [ ] **Step 1: Make the packages regular**
+
+```bash
+test -f testbench/__init__.py || touch testbench/__init__.py
+test -f testbench/mutations/__init__.py || touch testbench/mutations/__init__.py
+```
+
+Tasks 7–8 create `testbench/portal/__init__.py` but neither of these; without them `mypy --strict
+testbench` resolves `testbench/mutations/*.py` under a different module name than the imports use.
+
+- [ ] **Step 2: Write the failing tests**
+
+```python
+# tests/testbench/test_mutation_grid.py
+from __future__ import annotations
+
+import pytest
+
+from testbench.mutations.base import parse, serialise
+from testbench.mutations.grid import (
+    clone,
+    data_rows,
+    grids,
+    header_cells,
+    header_row,
+    permute,
+    set_text,
+    text_of,
+)
+from testbench.portal.render import PAGE_SIZE, render_results
+from tests.testbench.helpers import FIXTURE_DAY
+
+GRID = (
+    '<!DOCTYPE html><html><body><div role="grid">'
+    '<div role="row"><span role="columnheader"><img alt="Amount"></span>'
+    '<span role="columnheader" aria-label="Reserve">R</span></div>'
+    '<div role="row"><span role="gridcell" id="c1" data-sd-truth="amount">'
+    '<b><i>1,200.00</i></b></span> <span role="gridcell">90.50</span></div>'
+    "</div></body></html>"
+)
+
+
+@pytest.mark.unit
+def test_the_grid_is_found_as_a_table_or_as_role_annotated_divs() -> None:
+    for html in (render_results(FIXTURE_DAY), GRID):
+        doc = parse(html)
+        (grid,) = grids(doc)
+        head = header_row(grid)
+        assert head is not None and len(header_cells(head)) in (2, 6)
+    assert len(data_rows(grids(parse(render_results(FIXTURE_DAY)))[0])) == PAGE_SIZE
+
+
+@pytest.mark.unit
+def test_text_of_reads_accessible_text() -> None:
+    doc = parse(GRID)
+    assert [text_of(h) for h in doc.xpath('//*[@role="columnheader"]')] == ["Amount", "Reserve"]
+
+
+@pytest.mark.unit
+def test_set_text_replaces_the_innermost_text_and_keeps_the_wrappers() -> None:
+    doc = parse(GRID)
+    cell = doc.xpath('//*[@id="c1"]')[0]
+    set_text(cell, "7.00")
+    assert serialise(doc).count("<b><i>7.00</i></b>") == 1
+    assert cell.get("data-sd-truth") == "amount"
+
+
+@pytest.mark.unit
+def test_a_clone_never_carries_a_bench_attribute_or_a_duplicate_id() -> None:
+    doc = parse(GRID)
+    cell = doc.xpath('//*[@id="c1"]')[0]
+    twin = clone(cell, id_suffix="-copy")
+    assert twin.get("id") == "c1-copy" and twin.get("data-sd-truth") is None
+    assert twin.tail is None and twin.getparent() is None
+    assert cell.get("data-sd-truth") == "amount"  # the original is untouched
+
+
+@pytest.mark.unit
+def test_permute_moves_cells_and_leaves_whitespace_in_place() -> None:
+    doc = parse(GRID)
+    row = doc.xpath('//*[@role="row"]')[1]
+    cells = row.xpath('./*[@role="gridcell"]')
+    permute(cells, (1, 0))
+    assert [text_of(c) for c in row.xpath('./*[@role="gridcell"]')] == ["90.50", "1,200.00"]
+    assert row[0].tail == " "
+```
 
 ```python
 # tests/testbench/test_structural_mutations.py
+from __future__ import annotations
+
+import random
+
 import pytest
-from testbench.mutations.column_reorder import ColumnReorder
+
+from testbench.mutations.base import MutationBase, parse, serialise
 from testbench.mutations.class_rename import ClassRename
+from testbench.mutations.column_reorder import ColumnReorder
 from testbench.mutations.dom_restructure import DomRestructure
 from testbench.mutations.table_to_div import TableToDiv
-from tests.testbench.helpers import render_fixture, cells
+from testbench.portal.data import COLUMNS
+from testbench.portal.render import PAGE_SIZE, render_results
+from tests.testbench.helpers import FIXTURE_DAY, cells, column, headers, root, rows
 
-@pytest.mark.parametrize("mutation", [ClassRename(), DomRestructure(), ColumnReorder(), TableToDiv()])
-def test_mutation_changes_markup_but_preserves_values(mutation):
-    before = render_fixture()
-    after = mutation.apply(before)
-    assert before != after
-    assert sorted(cells(before)) == sorted(cells(after))
+LABELS = [label for _, label in COLUMNS]
+BEFORE = render_results(FIXTURE_DAY)
+STRUCTURAL: list[MutationBase] = [ClassRename(), DomRestructure(), ColumnReorder(), TableToDiv()]
 
-def test_column_reorder_actually_moves_positions():
-    before = render_fixture()
-    assert cells(before) != cells(ColumnReorder().apply(before))
+
+def class_tokens(html: str) -> set[str]:
+    return {
+        t
+        for el in root(html).iter()
+        if isinstance(el.tag, str)
+        for t in (el.get("class") or "").split()
+    }
+
+
+def first_cell_path(html: str, label: str) -> str:
+    doc = root(html)
+    tree = doc.getroottree()
+    header = headers(html).index(label)
+    first = doc.xpath(
+        '(//tr | //*[@role="row"])[td or *[@role="cell"]][1]/*[self::td or @role="cell"]'
+    )[header]
+    return str(tree.getpath(first))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mutation", STRUCTURAL, ids=lambda m: m.name)
+def test_mutation_changes_markup_but_preserves_values(mutation: MutationBase) -> None:
+    after = mutation.apply(BEFORE)
+    assert after != serialise(parse(BEFORE))
+    assert sorted(cells(after)) == sorted(cells(BEFORE))
+    assert sorted(headers(after)) == sorted(headers(BEFORE))
+    for label in LABELS:  # every value still sits under its own header
+        assert column(after, label) == column(BEFORE, label), label
+
+
+@pytest.mark.unit
+def test_column_reorder_actually_moves_positions() -> None:
+    after = ColumnReorder().apply(BEFORE)
+    assert headers(after) == [LABELS[i] for i in ColumnReorder().order]
+    assert cells(after) != cells(BEFORE)
+    assert first_cell_path(after, "Amount") != first_cell_path(BEFORE, "Amount")
+
+
+@pytest.mark.unit
+def test_column_reorder_draws_a_real_permutation_from_the_rng() -> None:
+    drawn = [ColumnReorder.from_rng(random.Random(seed)).order for seed in range(50)]
+    for order in drawn:
+        assert sorted(order) == list(range(len(LABELS))) and list(order) != sorted(order)
+    assert len(set(drawn)) >= 10
+    with pytest.raises(ValueError, match="identity"):
+        ColumnReorder(order=(0, 1, 2, 3, 4, 5))
+    with pytest.raises(ValueError, match="permutation"):
+        ColumnReorder(order=(0, 0, 1, 2, 3, 4))
+
+
+@pytest.mark.unit
+def test_column_reorder_leaves_a_grid_of_another_width_alone() -> None:
+    narrow = (
+        "<!DOCTYPE html><html><body><table><tr><th>A</th><th>B</th></tr>"
+        "<tr><td>1</td><td>2</td></tr></table></body></html>"
+    )
+    assert ColumnReorder().apply(narrow) == serialise(parse(narrow))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("scheme", ["hashed", "prefixed", "bem"])
+def test_class_rename_renames_every_class_consistently(scheme: str) -> None:
+    mutation = ClassRename(scheme=scheme, salt="q7w2e")
+    after = mutation.apply(BEFORE)
+    old, new = class_tokens(BEFORE), class_tokens(after)
+    assert old and not (old & new)
+    assert new == {mutation.rename(t) for t in old}  # one new name per old name
+    amount = root(after).xpath("//tbody/tr/td[3]")
+    assert {c.get("class") for c in amount} == {mutation.rename("col-amount")}
+
+
+@pytest.mark.unit
+def test_class_rename_varies_with_the_rng() -> None:
+    drawn = {ClassRename.from_rng(random.Random(seed)) for seed in range(20)}
+    assert len(drawn) == 20 and len({m.scheme for m in drawn}) == 3
+
+
+@pytest.mark.unit
+def test_dom_restructure_moves_every_cell_and_promotes_the_caption() -> None:
+    mutation = DomRestructure(wrappers=("card", "card-body", "table-responsive"), inner_tag="div")
+    after = mutation.apply(BEFORE)
+    doc = root(after)
+    assert not doc.xpath("//caption")
+    assert [h.text_content() for h in doc.xpath('//h2[@class="grid-title"]')] == [
+        "Claims matching your search"
+    ]
+    table = doc.xpath("//table")[0]
+    assert [a.get("class") for a in table.iterancestors("div")][:3] == [
+        "table-responsive",
+        "card-body",
+        "card",
+    ]
+    assert len(doc.xpath('//td/div[@class="cell-content"]')) == PAGE_SIZE * len(LABELS)
+    assert first_cell_path(after, "Claim Number") != first_cell_path(BEFORE, "Claim Number")
+
+
+@pytest.mark.unit
+def test_dom_restructure_keeps_the_claim_link() -> None:
+    after = DomRestructure().apply(BEFORE)
+    links = root(after).xpath('//td/span[@class="cell-content"]/a[starts-with(@href, "/claims/")]')
+    assert [a.text for a in links] == column(BEFORE, "Claim Number")
+
+
+@pytest.mark.unit
+def test_table_to_div_leaves_a_role_annotated_grid_and_no_table() -> None:
+    doc = root(TableToDiv().apply(BEFORE))
+    for tag in ("table", "caption", "thead", "tbody", "tr", "th", "td"):
+        assert not doc.xpath(f"//{tag}"), tag
+    count = {
+        role: len(doc.xpath(f'//div[@role="{role}"]'))
+        for role in ("table", "rowgroup", "row", "columnheader", "cell")
+    }
+    assert count == {
+        "table": 1,
+        "rowgroup": 2,
+        "row": PAGE_SIZE + 1,
+        "columnheader": len(LABELS),
+        "cell": PAGE_SIZE * len(LABELS),
+    }
+    assert doc.xpath('//div[@role="table"]')[0].get("id") == "results"  # attributes kept
+
+
+@pytest.mark.unit
+def test_table_to_div_is_idempotent() -> None:
+    once = TableToDiv().apply(BEFORE)
+    assert TableToDiv().apply(once) == once
+
+
+@pytest.mark.unit
+def test_structural_classes_compose_in_either_order() -> None:
+    """A day applies up to two benign classes in a random order (Task 8), so each must read
+    the other's output. Values still sit under their own headers either way round."""
+    for first, second in [
+        (TableToDiv(), ColumnReorder()),
+        (ColumnReorder(), TableToDiv()),
+        (TableToDiv(), DomRestructure()),
+        (DomRestructure(), TableToDiv()),
+        (DomRestructure(), ColumnReorder()),
+    ]:
+        after = second.apply(first.apply(BEFORE))
+        assert len(rows(after)) == PAGE_SIZE, (first.name, second.name)
+        for label in LABELS:
+            assert column(after, label) == column(BEFORE, label), (first.name, second.name)
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+```python
+# tests/testbench/test_mutation_contract.py
+"""The rules every registered mutation class obeys (Task 8's base.py docstring), checked over
+the whole CATALOGUE so each class Tasks 9-11A register is enrolled the moment it is added."""
 
-Run: `uv run pytest tests/testbench/test_structural_mutations.py -v`
-Expected: FAIL — `ModuleNotFoundError`.
+from __future__ import annotations
 
-- [ ] **Step 3: Implement the four transforms** with `lxml` over the served HTML.
+import random
 
-- [ ] **Step 4: Run them and make sure they pass**
+import pytest
 
-Run: `uv run pytest tests/testbench -v`
-Expected: PASS, 5 tests.
+from testbench.mutations.base import CatalogueEntry, Mutation, parse, serialise
+from testbench.mutations.catalogue import CATALOGUE
+from testbench.portal.data import dataset_for
+from testbench.portal.render import (
+    render_detail,
+    render_error,
+    render_login,
+    render_results,
+    render_search,
+)
+from tests.testbench.helpers import FIXTURE_DAY
 
-- [ ] **Step 5: Commit**
+PAGE = render_results(FIXTURE_DAY)
+
+
+def _detail() -> str:
+    html = render_detail(FIXTURE_DAY, dataset_for(FIXTURE_DAY)[0].claim_number)
+    assert html is not None
+    return html
+
+
+def every_page() -> list[str]:
+    return [
+        PAGE,
+        render_results(FIXTURE_DAY, page=2),
+        render_login(),
+        render_search(),
+        _detail(),
+        render_error(404),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entry", CATALOGUE, ids=lambda e: e.name)
+def test_the_entry_builds_a_mutation_named_after_its_class(entry: CatalogueEntry) -> None:
+    mutation = entry.build(random.Random(0))
+    assert isinstance(mutation, Mutation)
+    assert mutation.name == entry.name == type(mutation).__name__
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entry", CATALOGUE, ids=lambda e: e.name)
+def test_a_fixed_rng_builds_the_same_mutation_and_the_same_page(entry: CatalogueEntry) -> None:
+    """The schedule's promise (Task 8): a day's DOM is a pure function of its seed."""
+    for seed in range(5):
+        first = entry.build(random.Random(seed))
+        second = entry.build(random.Random(seed))
+        assert first.apply(PAGE) == second.apply(PAGE), seed
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entry", CATALOGUE, ids=lambda e: e.name)
+def test_the_results_page_really_changes(entry: CatalogueEntry) -> None:
+    """Compared with the page after the same lxml round trip -- the raw Jinja output differs
+    from any serialised page, so comparing with it would pass for a mutation that does nothing."""
+    assert entry.build(random.Random(0)).apply(PAGE) != serialise(parse(PAGE))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entry", CATALOGUE, ids=lambda e: e.name)
+def test_every_page_the_hook_mutates_survives(entry: CatalogueEntry) -> None:
+    """The hook mutates EVERY text/html response (Task 8): login, search, detail and error
+    pages have no results grid, and a class must pass them through rather than raise."""
+    mutation = entry.build(random.Random(0))
+    for html in every_page():
+        out = mutation.apply(html)
+        assert out.startswith("<!DOCTYPE html>")
+        assert parse(out).find("body") is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entry", CATALOGUE, ids=lambda e: e.name)
+def test_the_login_form_is_never_broken(entry: CatalogueEntry) -> None:
+    """logged_in_page addresses the form by field name and submit button (Task 7); a real
+    portal's UI change never breaks its own login."""
+    doc = parse(entry.build(random.Random(0)).apply(render_login()))
+    assert len(doc.xpath('//form//input[@name="username"]')) == 1
+    assert len(doc.xpath('//form//input[@name="password"]')) == 1
+    assert len(doc.xpath('//form//button[@type="submit"]')) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entry", CATALOGUE, ids=lambda e: e.name)
+def test_no_class_ever_writes_a_truth_marker(entry: CatalogueEntry) -> None:
+    """The served page never carries data-sd-truth (Task 7). A mutation that minted one would
+    hand the resolver the answer."""
+    for seed in range(3):
+        assert "data-sd-" not in entry.build(random.Random(seed)).apply(PAGE)
+```
+
+- [ ] **Step 3: Run them and watch them fail**
+
+Run: `uv run pytest tests/testbench/test_mutation_grid.py tests/testbench/test_structural_mutations.py tests/testbench/test_mutation_contract.py -v`
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'testbench.mutations.grid'` (`test_mutation_grid.py`) and `ModuleNotFoundError: No module named 'testbench.mutations.class_rename'` (`test_structural_mutations.py`); "Interrupted: 2 errors during collection".
+
+- [ ] **Step 4: Implement the shared grid helpers**
+
+```python
+# testbench/mutations/grid.py
+"""The lxml helpers every mutation class shares.
+
+A day applies one or two benign classes in a random order and then, some days, one adversarial
+class on top. So every class must find the results grid whatever markup earlier classes left
+behind: a <table>, or TableToDiv's role-annotated <div>s, with cells possibly wrapped by
+DomRestructure and relabelled by LabelReword. Nothing here reads a data-sd-* attribute; the one
+write is clone(), which strips them from a copy so a decoy never carries the answer key's marker.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+from collections.abc import Iterable, Sequence
+
+from lxml.html import HtmlElement
+
+GRID_XPATH = '//table | //*[@role="table" or @role="grid"]'
+ROW_XPATH = './/tr | .//*[@role="row"]'
+HEADER_CELL_XPATH = './th | ./*[@role="columnheader"]'
+DATA_CELL_XPATH = './td | ./*[@role="cell" or @role="gridcell"]'
+BENCH_ONLY_PREFIX = "data-sd-"
+
+
+def elements(found: object) -> list[HtmlElement]:
+    """An XPath result, narrowed to elements (comments and strings dropped)."""
+    if not isinstance(found, list):
+        return []
+    return [node for node in found if isinstance(node, HtmlElement)]
+
+
+def grids(doc: HtmlElement) -> list[HtmlElement]:
+    return elements(doc.xpath(GRID_XPATH))
+
+
+def rows(grid: HtmlElement) -> list[HtmlElement]:
+    return elements(grid.xpath(ROW_XPATH))
+
+
+def header_cells(row: HtmlElement) -> list[HtmlElement]:
+    return elements(row.xpath(HEADER_CELL_XPATH))
+
+
+def data_cells(row: HtmlElement) -> list[HtmlElement]:
+    return elements(row.xpath(DATA_CELL_XPATH))
+
+
+def header_row(grid: HtmlElement) -> HtmlElement | None:
+    return next((r for r in rows(grid) if header_cells(r) and not data_cells(r)), None)
+
+
+def data_rows(grid: HtmlElement) -> list[HtmlElement]:
+    return [r for r in rows(grid) if data_cells(r)]
+
+
+def text_of(el: HtmlElement) -> str:
+    """Accessible text: aria-label, then an <img>'s alt, then descendant text, whitespace
+    collapsed. The same reading as tests.testbench.helpers.accessible_text, so a mutation
+    finds a header by exactly the text a test (and a screen reader) sees."""
+    label = el.get("aria-label")
+    if label:
+        return " ".join(label.split())
+    if el.tag == "img":
+        return " ".join((el.get("alt") or "").split())
+    parts = [el.text or ""]
+    for child in el:
+        if isinstance(child, HtmlElement):
+            parts.append(" " + text_of(child) + " ")
+        parts.append(child.tail or "")
+    return " ".join("".join(parts).split())
+
+
+def innermost(el: HtmlElement) -> HtmlElement:
+    """The element that actually holds a cell's text: descend through single-child wrappers
+    (DomRestructure's span, the claim-number link) until the text is found."""
+    node = el
+    while True:
+        kids = [c for c in node if isinstance(c, HtmlElement)]
+        if (
+            len(kids) != 1
+            or kids[0].tag == "img"
+            or (node.text or "").strip()
+            or (kids[0].tail or "").strip()
+        ):
+            return node
+        node = kids[0]
+
+
+def set_text(el: HtmlElement, value: str) -> None:
+    """Replace a cell's visible text, keeping every wrapper and attribute around it."""
+    node = innermost(el)
+    for child in list(node):
+        node.remove(child)
+    node.text = value
+
+
+def clone(el: HtmlElement, *, id_suffix: str) -> HtmlElement:
+    """A deep copy with every data-sd-* attribute removed (Task 8's rule for clones) and every
+    id suffixed, so the copy can never be mistaken for the true cell or collide with it."""
+    twin = copy.deepcopy(el)
+    twin.tail = None
+    for node in twin.iter():
+        if not isinstance(node, HtmlElement):
+            continue
+        for attr in [a for a in node.attrib if a.startswith(BENCH_ONLY_PREFIX)]:
+            del node.attrib[attr]
+        ident = node.get("id")
+        if ident:
+            node.set("id", f"{ident}{id_suffix}")
+    return twin
+
+
+def wrap(el: HtmlElement, tag: str, attrs: dict[str, str]) -> HtmlElement:
+    """Put `el` inside a new element, leaving el's tail text outside it."""
+    wrapper = el.makeelement(tag, attrs)
+    wrapper.tail, el.tail = el.tail, None
+    el.addprevious(wrapper)
+    wrapper.append(el)
+    return wrapper
+
+
+def wrap_contents(el: HtmlElement, tag: str, attrs: dict[str, str]) -> HtmlElement:
+    """Move el's text and children into a new single child of el. el keeps its attributes."""
+    inner = el.makeelement(tag, attrs)
+    inner.text, el.text = el.text, None
+    for child in list(el):
+        inner.append(child)
+    el.append(inner)
+    return inner
+
+
+def detach(el: HtmlElement) -> None:
+    """Remove el from its parent without losing the text that followed it."""
+    parent = el.getparent()
+    if parent is None:
+        return
+    if el.tail:
+        previous = el.getprevious()
+        if previous is not None:
+            previous.tail = (previous.tail or "") + el.tail
+        else:
+            parent.text = (parent.text or "") + el.tail
+    parent.remove(el)
+
+
+def permute(cells: Sequence[HtmlElement], order: Sequence[int]) -> None:
+    """Reorder sibling cells in place: position i receives cells[order[i]]. Whitespace between
+    cells stays where it was. Cells that do not share one parent are left alone."""
+    if len(cells) != len(order) or not cells:
+        return
+    parent = cells[0].getparent()
+    if parent is None or any(c.getparent() is not parent for c in cells):
+        return
+    slots: list[HtmlElement] = []
+    for cell in cells:
+        slot = cell.makeelement("template", {})
+        slot.tail, cell.tail = cell.tail, None
+        parent.replace(cell, slot)
+        slots.append(slot)
+    for slot, index in zip(slots, order, strict=True):
+        moved = cells[index]
+        moved.tail = slot.tail
+        parent.replace(slot, moved)
+
+
+def digest(*parts: str) -> int:
+    """A stable 64-bit number from text -- never Python's salted hash()."""
+    raw = hashlib.sha256("\x1f".join(parts).encode("utf-8")).digest()
+    return int.from_bytes(raw[:8], "big")
+
+
+def all_elements(root: HtmlElement) -> Iterable[HtmlElement]:
+    return (node for node in root.iter() if isinstance(node, HtmlElement))
+```
+
+- [ ] **Step 5: Implement the four transforms**
+
+```python
+# testbench/mutations/class_rename.py
+"""ClassRename: every CSS class token on the page is renamed, consistently.
+
+The commonest UI change a portal ships -- a CSS-modules rebuild, a design-system prefix, a BEM
+refactor -- and the one that breaks every selector written as `td.col-amount`.
+"""
+
+from __future__ import annotations
+
+import random
+import string
+from dataclasses import dataclass
+from typing import Self
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import all_elements, digest
+
+SCHEMES = ("hashed", "prefixed", "bem")
+_SALT_ALPHABET = string.ascii_lowercase + string.digits
+
+
+@dataclass(frozen=True, slots=True)
+class ClassRename(MutationBase):
+    scheme: str = "hashed"
+    salt: str = "k3x9q"
+
+    def __post_init__(self) -> None:
+        if self.scheme not in SCHEMES:
+            raise ValueError(f"unknown class-rename scheme {self.scheme!r}")
+        if not self.salt.isalnum():
+            raise ValueError("the salt must be non-empty and alphanumeric")
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        return cls(scheme=rng.choice(SCHEMES), salt="".join(rng.choices(_SALT_ALPHABET, k=5)))
+
+    def rename(self, token: str) -> str:
+        if self.scheme == "hashed":  # CSS modules: name_hash
+            return f"{token}_{digest(self.salt, token) % 16**5:05x}"
+        if self.scheme == "prefixed":  # a design-system prefix
+            return f"{self.salt}-{token}"
+        return f"c-{self.salt}__{token}"  # BEM: block__element
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for el in all_elements(doc):
+            tokens = (el.get("class") or "").split()
+            if tokens:
+                el.set("class", " ".join(self.rename(t) for t in tokens))
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/dom_restructure.py
+"""DomRestructure: the grid is re-nested and every cell's content is wrapped.
+
+A redesign that moves the table into a card, promotes its caption to a heading and wraps each
+cell's text in a span for styling. Every absolute path to a cell changes; no value does.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from typing import Self
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import (
+    data_cells,
+    detach,
+    grids,
+    header_cells,
+    rows,
+    wrap,
+    wrap_contents,
+)
+
+WRAPPER_POOL = (
+    "table-responsive",
+    "card",
+    "card-body",
+    "panel",
+    "panel-body",
+    "grid-shell",
+    "content-block",
+)
+INNER_TAGS = ("span", "div")
+
+
+@dataclass(frozen=True, slots=True)
+class DomRestructure(MutationBase):
+    wrappers: tuple[str, ...] = ("table-responsive", "card-body")
+    inner_tag: str = "span"
+
+    def __post_init__(self) -> None:
+        if not 1 <= len(self.wrappers) <= 3:
+            raise ValueError("one to three wrappers")
+        if self.inner_tag not in INNER_TAGS:
+            raise ValueError(f"inner_tag must be one of {INNER_TAGS}")
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        depth = rng.randint(1, 3)
+        return cls(
+            wrappers=tuple(rng.sample(WRAPPER_POOL, depth)), inner_tag=rng.choice(INNER_TAGS)
+        )
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for grid in grids(doc):
+            outer = grid
+            for cls in reversed(self.wrappers):
+                outer = wrap(outer, "div", {"class": cls})
+            caption = grid.find("caption")
+            if caption is not None:
+                heading = grid.makeelement("h2", {**dict(caption.attrib), "class": "grid-title"})
+                heading.text = caption.text
+                for child in list(caption):
+                    heading.append(child)
+                grid.addprevious(heading)
+                caption.text = None
+                detach(caption)
+            for row in rows(grid):
+                for cell in (*header_cells(row), *data_cells(row)):
+                    wrap_contents(cell, self.inner_tag, {"class": "cell-content"})
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/column_reorder.py
+"""ColumnReorder: the grid's columns are permuted -- headers and every row alike.
+
+Breaks every selector written as td:nth-child(3). Values stay under their own header, so a
+resolver that verifies the header heals; one that trusts the index does not.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from typing import Self
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import data_cells, data_rows, grids, header_cells, header_row, permute
+from testbench.portal.data import COLUMNS
+
+WIDTH = len(COLUMNS)
+DEFAULT_ORDER = (0, 2, 3, 1, 5, 4)  # Amount moves from the third column to the second
+
+
+@dataclass(frozen=True, slots=True)
+class ColumnReorder(MutationBase):
+    order: tuple[int, ...] = DEFAULT_ORDER
+
+    def __post_init__(self) -> None:
+        identity = list(range(len(self.order)))
+        if len(self.order) < 2 or sorted(self.order) != identity:
+            raise ValueError(f"{self.order} is not a permutation of two or more columns")
+        if list(self.order) == identity:
+            raise ValueError("the identity permutation is not a reorder")
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        order = list(range(WIDTH))
+        while order == list(range(WIDTH)):
+            rng.shuffle(order)
+        return cls(order=tuple(order))
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for grid in grids(doc):
+            head = header_row(grid)
+            if head is None or len(header_cells(head)) != len(self.order):
+                continue  # not a grid this permutation was drawn for
+            permute(header_cells(head), self.order)
+            for row in data_rows(grid):
+                permute(data_cells(row), self.order)
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/table_to_div.py
+"""TableToDiv: the <table> becomes a framework data grid of role-annotated <div>s.
+
+The tag changes in place, so every attribute -- classes, ids, and on the answer key's twin the
+data-sd-truth marker -- stays on the same node. Only the tag and a role are new.
+"""
+
+from __future__ import annotations
+
+from lxml.html import HtmlElement
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import elements
+
+TABLE_TAGS = ("table", "caption", "thead", "tbody", "tfoot", "tr", "th", "td")
+_ROLES = {
+    "table": "table",
+    "thead": "rowgroup",
+    "tbody": "rowgroup",
+    "tfoot": "rowgroup",
+    "tr": "row",
+    "td": "cell",
+}
+
+
+def _role(el: HtmlElement) -> str | None:
+    if el.tag == "th":
+        in_body = any(a.tag in ("tbody", "tfoot") for a in el.iterancestors())
+        return "rowheader" if el.get("scope") == "row" or in_body else "columnheader"
+    return _ROLES.get(str(el.tag))  # caption -> None: a plain div
+
+
+class TableToDiv(MutationBase):
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for table in elements(doc.xpath("//table[not(ancestor::table)]")):
+            nodes = [n for n in table.iter(*TABLE_TAGS) if isinstance(n, HtmlElement)]
+            roles = [_role(n) for n in nodes]  # decided before any tag changes
+            for node, role in zip(nodes, roles, strict=True):
+                node.tag = "div"
+                if role is not None and node.get("role") is None:
+                    node.set("role", role)
+        return serialise(doc)
+```
+
+- [ ] **Step 6: Register them**
+
+```python
+# testbench/mutations/catalogue.py
+"""Every mutation class the schedule may draw from. Tasks 9-11A append their classes here.
+
+Adding a class changes which mutations every future AND past day draws, so a day's DOM is
+reproducible from (date, commit), not from the date alone. The seed tag on each stored snapshot
+records what was actually applied.
+"""
+
+from __future__ import annotations
+
+from testbench.mutations.base import CatalogueEntry, entry
+from testbench.mutations.class_rename import ClassRename
+from testbench.mutations.column_reorder import ColumnReorder
+from testbench.mutations.dom_restructure import DomRestructure
+from testbench.mutations.table_to_div import TableToDiv
+
+CATALOGUE: tuple[CatalogueEntry, ...] = (
+    *(
+        entry(c, adversarial=False)
+        for c in (ClassRename, DomRestructure, ColumnReorder, TableToDiv)
+    ),
+)
+```
+
+- [ ] **Step 7: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/testbench/test_mutation_grid.py tests/testbench/test_structural_mutations.py tests/testbench/test_mutation_contract.py -v`
+Expected: PASS — 45 tests (`test_mutation_grid.py` 5, `test_structural_mutations.py` 16, `test_mutation_contract.py` 24 = 6 rules × 4 classes).
+
+Run: `uv run pytest tests/testbench -m unit -q`
+Expected: PASS — 113: Task 7–8's 64, plus 4 new cases of `test_the_truth_marker_changes_attributes_only`, plus these 45.
+
+Run: `uv run ruff check testbench tests/testbench && uv run ruff format --check testbench/mutations tests/testbench && uv run mypy --strict testbench`
+Expected: clean.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add testbench/mutations tests/testbench/test_structural_mutations.py
-git commit -m "feat(testbench): structural mutation classes"
+git add testbench/__init__.py testbench/mutations/__init__.py testbench/mutations/grid.py testbench/mutations/class_rename.py testbench/mutations/dom_restructure.py testbench/mutations/column_reorder.py testbench/mutations/table_to_div.py testbench/mutations/catalogue.py tests/testbench/test_mutation_grid.py tests/testbench/test_structural_mutations.py tests/testbench/test_mutation_contract.py
+git commit -m "feat(testbench): structural mutation classes over a shared grid model"
 ```
 
 ---
@@ -3827,53 +6810,737 @@ git commit -m "feat(testbench): structural mutation classes"
 ### Task 10: Semantic mutation classes
 
 **Files:**
-- Create: `testbench/mutations/label_reword.py`, `id_churn.py`, `framework_markup.py`, `pagination.py`
+- Create: `testbench/mutations/vocabulary.py`, `testbench/mutations/label_reword.py`, `testbench/mutations/id_churn.py`, `testbench/mutations/framework_markup.py`, `testbench/mutations/pagination.py`
+- Modify: `testbench/mutations/catalogue.py` (register the four)
 - Test: `tests/testbench/test_semantic_mutations.py`
 
 **Interfaces:**
-- Consumes: `Mutation` (Task 8).
-- Produces: `LabelReword`, `IdChurn`, `FrameworkMarkup`, `Pagination`, bringing the suite to eight.
+- Consumes: everything Task 9 consumes, plus `testbench.mutations.grid` (Task 9) and `SearchQuery`, `result_set` (Task 7).
+- Produces:
+  - `testbench.mutations.vocabulary`: `LABELS: dict[str, str]` · `FIELD_ORDER: tuple[str, ...]` · `SYNONYMS: dict[str, tuple[str, ...]]` · `wordings(key: str) -> frozenset[str]` · `find_column(header: Sequence[HtmlElement], key: str) -> int | None` (None when absent **or ambiguous**)
+  - `LabelReword(renames: tuple[tuple[str, str], ...] = DEFAULT_RENAMES)` — `LabelReword()` turns "Claim Number" into "Claim No."
+  - `IdChurn(scheme: str = "aspnet", token: int = 7)` with `new_id(old: str, position: int) -> str`; schemes `aspnet` · `react` · `suffix`
+  - `FrameworkMarkup(dialect: str = "vue", scope: str = "7a3c9e1f")`; dialects `vue` · `angular` · `react`
+  - `Pagination(style: str = "prev-next", placement: str = "after")`; styles `prev-next` · `select` · `load-more`
+  - the catalogue now holds eight benign entries. Task 26 asserts the cascade heals each.
+
+**Why `LabelReword` draws from a fixed synonym table (C3).** C3 traced a label rewording — the single
+commonest real UI change — to a quarantine on every occurrence, and R14 fixed the gate so such a heal
+can be *accepted*. That fix is only tested honestly against rewordings a portal would actually ship:
+"Claim No.", "Date Filed", "Amount (USD)". Random strings would test a page no vendor produces. The
+same table (`vocabulary.py`) is how the adversarial classes of Tasks 11–11A find their column after a
+reword has already run, so it carries one hard rule, tested: no wording belongs to two columns or
+contains another column's label as a phrase ("Reserve Amount" would name two).
+
+**Why `IdChurn` rewrites references with the ids.** A framework upgrade that renames ids keeps every
+`<label for>`, `aria-describedby` and `#fragment` working, or the portal's own page breaks. A
+mutation that left them dangling would be a defect in the bench, not drift in the portal.
+
+**Why `FrameworkMarkup` and not a framework (bench spec §1).** The portal ships no JavaScript
+(Task 7's test), because hydration is exactly what defeated the first bench. Framework-shaped markup
+— a root element, scoped-style attributes on every node, SSR fragment comments between rows — is
+emitted by the engine instead, so the churn is exercised and *served equals tested* still holds.
+
+**Why `Pagination` keeps the search.** The pager is rebuilt from the numbered list Task 7 renders
+(current page, page count, the query without `page`), so every new link and the `select` form's hidden
+inputs still reach the same result set. The `select` style is a `GET` form with a Go button: no script.
+
+**The first draft's tests, fixed.** Same `before != after` defect as Task 9, and `sorted(cells)` is
+now `rows(after) == rows(before)`: these four classes may not move a single value.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/testbench/test_semantic_mutations.py
+from __future__ import annotations
+
+import math
+import random
+import re
+
 import pytest
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.column_reorder import ColumnReorder
+from testbench.mutations.dom_restructure import DomRestructure
+from testbench.mutations.framework_markup import DIALECTS, FrameworkMarkup
+from testbench.mutations.grid import header_cells, header_row
+from testbench.mutations.id_churn import SCHEMES, IdChurn
 from testbench.mutations.label_reword import LabelReword
-from testbench.mutations.id_churn import IdChurn
-from testbench.mutations.framework_markup import FrameworkMarkup
 from testbench.mutations.pagination import Pagination
-from tests.testbench.helpers import render_fixture, cells, headers
+from testbench.mutations.table_to_div import TableToDiv
+from testbench.mutations.vocabulary import FIELD_ORDER, SYNONYMS, find_column, wordings
+from testbench.portal.data import COLUMNS, dataset_for
+from testbench.portal.render import (
+    PAGE_SIZE,
+    SearchQuery,
+    render_detail,
+    render_results,
+    result_set,
+)
+from tests.testbench.helpers import FIXTURE_DAY, cells, column, headers, root, rows
 
-@pytest.mark.parametrize("mutation", [LabelReword(), IdChurn(), FrameworkMarkup(), Pagination()])
-def test_mutation_changes_markup_but_preserves_values(mutation):
-    before = render_fixture()
-    after = mutation.apply(before)
-    assert before != after
-    assert sorted(cells(before)) == sorted(cells(after))
+LABELS = [label for _, label in COLUMNS]
+BEFORE = render_results(FIXTURE_DAY)
+SEMANTIC: list[MutationBase] = [LabelReword(), IdChurn(), FrameworkMarkup(), Pagination()]
 
-def test_label_reword_changes_the_header_and_nothing_else():
-    after = LabelReword().apply(render_fixture())
+
+def ids(html: str) -> list[str]:
+    return [
+        str(el.get("id")) for el in root(html).iter() if isinstance(el.tag, str) and el.get("id")
+    ]
+
+
+def detail_page() -> str:
+    html = render_detail(FIXTURE_DAY, dataset_for(FIXTURE_DAY)[0].claim_number)
+    assert html is not None
+    return html
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mutation", SEMANTIC, ids=lambda m: m.name)
+def test_mutation_changes_markup_but_preserves_values(mutation: MutationBase) -> None:
+    after = mutation.apply(BEFORE)
+    assert after != serialise(parse(BEFORE))
+    assert sorted(cells(after)) == sorted(cells(BEFORE))
+    assert rows(after) == rows(BEFORE)  # same values, same rows, same order
+
+
+@pytest.mark.unit
+def test_label_reword_changes_the_header_and_nothing_else() -> None:
+    after = LabelReword().apply(BEFORE)
     assert "Claim No." in headers(after) and "Claim Number" not in headers(after)
+    assert headers(after) == [SYNONYMS[key][0] for key in FIELD_ORDER]
+    assert rows(after) == rows(BEFORE)
+
+
+@pytest.mark.unit
+def test_label_reword_rewords_the_detail_pages_labels_too() -> None:
+    """The detail page is rung 3's "value to the right of the label" case (bench spec §3.2)."""
+    doc = root(LabelReword().apply(detail_page()))
+    assert [dt.text_content() for dt in doc.xpath("//dl/dt")] == [
+        SYNONYMS[key][0] for key in FIELD_ORDER
+    ]
+    assert [dd.text_content() for dd in doc.xpath("//dl/dd")] == [
+        dd.text_content() for dd in root(detail_page()).xpath("//dl/dd")
+    ]
+
+
+@pytest.mark.unit
+def test_label_reword_is_idempotent() -> None:
+    once = LabelReword().apply(BEFORE)
+    assert LabelReword().apply(once) == once
+
+
+@pytest.mark.unit
+def test_label_reword_draws_its_wording_from_the_rng() -> None:
+    drawn = [LabelReword.from_rng(random.Random(seed)) for seed in range(20)]
+    assert len({m.renames for m in drawn}) >= 10
+    for mutation in drawn:
+        for old, new in mutation.renames:
+            key = FIELD_ORDER[LABELS.index(old)]
+            assert new in SYNONYMS[key]
+    with pytest.raises(ValueError, match="differ"):
+        LabelReword(renames=(("Amount", "Amount"),))
+
+
+@pytest.mark.unit
+def test_label_reword_follows_the_grid_through_structural_changes() -> None:
+    for first in (ColumnReorder(), DomRestructure(), TableToDiv()):
+        after = LabelReword().apply(first.apply(BEFORE))
+        for key, label in COLUMNS:
+            assert column(after, SYNONYMS[key][0]) == column(BEFORE, label), (first.name, key)
+
+
+@pytest.mark.unit
+def test_every_header_wording_names_exactly_one_column() -> None:
+    """The adversarial classes find their column by wording after LabelReword may have run, so
+    no wording may belong to two columns or contain another column's label as a phrase."""
+    for key in FIELD_ORDER:
+        for other in FIELD_ORDER:
+            if other == key:
+                continue
+            assert not wordings(key) & wordings(other), (key, other)
+            phrase = re.compile(rf"{re.escape(dict(COLUMNS)[other])}")
+            assert not any(phrase.search(w) for w in wordings(key)), (key, other)
+    for page in (BEFORE, LabelReword.from_rng(random.Random(3)).apply(BEFORE)):
+        head = header_row(parse(page).xpath("//table")[0])
+        assert head is not None
+        assert [find_column(header_cells(head), key) for key in FIELD_ORDER] == list(range(6))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_id_churn_regenerates_every_id(scheme: str) -> None:
+    before_ids, after = ids(BEFORE), IdChurn(scheme=scheme, token=42).apply(BEFORE)
+    assert before_ids == ["main", "results"]
+    assert len(ids(after)) == len(before_ids) and not set(ids(after)) & set(before_ids)
+    assert len(set(ids(after))) == len(ids(after))
+
+
+@pytest.mark.unit
+def test_id_churn_rewrites_every_reference_with_its_id() -> None:
+    page = (
+        '<!DOCTYPE html><html><body><label for="q">Find</label><input id="q" name="q">'
+        '<p id="help">Type a number</p><input name="r" aria-describedby="help q">'
+        '<a href="#help">Help</a><a href="/results#top">Top</a></body></html>'
+    )
+    doc = root(IdChurn(scheme="suffix", token=255).apply(page))
+    assert doc.xpath("//label")[0].get("for") == "q-0ff"
+    assert doc.xpath('//input[@name="r"]')[0].get("aria-describedby") == "help-0ff q-0ff"
+    assert [a.get("href") for a in doc.xpath("//a")] == ["#help-0ff", "/results#top"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_framework_markup_re_emits_the_page_in_each_dialect(dialect: str) -> None:
+    after = FrameworkMarkup(dialect=dialect, scope="0badc0de").apply(BEFORE)
+    doc = root(after)
+    main = doc.xpath("//main")[0]
+    framework_root = main[0]
+    assert (
+        len(main) == 1
+        and framework_root.tag == {"vue": "div", "angular": "app-root", "react": "div"}[dialect]
+    )
+    scoped = {"vue": "data-v-0badc0de", "angular": "_ngcontent-ng-c0badc0de", "react": None}[
+        dialect
+    ]
+    descendants = [el for el in framework_root.iterdescendants() if isinstance(el.tag, str)]
+    if scoped is not None:
+        assert all(el.get(scoped) == "" for el in descendants)
+    comments = [c.text for c in doc.xpath("//tbody/comment()")]
+    assert comments == {"vue": ["[", "]"], "angular": [], "react": ["$", "/$"]}[dialect]
+    assert rows(after) == rows(BEFORE)
+
+
+@pytest.mark.unit
+def test_framework_markup_draws_dialect_and_scope_from_the_rng() -> None:
+    drawn = {FrameworkMarkup.from_rng(random.Random(seed)) for seed in range(20)}
+    assert len(drawn) == 20 and {m.dialect for m in drawn} == set(DIALECTS)
+
+
+def _closed_claims_page_two() -> tuple[str, int]:
+    query = SearchQuery.parse(status="Closed")
+    pages = math.ceil(len(result_set(FIXTURE_DAY, query)) / PAGE_SIZE)
+    assert pages >= 3, "the fixture needs a middle page"
+    return render_results(FIXTURE_DAY, page=2, query=query), pages
+
+
+@pytest.mark.unit
+def test_pagination_prev_next_keeps_the_search_and_the_position() -> None:
+    page, pages = _closed_claims_page_two()
+    doc = root(Pagination(style="prev-next").apply(page))
+    assert not doc.xpath('//nav[@aria-label="Pagination"]')
+    pager = doc.xpath('//nav[@aria-label="Results pages"]')[0]
+    assert [(a.text, a.get("href"), a.get("rel")) for a in pager.xpath(".//a")] == [
+        ("« Previous", "/results?status=Closed&page=1", "prev"),
+        ("Next »", "/results?status=Closed&page=3", "next"),
+    ]
+    assert pager.xpath('.//span[@class="pager-status"]')[0].text == f"Page 2 of {pages}"
+
+
+@pytest.mark.unit
+def test_pagination_select_offers_every_page_without_javascript() -> None:
+    page, pages = _closed_claims_page_two()
+    doc = root(Pagination(style="select").apply(page))
+    form = doc.xpath('//form[@class="pager"]')[0]
+    assert (form.get("method"), form.get("action")) == ("get", "/results")
+    assert [(i.get("name"), i.get("value")) for i in form.xpath('.//input[@type="hidden"]')] == [
+        ("status", "Closed")
+    ]
+    options = form.xpath('.//select[@name="page"]/option')
+    assert len(options) == pages
+    assert [o.get("value") for o in options if o.get("selected")] == ["2"]
+
+
+@pytest.mark.unit
+def test_pagination_load_more_links_the_next_page_only() -> None:
+    page, _ = _closed_claims_page_two()
+    doc = root(Pagination(style="load-more").apply(page))
+    assert [a.get("href") for a in doc.xpath('//p[@class="load-more"]/a')] == [
+        "/results?status=Closed&page=3"
+    ]
+    assert not doc.xpath("//nav[@aria-label]//li")
+
+
+@pytest.mark.unit
+def test_pagination_can_move_the_pager_above_the_grid() -> None:
+    doc = root(Pagination(style="prev-next", placement="before").apply(BEFORE))
+    pager, table = doc.xpath('//nav[@class="pager"]')[0], doc.xpath("//table")[0]
+    assert pager.getnext() is table
+
+
+@pytest.mark.unit
+def test_pagination_is_idempotent() -> None:
+    once = Pagination(style="select").apply(BEFORE)
+    assert Pagination(style="select").apply(once) == once
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `uv run pytest tests/testbench/test_semantic_mutations.py -v`
-Expected: FAIL.
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'testbench.mutations.framework_markup'`.
 
-- [ ] **Step 3: Implement the four transforms.**
+- [ ] **Step 3: Implement the vocabulary and the four transforms**
 
-- [ ] **Step 4: Run them and make sure they pass**
+```python
+# testbench/mutations/vocabulary.py
+"""Every wording a bench column header can carry, and how a mutation finds a column by it.
 
-Run: `uv run pytest tests/testbench -v`
-Expected: PASS, 10 tests.
+LabelReword draws its replacements from SYNONYMS. The adversarial classes run after the day's
+benign ones, so they find their target column by any of its wordings -- never by position or
+class, which ColumnReorder and ClassRename may already have changed.
+"""
 
-- [ ] **Step 5: Commit**
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from lxml.html import HtmlElement
+
+from testbench.mutations.grid import text_of
+from testbench.portal.data import COLUMNS
+
+LABELS: dict[str, str] = dict(COLUMNS)
+FIELD_ORDER: tuple[str, ...] = tuple(key for key, _ in COLUMNS)
+
+# No synonym repeats another column's wording or contains another column's label as a phrase
+# ("Reserve Amount" would): a benign reword must leave every header naming exactly one column.
+SYNONYMS: dict[str, tuple[str, ...]] = {
+    "claim_number": ("Claim No.", "Claim #", "Claim Ref.", "Claim ID"),
+    "claimant": ("Claimant Name", "Insured Party", "Policyholder"),
+    "amount": ("Amount (USD)", "Gross Amount", "Total Amount"),
+    "reserve": ("Case Reserve", "Reserve (USD)", "Reserved"),
+    "status": ("Current Status", "State", "Stage"),
+    "filed": ("Date Filed", "Filed On", "Submitted"),
+}
+
+
+def wordings(key: str) -> frozenset[str]:
+    return frozenset((LABELS[key], *SYNONYMS[key]))
+
+
+def find_column(header: Sequence[HtmlElement], key: str) -> int | None:
+    """The index of the header cell naming `key`, by accessible text; None when absent or
+    ambiguous (DuplicateLabel's page names claim_number twice)."""
+    names = wordings(key)
+    hits = [i for i, cell in enumerate(header) if text_of(cell) in names]
+    return hits[0] if len(hits) == 1 else None
+```
+
+```python
+# testbench/mutations/label_reword.py
+"""LabelReword: every column header and detail-page label is reworded to a synonym.
+
+"Claim Number" becomes "Claim No.". Breaks every anchor keyed on exact label text; the meaning
+is unchanged, so a resolver that anchors on meaning -- or on the values' format -- heals.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from typing import Self
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import elements, grids, header_cells, rows, set_text, text_of
+from testbench.mutations.vocabulary import FIELD_ORDER, LABELS, SYNONYMS
+
+DEFAULT_RENAMES: tuple[tuple[str, str], ...] = tuple(
+    (LABELS[key], SYNONYMS[key][0]) for key in FIELD_ORDER
+)
+
+
+@dataclass(frozen=True, slots=True)
+class LabelReword(MutationBase):
+    """`renames` pairs each original label with its new wording; the default is the first
+    synonym of every column, so LabelReword() turns "Claim Number" into "Claim No."."""
+
+    renames: tuple[tuple[str, str], ...] = DEFAULT_RENAMES
+
+    def __post_init__(self) -> None:
+        old = [o for o, _ in self.renames]
+        if not self.renames or len(set(old)) != len(old):
+            raise ValueError("renames must name each label once")
+        if any(o == n for o, n in self.renames) or {n for _, n in self.renames} & set(old):
+            raise ValueError("a new wording must differ from every original label")
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        return cls(renames=tuple((LABELS[key], rng.choice(SYNONYMS[key])) for key in FIELD_ORDER))
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        mapping = dict(self.renames)
+        labels = [cell for grid in grids(doc) for row in rows(grid) for cell in header_cells(row)]
+        labels += elements(doc.xpath("//dl/dt"))
+        for label in labels:
+            new = mapping.get(text_of(label))
+            if new is not None:
+                set_text(label, new)
+                if label.get("aria-label"):
+                    label.set("aria-label", new)
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/id_churn.py
+"""IdChurn: every element id is regenerated, and every reference to it follows.
+
+What a framework upgrade or a WebForms control-tree change does to ids. Breaks every selector
+written as #results; the page still works, because labels, ARIA references and fragment links
+are rewritten with the ids they point at.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from typing import Self
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import all_elements
+
+SCHEMES = ("aspnet", "react", "suffix")
+ID_LIST_ATTRS = (
+    "for",
+    "aria-labelledby",
+    "aria-describedby",
+    "aria-controls",
+    "aria-owns",
+    "aria-activedescendant",
+    "headers",
+    "list",
+    "form",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class IdChurn(MutationBase):
+    scheme: str = "aspnet"
+    token: int = 7
+
+    def __post_init__(self) -> None:
+        if self.scheme not in SCHEMES:
+            raise ValueError(f"unknown id-churn scheme {self.scheme!r}")
+        if not 1 <= self.token < 4096:
+            raise ValueError("token must be in [1, 4096)")
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        return cls(scheme=rng.choice(SCHEMES), token=rng.randrange(1, 4096))
+
+    def new_id(self, old: str, position: int) -> str:
+        if self.scheme == "aspnet":  # WebForms naming container
+            return f"ctl{self.token:02d}_MainContent_{old}"
+        if self.scheme == "react":  # useId(): opaque, positional
+            return f":r{self.token + position:x}:"
+        return f"{old}-{self.token:03x}"  # a build-hash suffix
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        mapping: dict[str, str] = {}
+        with_ids = [el for el in all_elements(doc) if el.get("id")]
+        for position, el in enumerate(with_ids):
+            old = str(el.get("id"))
+            new = self.new_id(old, position)
+            mapping.setdefault(old, new)
+            el.set("id", new)
+        for el in all_elements(doc):
+            for attr in ID_LIST_ATTRS:
+                refs = el.get(attr)
+                if refs:
+                    el.set(attr, " ".join(mapping.get(r, r) for r in refs.split()))
+            href = el.get("href")
+            if href and href.startswith("#") and href[1:] in mapping:
+                el.set("href", "#" + mapping[href[1:]])
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/framework_markup.py
+"""FrameworkMarkup: the page is re-emitted the way a front-end framework would render it.
+
+A portal moving to Vue, Angular or Next wraps its content in a root element, stamps scoped-style
+attributes on every node and leaves hydration comments between rows. Nothing a user sees
+changes; every structural selector and every attribute-exact selector does.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from typing import Self
+
+import lxml.etree
+from lxml.html import HtmlElement
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import data_rows, grids, wrap_contents
+
+DIALECTS = ("vue", "angular", "react")
+
+
+@dataclass(frozen=True, slots=True)
+class FrameworkMarkup(MutationBase):
+    dialect: str = "vue"
+    scope: str = "7a3c9e1f"
+
+    def __post_init__(self) -> None:
+        if self.dialect not in DIALECTS:
+            raise ValueError(f"unknown dialect {self.dialect!r}")
+        if len(self.scope) != 8 or any(c not in "0123456789abcdef" for c in self.scope):
+            raise ValueError("scope must be eight lower-case hex digits")
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        return cls(dialect=rng.choice(DIALECTS), scope=f"{rng.getrandbits(32):08x}")
+
+    def _root(self) -> tuple[str, dict[str, str]]:
+        if self.dialect == "vue":
+            return "div", {"id": "app", "data-v-app": ""}
+        if self.dialect == "angular":
+            return "app-root", {"ng-version": "17.3.12", f"_nghost-ng-c{self.scope}": ""}
+        return "div", {"id": "__next"}
+
+    def _scoped_attribute(self) -> str | None:
+        if self.dialect == "vue":
+            return f"data-v-{self.scope}"
+        if self.dialect == "angular":
+            return f"_ngcontent-ng-c{self.scope}"
+        return None  # React stamps no per-node attribute
+
+    def _fragment_markers(self) -> tuple[str, str] | None:
+        if self.dialect == "vue":
+            return "[", "]"  # Vue SSR fragment
+        if self.dialect == "react":
+            return "$", "/$"  # React Suspense boundary
+        return None
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        container = doc.find(".//main")
+        if container is None:
+            container = doc.find("body")
+        if container is None:
+            return serialise(doc)
+        tag, attrs = self._root()
+        root = wrap_contents(container, tag, attrs)
+        scoped = self._scoped_attribute()
+        if scoped is not None:
+            for node in root.iterdescendants():
+                if isinstance(node, HtmlElement):
+                    node.set(scoped, "")
+        markers = self._fragment_markers()
+        if markers is not None:
+            for grid in grids(root):
+                body = data_rows(grid)
+                if body:
+                    body[0].addprevious(lxml.etree.Comment(markers[0]))
+                    body[-1].addnext(lxml.etree.Comment(markers[1]))
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/pagination.py
+"""Pagination: the numbered page list is replaced by another pager style.
+
+Portals swap pagers constantly: Previous/Next with a page count, a page-number <select>, or a
+single "show more" link. The grid and its values are untouched; what breaks is any run step that
+navigates by the old numbered links.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from typing import Self
+from urllib.parse import parse_qsl, urlencode, urlsplit
+
+from lxml.html import HtmlElement
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import detach, elements, grids
+
+STYLES = ("prev-next", "select", "load-more")
+PLACEMENTS = ("after", "before")
+
+
+@dataclass(frozen=True, slots=True)
+class _Pager:
+    current: int
+    pages: int
+    base_query: tuple[tuple[str, str], ...]  # the search, without `page`
+
+    def href(self, page: int) -> str:
+        return "/results?" + urlencode([*self.base_query, ("page", str(page))])
+
+
+def _read(nav: HtmlElement) -> _Pager | None:
+    """Recover the pager's state from the numbered list Task 7 renders."""
+    current: int | None = None
+    pages = 0
+    base: tuple[tuple[str, str], ...] = ()
+    for item in elements(nav.xpath(".//li")):
+        text = item.text_content().strip()
+        if not text.isdigit():
+            return None
+        pages = max(pages, int(text))
+        if elements(item.xpath('.//*[@aria-current="page"]')):
+            current = int(text)
+        for link in elements(item.xpath(".//a[@href]")):
+            query = parse_qsl(urlsplit(str(link.get("href"))).query, keep_blank_values=True)
+            base = tuple((k, v) for k, v in query if k != "page")
+    if current is None or pages == 0:
+        return None
+    return _Pager(current, pages, base)
+
+
+def _link(parent: HtmlElement, href: str, text: str, rel: str | None = None) -> HtmlElement:
+    attrs = {"href": href} if rel is None else {"href": href, "rel": rel}
+    link = parent.makeelement("a", attrs)
+    link.text = text
+    parent.append(link)
+    return link
+
+
+@dataclass(frozen=True, slots=True)
+class Pagination(MutationBase):
+    style: str = "prev-next"
+    placement: str = "after"
+
+    def __post_init__(self) -> None:
+        if self.style not in STYLES:
+            raise ValueError(f"unknown pager style {self.style!r}")
+        if self.placement not in PLACEMENTS:
+            raise ValueError(f"unknown placement {self.placement!r}")
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        return cls(style=rng.choice(STYLES), placement=rng.choice(PLACEMENTS))
+
+    def _build(self, doc: HtmlElement, pager: _Pager) -> HtmlElement:
+        if self.style == "prev-next":
+            nav = doc.makeelement("nav", {"class": "pager", "aria-label": "Results pages"})
+            if pager.current > 1:
+                _link(nav, pager.href(pager.current - 1), "« Previous", "prev")
+            status = nav.makeelement("span", {"class": "pager-status"})
+            status.text = f"Page {pager.current} of {pager.pages}"
+            nav.append(status)
+            if pager.current < pager.pages:
+                _link(nav, pager.href(pager.current + 1), "Next »", "next")
+            return nav
+        if self.style == "select":
+            form = doc.makeelement(
+                "form",
+                {
+                    "class": "pager",
+                    "method": "get",
+                    "action": "/results",
+                    "aria-label": "Results pages",
+                },
+            )
+            for key, value in pager.base_query:
+                form.append(
+                    form.makeelement("input", {"type": "hidden", "name": key, "value": value})
+                )
+            label = form.makeelement("label", {})
+            label.text = "Page "
+            select = label.makeelement("select", {"name": "page"})
+            for number in range(1, pager.pages + 1):
+                attrs = {"value": str(number)}
+                if number == pager.current:
+                    attrs["selected"] = "selected"
+                option = select.makeelement("option", attrs)
+                option.text = str(number)
+                select.append(option)
+            label.append(select)
+            form.append(label)
+            button = form.makeelement("button", {"type": "submit"})
+            button.text = "Go"
+            form.append(button)
+            return form
+        more = doc.makeelement("p", {"class": "load-more"})
+        if pager.current < pager.pages:
+            _link(more, pager.href(pager.current + 1), "Show more results", "next")
+        else:
+            more.text = "No more results"
+        return more
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for nav in elements(doc.xpath('//nav[@aria-label="Pagination"]')):
+            pager = _read(nav)
+            parent = nav.getparent()
+            if pager is None or parent is None:
+                continue
+            replacement = self._build(doc, pager)
+            replacement.tail = nav.tail
+            parent.replace(nav, replacement)
+            tables = grids(doc)
+            if self.placement == "before" and tables:
+                detach(replacement)
+                replacement.tail = None
+                tables[0].addprevious(replacement)
+        return serialise(doc)
+```
+
+- [ ] **Step 4: Register them**
+
+```python
+# testbench/mutations/catalogue.py
+"""Every mutation class the schedule may draw from. Tasks 9-11A append their classes here.
+
+Adding a class changes which mutations every future AND past day draws, so a day's DOM is
+reproducible from (date, commit), not from the date alone. The seed tag on each stored snapshot
+records what was actually applied.
+"""
+
+from __future__ import annotations
+
+from testbench.mutations.base import CatalogueEntry, entry
+from testbench.mutations.class_rename import ClassRename
+from testbench.mutations.column_reorder import ColumnReorder
+from testbench.mutations.dom_restructure import DomRestructure
+from testbench.mutations.framework_markup import FrameworkMarkup
+from testbench.mutations.id_churn import IdChurn
+from testbench.mutations.label_reword import LabelReword
+from testbench.mutations.pagination import Pagination
+from testbench.mutations.table_to_div import TableToDiv
+
+CATALOGUE: tuple[CatalogueEntry, ...] = (
+    *(
+        entry(c, adversarial=False)
+        for c in (
+            ClassRename,
+            DomRestructure,
+            ColumnReorder,
+            TableToDiv,
+            LabelReword,
+            IdChurn,
+            FrameworkMarkup,
+            Pagination,
+        )
+    ),
+)
+```
+
+- [ ] **Step 5: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/testbench/test_semantic_mutations.py -v`
+Expected: PASS, 23 tests.
+
+Run: `uv run pytest tests/testbench -m unit -q`
+Expected: PASS — 164: Task 9's 113, plus 23, plus 24 new contract cases (6 rules × 4 classes), plus 4 new cases of `test_the_truth_marker_changes_attributes_only`.
+
+Run: `uv run ruff check testbench tests/testbench && uv run ruff format --check testbench/mutations tests/testbench && uv run mypy --strict testbench`
+Expected: clean.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add testbench/mutations tests/testbench/test_semantic_mutations.py
-git commit -m "feat(testbench): semantic mutation classes"
+git add testbench/mutations/vocabulary.py testbench/mutations/label_reword.py testbench/mutations/id_churn.py testbench/mutations/framework_markup.py testbench/mutations/pagination.py testbench/mutations/catalogue.py tests/testbench/test_semantic_mutations.py
+git commit -m "feat(testbench): semantic mutation classes and the header vocabulary"
 ```
 
 ---
@@ -3881,48 +7548,296 @@ git commit -m "feat(testbench): semantic mutation classes"
 ### Task 11: The adversarial mutation — the decoy column
 
 **Files:**
-- Create: `testbench/mutations/adversarial/decoy_column.py`
+- Create: `testbench/mutations/adversarial/__init__.py`, `testbench/mutations/adversarial/decoy_column.py`
+- Modify: `testbench/mutations/catalogue.py` (register `DecoyColumn`, `adversarial=True`)
 - Test: `tests/testbench/test_adversarial.py`
 
 **Interfaces:**
-- Consumes: `Mutation` (Task 8).
-- Produces: `DecoyColumn` — reorders columns **and** inserts a `Prior Amount` column whose values are plausible amounts. A resolver keying on column index heals to the wrong column and every individual value still looks valid. **This is the mutation the whole validation gate exists to refuse.**
+- Consumes: `testbench.mutations.grid` (Task 9), `testbench.mutations.vocabulary.find_column` (Task 10), `CENT`, `MIN_MONEY`, `MAX_MONEY`, `COLUMNS` (Task 7), and Task 9's inputs.
+- Produces: `DecoyColumn(label: str = "Prior Amount", salt: str = "prior", low: Decimal = Decimal("0.80"), high: Decimal = Decimal("0.97"))` with `decoy_value(real: str, row: int) -> str` · `DECOY_LABELS = ("Prior Amount", "Previous Amount", "Original Amount")`. Inserts a decoy column immediately **left** of Amount — a styled copy of it — whose every value is a plausible amount 80–97% of its row's real one. **This is the mutation the whole validation gate exists to refuse** (Task 26).
+
+**Why the decoy is a styled copy of Amount, on its left (brief §5, the adjacent-column failure).**
+The attack must force a heal *and* make the easy heal wrong. Same classes as the real cell: the clean
+run's `td.col-amount` now matches two cells per row, so rung 1's "exactly one" cannot hold. Left of
+Amount: the clean run's `td:nth-child(3)` now lands on the decoy, and the header there says "Prior
+Amount". A resolver that heals by position reads fifty values that each pass the format assertion,
+the range check and the currency rule. Only a check that looks across families
+(`IndependentRungAgreement`) or across runs (`DistributionalAssertion`) can see it — which is Task 26's
+claim, and the reason the first draft's own words call this the mutation the gate exists for.
+
+**Why it finds Amount by wording, not by position or class.** Adversarial classes run last, on top of
+the day's benign ones (Task 8's schedule). After `ColumnReorder` the Amount column is not third;
+after `ClassRename` it is not `col-amount`; after `LabelReword` it may say "Amount (USD)".
+`find_column(header, "amount")` matches any wording in Task 10's vocabulary.
+
+**The first draft's tests, fixed.** They used `headers` without importing it (amendment 1) and carried
+no marker. `real != decoy` compared two lists, which is true if a single row differs; it now holds
+for every row. A test for the index-keyed failure itself, and one for the truth marker on the clone,
+are added.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/testbench/test_adversarial.py
+from __future__ import annotations
+
+import random
+
+import pytest
+
 from testbench.mutations.adversarial.decoy_column import DecoyColumn
-from tests.testbench.helpers import render_fixture, column, is_plausible_amount
+from testbench.mutations.base import MutationBase
+from testbench.mutations.column_reorder import ColumnReorder
+from testbench.mutations.dom_restructure import DomRestructure
+from testbench.mutations.label_reword import LabelReword
+from testbench.mutations.table_to_div import TableToDiv
+from testbench.portal.data import COLUMNS
+from testbench.portal.render import PAGE_SIZE, render_results
+from tests.testbench.helpers import FIXTURE_DAY, column, headers, is_plausible_amount, root, rows
 
-def test_decoy_is_indistinguishable_by_value_alone():
-    after = DecoyColumn().apply(render_fixture())
+LABELS = [label for _, label in COLUMNS]
+BEFORE = render_results(FIXTURE_DAY)
+
+
+@pytest.mark.unit
+def test_decoy_is_indistinguishable_by_value_alone() -> None:
+    after = DecoyColumn().apply(BEFORE)
     real, decoy = column(after, "Amount"), column(after, "Prior Amount")
+    assert len(decoy) == PAGE_SIZE
     assert all(is_plausible_amount(v) for v in real + decoy)
-    assert real != decoy
+    assert all(r != d for r, d in zip(real, decoy, strict=True))  # every row, not the list
 
-def test_decoy_sits_adjacent_to_the_real_column():
-    after = DecoyColumn().apply(render_fixture())
+
+@pytest.mark.unit
+def test_decoy_sits_adjacent_to_the_real_column() -> None:
+    hs = headers(DecoyColumn().apply(BEFORE))
+    assert hs.index("Prior Amount") == hs.index("Amount") - 1
+
+
+@pytest.mark.unit
+def test_an_index_keyed_resolver_now_reads_the_decoy() -> None:
+    """The cached td:nth-child(3) held Amount on the clean page. It now holds the decoy."""
+    third = LABELS.index("Amount")
+    after = DecoyColumn().apply(BEFORE)
+    assert [r[third] for r in rows(BEFORE)] == column(BEFORE, "Amount")
+    assert [r[third] for r in rows(after)] == column(after, "Prior Amount")
+
+
+@pytest.mark.unit
+def test_decoy_leaves_every_real_column_intact() -> None:
+    after = DecoyColumn().apply(BEFORE)
+    for label in LABELS:
+        assert column(after, label) == column(BEFORE, label), label
+
+
+@pytest.mark.unit
+def test_the_decoy_is_styled_exactly_like_amount() -> None:
+    """Same classes as the real cell: a class selector now matches two cells per row, so the
+    clean run's cached selector cannot hold at rung 1 and a heal is forced."""
+    first_row = root(DecoyColumn().apply(BEFORE)).xpath("//tbody/tr[1]")[0]
+    assert len(first_row.xpath('./td[@class="col-amount"]')) == 2
+    assert len(first_row.xpath("./td")) == len(LABELS) + 1
+
+
+@pytest.mark.unit
+def test_the_decoy_never_carries_the_truth_marker() -> None:
+    """Task 8's key: a clone keeps no data-sd-truth, or the answer would name two columns."""
+    doc = root(DecoyColumn().apply(render_results(FIXTURE_DAY, mark_truth=True)))
+    decoys = doc.xpath(f"//tbody/tr/td[{LABELS.index('Amount') + 1}]")
+    assert len(decoys) == PAGE_SIZE
+    assert all(d.get("data-sd-truth") is None for d in decoys)
+    marked = doc.xpath('//*[@data-sd-truth="amount"]')
+    assert [el.text_content() for el in marked] == column(BEFORE, "Amount")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "first", [ColumnReorder(), DomRestructure(), TableToDiv(), LabelReword()], ids=lambda m: m.name
+)
+def test_decoy_finds_amount_after_any_benign_change(first: MutationBase) -> None:
+    """Adversarial classes run last, on top of the day's benign ones (Task 8)."""
+    after = DecoyColumn().apply(first.apply(BEFORE))
     hs = headers(after)
-    assert abs(hs.index("Amount") - hs.index("Prior Amount")) == 1
+    amount = next(h for h in hs if h in ("Amount", "Amount (USD)"))
+    assert hs.index("Prior Amount") == hs.index(amount) - 1
+    assert column(after, amount) == column(BEFORE, "Amount")
+    assert all(is_plausible_amount(v) for v in column(after, "Prior Amount"))
+
+
+@pytest.mark.unit
+def test_decoy_values_and_label_vary_with_the_rng() -> None:
+    drawn = [DecoyColumn.from_rng(random.Random(seed)) for seed in range(12)]
+    pages = {m.apply(BEFORE) for m in drawn}
+    assert len(pages) == len(drawn)
+    assert {m.label for m in drawn} == {"Prior Amount", "Previous Amount", "Original Amount"}
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `uv run pytest tests/testbench/test_adversarial.py -v`
-Expected: FAIL.
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'testbench.mutations.adversarial'`.
 
-- [ ] **Step 3: Implement `DecoyColumn`.**
-
-- [ ] **Step 4: Run them and make sure they pass**
-
-Run: `uv run pytest tests/testbench -v`
-Expected: PASS, 12 tests.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Implement `DecoyColumn`**
 
 ```bash
-git add testbench/mutations/adversarial tests/testbench/test_adversarial.py
+mkdir -p testbench/mutations/adversarial
+touch testbench/mutations/adversarial/__init__.py
+```
+
+```python
+# testbench/mutations/adversarial/decoy_column.py
+"""DecoyColumn: a "Prior Amount" column appears immediately left of Amount.
+
+The adjacent-column attack. Amount shifts one place right, and the position it vacated now
+holds plausible amounts, each a little below its row's real one. The decoy is a styled copy of
+the Amount column -- same classes, same shape -- so no cached selector still names exactly one
+clean Amount cell: a class selector matches two per row, the cached td:nth-child(3) lands on the
+decoy. A heal is forced, and a heal by position reads values that pass every format and range
+check. This is the mutation the whole validation gate exists to refuse.
+"""
+
+from __future__ import annotations
+
+import random
+import string
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from typing import Self
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import (
+    clone,
+    data_cells,
+    data_rows,
+    digest,
+    grids,
+    header_cells,
+    header_row,
+    set_text,
+    text_of,
+)
+from testbench.mutations.vocabulary import find_column
+from testbench.portal.data import CENT, MAX_MONEY, MIN_MONEY
+
+DECOY_LABELS = ("Prior Amount", "Previous Amount", "Original Amount")
+_SALT_ALPHABET = string.ascii_lowercase + string.digits
+
+
+@dataclass(frozen=True, slots=True)
+class DecoyColumn(MutationBase):
+    label: str = "Prior Amount"
+    salt: str = "prior"
+    low: Decimal = Decimal("0.80")  # decoy / real, drawn per row from [low, high)
+    high: Decimal = Decimal("0.97")
+
+    def __post_init__(self) -> None:
+        if self.label not in DECOY_LABELS:
+            raise ValueError(f"the decoy label must be one of {DECOY_LABELS}")
+        if not Decimal("0.5") <= self.low < self.high < Decimal("1"):
+            raise ValueError(
+                "need 0.5 <= low < high < 1: a decoy close to, and never equal to, the real amount"
+            )
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        return cls(label=rng.choice(DECOY_LABELS), salt="".join(rng.choices(_SALT_ALPHABET, k=6)))
+
+    def decoy_value(self, real: str, row: int) -> str:
+        """A plausible amount near `real`, never equal to it. Unparseable text is copied."""
+        try:
+            amount = Decimal(real.replace(",", ""))
+        except InvalidOperation:
+            return real
+        fraction = Decimal(digest(self.salt, str(row), real) % 10_000) / Decimal(10_000)
+        ratio = self.low + (self.high - self.low) * fraction
+        decoy = min(max((amount * ratio).quantize(CENT), MIN_MONEY), MAX_MONEY)
+        if decoy == amount:
+            decoy = amount + Decimal("1.00") if amount < MAX_MONEY else amount - Decimal("1.00")
+        return f"{decoy:,.2f}"
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for grid in grids(doc):
+            head = header_row(grid)
+            if head is None:
+                continue
+            header = header_cells(head)
+            index = find_column(header, "amount")
+            if index is None:
+                continue
+            twin = clone(header[index], id_suffix="-prior")
+            set_text(twin, self.label)
+            if twin.get("aria-label"):
+                twin.set("aria-label", self.label)
+            header[index].addprevious(twin)
+            for number, row in enumerate(data_rows(grid)):
+                cells = data_cells(row)
+                if len(cells) != len(header):
+                    continue
+                real = cells[index]
+                decoy = clone(real, id_suffix="-prior")
+                set_text(decoy, self.decoy_value(text_of(real), number))
+                real.addprevious(decoy)
+        return serialise(doc)
+```
+
+- [ ] **Step 4: Register it**
+
+```python
+# testbench/mutations/catalogue.py
+"""Every mutation class the schedule may draw from. Tasks 9-11A append their classes here.
+
+Adding a class changes which mutations every future AND past day draws, so a day's DOM is
+reproducible from (date, commit), not from the date alone. The seed tag on each stored snapshot
+records what was actually applied.
+"""
+
+from __future__ import annotations
+
+from testbench.mutations.adversarial.decoy_column import DecoyColumn
+from testbench.mutations.base import CatalogueEntry, entry
+from testbench.mutations.class_rename import ClassRename
+from testbench.mutations.column_reorder import ColumnReorder
+from testbench.mutations.dom_restructure import DomRestructure
+from testbench.mutations.framework_markup import FrameworkMarkup
+from testbench.mutations.id_churn import IdChurn
+from testbench.mutations.label_reword import LabelReword
+from testbench.mutations.pagination import Pagination
+from testbench.mutations.table_to_div import TableToDiv
+
+CATALOGUE: tuple[CatalogueEntry, ...] = (
+    *(
+        entry(c, adversarial=False)
+        for c in (
+            ClassRename,
+            DomRestructure,
+            ColumnReorder,
+            TableToDiv,
+            LabelReword,
+            IdChurn,
+            FrameworkMarkup,
+            Pagination,
+        )
+    ),
+    *(entry(c, adversarial=True) for c in (DecoyColumn,)),
+)
+```
+
+- [ ] **Step 5: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/testbench/test_adversarial.py -v`
+Expected: PASS, 11 tests.
+
+Run: `uv run pytest tests/testbench -m unit -q`
+Expected: PASS — 182: Task 10's 164, plus 11, plus 6 new contract cases, plus 1 new case of `test_the_truth_marker_changes_attributes_only`.
+
+Run: `uv run ruff check testbench tests/testbench && uv run ruff format --check testbench/mutations tests/testbench && uv run mypy --strict testbench`
+Expected: clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add testbench/mutations/adversarial/__init__.py testbench/mutations/adversarial/decoy_column.py testbench/mutations/catalogue.py tests/testbench/test_adversarial.py
 git commit -m "feat(testbench): adversarial decoy-column mutation"
 ```
 
@@ -3931,48 +7846,771 @@ git commit -m "feat(testbench): adversarial decoy-column mutation"
 ### Task 11A: The rest of the adversarial set — R12 (H9, M25)
 
 **Files:**
-- Create: `testbench/mutations/adversarial/hidden_decoy.py`, `duplicate_label.py`, `value_swap.py`, `locale_flip.py`, `virtualised_rows.py`, `image_header.py`
-- Test: `tests/testbench/test_adversarial.py` (extend)
+- Create: `testbench/mutations/adversarial/hidden_decoy.py`, `testbench/mutations/adversarial/duplicate_label.py`, `testbench/mutations/adversarial/value_swap.py`, `testbench/mutations/adversarial/locale_flip.py`, `testbench/mutations/adversarial/virtualised_rows.py`, `testbench/mutations/adversarial/image_header.py`
+- Modify: `testbench/mutations/catalogue.py` (the final fifteen), `tests/testbench/helpers.py` (`skeleton`)
+- Test: `tests/testbench/test_adversarial_set.py`, `tests/testbench/test_scheduled_days.py`
 
 **Interfaces:**
-- Consumes: `Mutation` (Task 8).
-- Produces: six further adversarial classes, bringing the set to seven.
+- Consumes: `testbench.mutations.grid` (Task 9), `testbench.mutations.vocabulary` (Task 10), `DecoyColumn` (Task 11), `FIELDS` (`testbench.answers.key`, Task 8), `mutations_for`, `scheduled_names` (Task 8), and Task 9's inputs.
+- Produces:
+  - `HiddenDecoy(variant: str = "aria-hidden", offset: int = 7_340_021)` with `decoy_number(real: str) -> str | None`; `VARIANTS = ("aria-hidden", "display-none")`
+  - `DuplicateLabel(shift: int = 3)` with `legacy_number(real: str) -> str`
+  - `ValueSwap()` · `LocaleFlip()` and `flip(value: str) -> str` · `VirtualisedRows()`, `SCRIPT: str`, `KEEP = 10` · `ImageHeader()`
+  - `tests.testbench.helpers.skeleton(html: str) -> str`
+  - `CATALOGUE`: eight benign then seven adversarial entries, exactly as the amendment note's item 3 lists them.
 
 **Why this task exists.** The brief asks for *"a set of adversarial mutations designed to induce a
 plausible-but-wrong heal"*, brief §11 says this set *"matters more"* than the heal set, and the
 sequencing note says cross-family confirmation is the thing to get right. The plan shipped **one**
-(the decoy column). One adversarial case does not test a gate; it tests one branch of one check.
+(the decoy column). One adversarial case does not test a gate; it tests one branch of one check (M25).
 
-Each class below attacks a *different* rung or check, and each has a test asserting the gate
-**refuses**:
+Each class below attacks a *different* rung or check:
 
 | Class | What it attacks | Which control must catch it |
 |---|---|---|
-| `HiddenDecoy` | Rung 2. A visually hidden / `aria-hidden` / off-screen element carrying `aria-label="Claim Number"`, resolving ahead of the real one, whose values satisfy the format assertion | **Nothing currently does (H9).** No rung requires visibility. Fix in Task 13: every rung's candidate filter requires a non-zero box, no `aria-hidden`, no `display:none` ancestor |
-| `DuplicateLabel` | Rung 1's *"exactly one"* and rung 3's anchor | Rung 1 must fail on two matches; rung 3 must refuse an ambiguous anchor rather than take the first |
-| `ValueSwap` | Everything structural **and** everything textual — two same-format columns exchange values, markup untouched | Only `RowKeyContinuity` (Task 22) sees it. This is the class that proves the third family earns its place |
-| `LocaleFlip` | `1,234.56` → `1.234,56`. Passes `FormatAssertion` if the pattern is loose | `DomainAssertion` range check, and the currency-sanity rule brief §5 asks for |
-| `VirtualisedRows` | 10 of 100 rows in the DOM | The row-count contract (Task 29), not the resolver |
-| `ImageHeader` | Rung 4's header verification when the header is an `<img alt="Amount">` | Header verification must read accessible text, not `textContent` |
+| `HiddenDecoy` | Rung 2. A hidden grid — `aria-hidden` and off-screen, or `display:none` — placed ahead of the real table, every cell carrying `aria-label="Claim Number"` and a well-formed claim number | **H9.** Task 13's `visible()` filter: every rung's candidate filter requires a non-zero box, no `aria-hidden`, no `display:none` ancestor |
+| `DuplicateLabel` | Rung 1's *"exactly one"* and rung 3's anchor — a legacy column under the same label, before the real one, in the same format and with the same classes | Rung 1 must fail on two matches; rung 3 must refuse an ambiguous anchor rather than take the first |
+| `ValueSwap` | Everything structural **and** everything textual — `Amount` and `Reserve` exchange values row-wise, markup untouched | Only `RowKeyContinuity` (Task 22) sees it. This is the class that proves the third family earns its place |
+| `LocaleFlip` | `1,234.56` → `1.234,56`, table and detail page. Passes `FormatAssertion` if the pattern is loose | `DomainAssertion` range check, and the currency-sanity rule brief §5 asks for |
+| `VirtualisedRows` | The served HTML keeps all 50 rows; an inline script leaves 10 in the browser's DOM | The row-count contract (Task 29), not the resolver |
+| `ImageHeader` | Rung 4's header verification when the header is `<img alt="Amount">` — empty `textContent` | Header verification must read accessible text, not `textContent` |
 
 **Sequencing corrected 2026-09-26.** The first text had this task assert `isinstance(result,
 QuarantinedRun)` — but `QuarantinedRun` and `gate()` do not exist until Tasks 20–25, so those tests
-could not run where this task sits. This task now proves each mutation's **markup property** (the
-attack is really present in the served DOM); the **refusal** of each class, naming the verdict that
-refused it, moves to Task 26's adversarial suite, which runs after the gate exists.
+could not run where this task sits. This task proves each class's **markup property** — the attack is
+really present in the served page — and nothing here imports `selector_drift`. The **refusal** of each
+class, naming the verdict that refused it, is Task 26's adversarial suite.
 
-- [ ] **Step 1: Write the failing tests** — one per class, asserting the markup property the table above names: `HiddenDecoy` adds an element with `aria-label="Claim Number"` that has `aria-hidden="true"` or a `display:none` ancestor; `DuplicateLabel` yields exactly two header cells whose text is `Claim Number`; `ValueSwap` leaves markup identical while each row's `Amount` and `Reserve` values are exchanged (bench spec §4); `LocaleFlip` rewrites every currency value to `1.234,56` form; `VirtualisedRows` adds exactly one inline script and leaves all rows in the served HTML; `ImageHeader` replaces the `Amount` header text with `<img alt="Amount">`. Every test renders its "before" with `testbench.portal.data.render_results(day)` (Task 7).
+**Why a new test file.** Task 11's `test_adversarial.py` stays as it is; extending it would mean
+merging two import blocks by hand. `test_adversarial_set.py` holds the six classes' tests.
 
-- [ ] **Step 2: Run them and watch them fail.** Run: `uv run pytest tests/testbench/test_adversarial.py -v`
+**Why the whole schedule is tested once (Task 8).** Task 8's truth-marker test applies each class
+alone. The schedule composes them — `TableToDiv` then `ColumnReorder` then `HiddenDecoy` — and a
+class that misreads another's output breaks the answer key only in composition.
+`test_scheduled_days.py` runs 120 real days through `mutations_for` and holds the key to Task 8's
+rule on every one, and checks every registered class is drawn within a year. Both pass as soon as
+the classes are registered; they are guards against the next class that is not written this carefully.
 
-- [ ] **Step 3: Implement the six transforms.**
+**Why each hostile page is still honest markup.** `HiddenDecoy` and `DuplicateLabel` build their
+decoys from `grid.clone()` or from scratch, so no decoy ever carries `data-sd-truth`; `ValueSwap`
+changes text only — `skeleton(after) == skeleton(before)`; `VirtualisedRows` injects the only script
+any bench page carries — exactly the amendment's text, and only on pages that have rows — and leaves
+every row in the served HTML, which is why Task 8's served-equals-tested test compares browser DOMs.
 
-- [ ] **Step 4: Run the fast check.** Expected: PASS. Every adversarial class refused, each by a named verdict.
+- [ ] **Step 1: Add the `skeleton` helper**
 
-- [ ] **Step 5: Commit**
+Append to `tests/testbench/helpers.py` (it already imports `parse` and `serialise`, Task 8):
+
+```python
+def skeleton(html: str) -> str:
+    """The page with every text node removed: what is left is markup alone (Task 11A)."""
+    doc = parse(html)
+    for node in doc.iter():
+        node.text = None
+        node.tail = None
+    return serialise(doc)
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```python
+# tests/testbench/test_adversarial_set.py
+"""Task 11A: each adversarial class really puts its attack in the served markup.
+
+These tests prove the MARKUP property only. Whether the gate refuses each class -- and by which
+verdict -- is Task 26's adversarial suite, which runs once gate() and QuarantinedRun exist.
+"""
+
+from __future__ import annotations
+
+import random
+
+import lxml.html
+import pytest
+
+from testbench.mutations.adversarial.duplicate_label import DuplicateLabel
+from testbench.mutations.adversarial.hidden_decoy import VARIANTS, HiddenDecoy
+from testbench.mutations.adversarial.image_header import ImageHeader
+from testbench.mutations.adversarial.locale_flip import LocaleFlip, flip
+from testbench.mutations.adversarial.value_swap import ValueSwap
+from testbench.mutations.adversarial.virtualised_rows import SCRIPT, VirtualisedRows
+from testbench.mutations.base import CatalogueEntry, MutationBase, parse, serialise
+from testbench.mutations.catalogue import CATALOGUE
+from testbench.mutations.column_reorder import ColumnReorder
+from testbench.mutations.dom_restructure import DomRestructure
+from testbench.mutations.label_reword import LabelReword
+from testbench.mutations.table_to_div import TableToDiv
+from testbench.portal.data import COLUMNS, dataset_for
+from testbench.portal.render import PAGE_SIZE, render_detail, render_login, render_results
+from tests.testbench.helpers import (
+    CLAIM_NUMBER,
+    FIXTURE_DAY,
+    cells,
+    column,
+    headers,
+    is_plausible_amount,
+    root,
+    rows,
+    skeleton,
+)
+
+LABELS = [label for _, label in COLUMNS]
+BEFORE = render_results(FIXTURE_DAY)
+REAL_NUMBERS = column(BEFORE, "Claim Number")
+
+
+def _is_hidden(el: lxml.html.HtmlElement) -> bool:
+    for node in (el, *el.iterancestors()):
+        style = (node.get("style") or "").replace(" ", "")
+        if node.get("aria-hidden") == "true" or "display:none" in style:
+            return True
+    return False
+
+
+def _table_column(html: str, position: int) -> list[str]:
+    """Read the real <table> by position, ignoring any decoy grid a mutation added."""
+    return [td.text_content() for td in root(html).xpath(f"//table//tbody/tr/td[{position}]")]
+
+
+# --- HiddenDecoy: rung 2's "right name, wrong element" (H9) --------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_hidden_decoy_adds_hidden_well_formed_claim_numbers_ahead_of_the_real_ones(
+    variant: str,
+) -> None:
+    after = HiddenDecoy(variant=variant).apply(BEFORE)
+    doc = root(after)
+    decoys = doc.xpath('//*[@aria-label="Claim Number"]')
+    assert len(decoys) == PAGE_SIZE
+    assert all(_is_hidden(d) for d in decoys)
+    values = [d.text for d in decoys]
+    assert all(CLAIM_NUMBER.fullmatch(v) for v in values)
+    assert not set(values) & set(REAL_NUMBERS)
+    order = list(doc.iter())
+    assert order.index(decoys[0]) < order.index(doc.xpath("//table")[0])  # first in the DOM
+    assert _table_column(after, 1) == REAL_NUMBERS
+
+
+@pytest.mark.unit
+def test_hidden_decoy_draws_its_variant_and_numbers_from_the_rng() -> None:
+    drawn = [HiddenDecoy.from_rng(random.Random(seed)) for seed in range(12)]
+    assert {m.variant for m in drawn} == set(VARIANTS)
+    assert len({m.offset for m in drawn}) == len(drawn)
+
+
+@pytest.mark.unit
+def test_hidden_decoy_still_targets_a_reworded_header() -> None:
+    """After LabelReword the visible header says "Claim No."; the decoy keeps the clean run's
+    anchor text, which is exactly what a cached anchor would look for."""
+    doc = root(HiddenDecoy().apply(LabelReword().apply(BEFORE)))
+    assert len(doc.xpath('//*[@aria-label="Claim Number"]')) == PAGE_SIZE
+
+
+# --- DuplicateLabel: rung 1's "exactly one" and rung 3's anchor ----------------------------
+
+
+@pytest.mark.unit
+def test_duplicate_label_yields_exactly_two_claim_number_headers() -> None:
+    after = DuplicateLabel().apply(BEFORE)
+    assert headers(after).count("Claim Number") == 2
+    assert headers(after)[:2] == ["Claim Number", "Claim Number"]
+    legacy, real = [r[0] for r in rows(after)], [r[1] for r in rows(after)]
+    assert real == REAL_NUMBERS
+    assert all(CLAIM_NUMBER.fullmatch(v) for v in legacy)
+    assert all(a != b for a, b in zip(legacy, real, strict=True))
+
+
+@pytest.mark.unit
+def test_duplicate_label_makes_the_old_class_selector_ambiguous() -> None:
+    doc = root(DuplicateLabel().apply(BEFORE))
+    first_row = doc.xpath("//tbody/tr[1]")[0]
+    assert len(first_row.xpath('./td[@class="col-claim_number"]')) == 2
+
+
+@pytest.mark.unit
+def test_duplicate_label_copies_the_label_it_finds() -> None:
+    after = DuplicateLabel().apply(LabelReword().apply(BEFORE))
+    assert headers(after).count("Claim No.") == 2 and "Claim Number" not in headers(after)
+
+
+@pytest.mark.unit
+def test_the_legacy_column_never_carries_the_truth_marker() -> None:
+    doc = root(DuplicateLabel().apply(render_results(FIXTURE_DAY, mark_truth=True)))
+    marked = doc.xpath('//*[@data-sd-truth="claim_number"]')
+    assert len(marked) == PAGE_SIZE
+    assert [el.text_content() for el in marked] == REAL_NUMBERS
+
+
+# --- ValueSwap: invisible to every structural and textual check -----------------------------
+
+
+@pytest.mark.unit
+def test_value_swap_is_invisible_to_cross_field_checks() -> None:
+    """Bench spec §6.3. Every swapped value is still a plausible amount in a plausible column,
+    the markup skeleton is identical, and Task 7 proved no footing rule relates the two
+    columns -- so nothing but RowKeyContinuity (Task 22) can see it. Task 26 proves the gate
+    half."""
+    after = ValueSwap().apply(BEFORE)
+    assert column(after, "Amount") == column(BEFORE, "Reserve")
+    assert column(after, "Reserve") == column(BEFORE, "Amount")
+    assert all(is_plausible_amount(v) for v in column(after, "Amount") + column(after, "Reserve"))
+    assert skeleton(after) == skeleton(BEFORE)
+
+
+@pytest.mark.unit
+def test_value_swap_touches_no_other_column_and_is_its_own_inverse() -> None:
+    after = ValueSwap().apply(BEFORE)
+    for label in ("Claim Number", "Claimant", "Status", "Filed"):
+        assert column(after, label) == column(BEFORE, label)
+    assert ValueSwap().apply(after) == serialise(parse(BEFORE))
+
+
+@pytest.mark.unit
+def test_value_swap_follows_the_columns_through_a_reorder() -> None:
+    reordered = ColumnReorder().apply(BEFORE)
+    after = ValueSwap().apply(reordered)
+    assert column(after, "Amount") == column(BEFORE, "Reserve")
+    assert skeleton(after) == skeleton(reordered)
+
+
+# --- LocaleFlip: 1,234.56 -> 1.234,56 ------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_locale_flip_rewrites_every_currency_value() -> None:
+    after = LocaleFlip().apply(BEFORE)
+    for label in ("Amount", "Reserve"):
+        assert column(after, label) == [flip(v) for v in column(BEFORE, label)]
+        assert not any(is_plausible_amount(v) for v in column(after, label))
+    for label in ("Claim Number", "Claimant", "Status", "Filed"):
+        assert column(after, label) == column(BEFORE, label)
+    assert flip("198,178.68") == "198.178,68" and flip("193.45") == "193,45"
+
+
+@pytest.mark.unit
+def test_locale_flip_rewrites_the_detail_page_and_is_idempotent() -> None:
+    claim = dataset_for(FIXTURE_DAY)[0]
+    detail = render_detail(FIXTURE_DAY, claim.claim_number)
+    assert detail is not None
+    after = LocaleFlip().apply(detail)
+    values = [dd.text_content() for dd in root(after).xpath("//dl/dd")]
+    assert values[LABELS.index("Amount")] == flip(f"{claim.amount:,.2f}")
+    assert values[LABELS.index("Reserve")] == flip(f"{claim.reserve:,.2f}")
+    assert LocaleFlip().apply(after) == after
+
+
+# --- VirtualisedRows: the only script, all rows still served --------------------------------
+
+
+@pytest.mark.unit
+def test_virtualised_rows_adds_one_inline_script_and_keeps_every_served_row() -> None:
+    after = VirtualisedRows().apply(BEFORE)
+    doc = root(after)
+    scripts = doc.xpath("//script")
+    assert len(scripts) == 1
+    body = doc.xpath("//body")[0]
+    assert body[-1] is scripts[0] and scripts[0].text == SCRIPT
+    assert scripts[0].get("src") is None
+    assert f"<script>{SCRIPT}</script>" in after  # serialised verbatim
+    assert len(rows(after)) == PAGE_SIZE and cells(after) == cells(BEFORE)
+
+
+@pytest.mark.unit
+def test_virtualised_rows_is_idempotent_and_leaves_pages_without_rows_alone() -> None:
+    once = VirtualisedRows().apply(BEFORE)
+    assert VirtualisedRows().apply(once) == once
+    assert "<script" not in VirtualisedRows().apply(render_login())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entry", CATALOGUE, ids=lambda e: e.name)
+def test_only_virtualised_rows_emits_a_script(entry: CatalogueEntry) -> None:
+    out = entry.build(random.Random(0)).apply(BEFORE)
+    assert ("<script" in out) is (entry.name == "VirtualisedRows")
+
+
+# --- ImageHeader: the header is an image of its label ---------------------------------------
+
+
+@pytest.mark.unit
+def test_image_header_replaces_the_amount_header_text_with_an_image() -> None:
+    after = ImageHeader().apply(BEFORE)
+    doc = root(after)
+    th = doc.xpath("//th")[LABELS.index("Amount")]
+    assert th.text_content() == ""
+    assert [(img.get("alt"), img.get("src")) for img in th.xpath("./img")] == [("Amount", None)]
+    assert headers(after) == headers(BEFORE)  # accessible text is unchanged
+    assert rows(after) == rows(BEFORE)
+    others = [h.text_content() for h in doc.xpath("//th")]
+    assert others == [label if label != "Amount" else "" for label in LABELS]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "first", [DomRestructure(), TableToDiv(), LabelReword()], ids=lambda m: m.name
+)
+def test_image_header_follows_the_header_through_benign_changes(first: MutationBase) -> None:
+    before = first.apply(BEFORE)
+    after = ImageHeader().apply(before)
+    assert headers(after) == headers(before)
+    alts = [img.get("alt") for img in root(after).xpath("//img")]
+    assert alts == [h for h in headers(before) if h in ("Amount", "Amount (USD)")]
+    assert ImageHeader().apply(after) == after
+```
+
+```python
+# tests/testbench/test_scheduled_days.py
+"""Every class composed the way the schedule composes them: one or two benign classes in a
+random order, then sometimes one adversarial class on top (Task 8)."""
+
+from __future__ import annotations
+
+import datetime as dt
+
+import pytest
+
+from testbench.answers.key import FIELDS
+from testbench.mutations.base import apply_all, parse, serialise
+from testbench.mutations.catalogue import CATALOGUE
+from testbench.portal.render import PAGE_SIZE, render_results
+from testbench.schedule import mutations_for, scheduled_names
+
+START = dt.date(2026, 9, 1)
+DAYS = [START + dt.timedelta(days=i) for i in range(120)]
+YEAR = [START + dt.timedelta(days=i) for i in range(365)]
+
+
+@pytest.mark.unit
+def test_every_class_is_scheduled_within_a_year() -> None:
+    seen = {name for day in YEAR for name in scheduled_names(day, "testbench")}
+    assert seen == {e.name for e in CATALOGUE}
+
+
+@pytest.mark.unit
+def test_every_scheduled_day_keeps_the_answer_key_intact() -> None:
+    """Task 8's attributes-only rule, for real schedules rather than one class at a time: the
+    marked twin keeps fifty true cells per field and differs from the served page by the marker
+    alone -- whichever classes the day drew, in whichever order."""
+    page, marked_page = render_results(START), render_results(START, mark_truth=True)
+    for day in DAYS:
+        chosen = mutations_for(day, "testbench")
+        marked = parse(apply_all(chosen, marked_page))
+        for field in FIELDS:
+            assert len(marked.xpath("//*[@data-sd-truth=$f]", f=field)) == PAGE_SIZE, (day, field)
+        for el in marked.xpath("//*[@data-sd-truth]"):
+            del el.attrib["data-sd-truth"]
+        assert serialise(marked) == serialise(parse(apply_all(chosen, page))), day
+```
+
+- [ ] **Step 3: Run them and watch them fail**
+
+Run: `uv run pytest tests/testbench/test_adversarial_set.py -v`
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'testbench.mutations.adversarial.duplicate_label'`.
+
+`test_scheduled_days.py` passes at this point (nine classes registered, each drawn within a year); it
+is a guard that must still pass once the six are registered.
+
+- [ ] **Step 4: Implement the six transforms**
+
+```python
+# testbench/mutations/adversarial/hidden_decoy.py
+"""HiddenDecoy: an invisible grid of well-formed claim numbers, labelled "Claim Number", placed
+ahead of the real table.
+
+The rung-2 attack (H9). Every decoy cell carries aria-label="Claim Number" and a value that
+passes the claim-number format assertion, and it comes first in document order. It is hidden
+either from assistive technology and the viewport (aria-hidden plus off-screen) or from
+rendering altogether (display:none), so only a resolver that filters candidates through
+visible() -- Task 13 -- refuses it.
+"""
+
+from __future__ import annotations
+
+import random
+import re
+from dataclasses import dataclass
+from typing import Self
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import data_cells, data_rows, grids, header_cells, header_row, text_of
+from testbench.mutations.vocabulary import LABELS, find_column
+
+VARIANTS = ("aria-hidden", "display-none")
+CLAIM_NUMBER = re.compile(r"([A-Z]{2})(\d{8})")
+DECOY_LABEL = LABELS["claim_number"]  # the clean run's anchor text, whatever today's is
+_CONTAINER: dict[str, dict[str, str]] = {
+    "aria-hidden": {
+        "class": "sr-cache",
+        "aria-hidden": "true",
+        "style": "position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden",
+    },
+    "display-none": {"class": "sr-cache", "style": "display:none"},
+}
+
+
+@dataclass(frozen=True, slots=True)
+class HiddenDecoy(MutationBase):
+    variant: str = "aria-hidden"
+    offset: int = 7_340_021  # added to each real number's digits, modulo 10**8
+
+    def __post_init__(self) -> None:
+        if self.variant not in VARIANTS:
+            raise ValueError(f"unknown variant {self.variant!r}")
+        if not 0 < self.offset < 10**8:
+            raise ValueError("offset must be in (0, 10**8) so no decoy equals its real number")
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        return cls(variant=rng.choice(VARIANTS), offset=rng.randrange(1, 10**8))
+
+    def decoy_number(self, real: str) -> str | None:
+        match = CLAIM_NUMBER.fullmatch(real)
+        if match is None:
+            return None
+        return f"{match.group(1)}{(int(match.group(2)) + self.offset) % 10**8:08d}"
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for grid in grids(doc):  # listed before any decoy grid exists
+            head = header_row(grid)
+            if head is None:
+                continue
+            header = header_cells(head)
+            index = find_column(header, "claim_number")
+            if index is None:
+                continue
+            numbers = [
+                self.decoy_number(text_of(cells[index]))
+                for row in data_rows(grid)
+                if len(cells := data_cells(row)) == len(header)
+            ]
+            container = grid.makeelement("div", dict(_CONTAINER[self.variant]))
+            decoy_grid = container.makeelement("div", {"role": "grid", "aria-label": "Claims"})
+            container.append(decoy_grid)
+            for number in numbers:
+                if number is None:
+                    continue
+                row = decoy_grid.makeelement("div", {"role": "row"})
+                cell = row.makeelement("span", {"role": "gridcell", "aria-label": DECOY_LABEL})
+                cell.text = number
+                row.append(cell)
+                decoy_grid.append(row)
+            grid.addprevious(container)
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/adversarial/duplicate_label.py
+"""DuplicateLabel: a second column with the claim-number header appears before the real one.
+
+The portal starts showing a legacy claim reference beside the new one, under the same label and
+in the same format. Rung 1's "exactly one element" and rung 3's label anchor both see two
+matches; a resolver that takes the first match reads the legacy numbers, every one of which
+passes the format assertion.
+"""
+
+from __future__ import annotations
+
+import random
+import re
+from dataclasses import dataclass
+from typing import Self
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import (
+    clone,
+    data_cells,
+    data_rows,
+    grids,
+    header_cells,
+    header_row,
+    set_text,
+    text_of,
+)
+from testbench.mutations.vocabulary import find_column
+
+CLAIM_NUMBER = re.compile(r"([A-Z]{2})(\d{8})")
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateLabel(MutationBase):
+    shift: int = 3  # letters rotated by this much; digits reversed
+
+    def __post_init__(self) -> None:
+        if not 0 < self.shift < 26:
+            raise ValueError("shift must be in (0, 26) so no legacy number equals its real one")
+
+    @classmethod
+    def from_rng(cls, rng: random.Random) -> Self:
+        return cls(shift=rng.randrange(1, 26))
+
+    def legacy_number(self, real: str) -> str:
+        match = CLAIM_NUMBER.fullmatch(real)
+        if match is None:
+            return real
+        letters = "".join(
+            chr((ord(c) - ord("A") + self.shift) % 26 + ord("A")) for c in match.group(1)
+        )
+        return letters + match.group(2)[::-1]
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for grid in grids(doc):
+            head = header_row(grid)
+            if head is None:
+                continue
+            header = header_cells(head)
+            index = find_column(header, "claim_number")
+            if index is None:
+                continue
+            header[index].addprevious(clone(header[index], id_suffix="-legacy"))
+            for row in data_rows(grid):
+                cells = data_cells(row)
+                if len(cells) != len(header):
+                    continue
+                real = cells[index]
+                legacy = clone(real, id_suffix="-legacy")
+                set_text(legacy, self.legacy_number(text_of(real)))
+                real.addprevious(legacy)
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/adversarial/value_swap.py
+"""ValueSwap: every row's Amount and Reserve values change places. The markup does not move.
+
+The attack on everything structural and everything textual at once: both columns keep their
+headers, cells, classes and paths, both hold plausible amounts, and no footing rule relates them
+(Task 7). A resolver heals to exactly the right node and reads the wrong number. Only
+RowKeyContinuity (Task 22) -- the same key, a different value, on nearly every row -- can see it.
+"""
+
+from __future__ import annotations
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import (
+    data_cells,
+    data_rows,
+    grids,
+    header_cells,
+    header_row,
+    set_text,
+    text_of,
+)
+from testbench.mutations.vocabulary import find_column
+
+
+class ValueSwap(MutationBase):
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for grid in grids(doc):
+            head = header_row(grid)
+            if head is None:
+                continue
+            header = header_cells(head)
+            amount, reserve = find_column(header, "amount"), find_column(header, "reserve")
+            if amount is None or reserve is None:
+                continue
+            for row in data_rows(grid):
+                cells = data_cells(row)
+                if len(cells) != len(header):
+                    continue
+                a, r = text_of(cells[amount]), text_of(cells[reserve])
+                set_text(cells[amount], r)
+                set_text(cells[reserve], a)
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/adversarial/locale_flip.py
+"""LocaleFlip: every currency value switches to German grouping -- 1,234.56 becomes 1.234,56.
+
+The portal's locale setting changes. The values are the same numbers, written so that a loose
+numeric pattern reads 1.234,56 as 1.234 and 193,45 as 19,345. The DomainAssertion's range
+check and brief §5's currency-sanity rule must catch it; the format assertion alone may not.
+"""
+
+from __future__ import annotations
+
+import re
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import data_cells, data_rows, elements, grids, set_text, text_of
+
+CURRENCY = re.compile(r"\d{1,3}(?:,\d{3})*\.\d{2}")
+
+
+def flip(value: str) -> str:
+    """1,234.56 -> 1.234,56. A value already flipped no longer matches CURRENCY."""
+    return value.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+
+
+class LocaleFlip(MutationBase):
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        cells = [c for grid in grids(doc) for row in data_rows(grid) for c in data_cells(row)]
+        for cell in (*cells, *elements(doc.xpath("//dl/dd"))):
+            text = text_of(cell)
+            if CURRENCY.fullmatch(text):
+                set_text(cell, flip(text))
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/adversarial/virtualised_rows.py
+"""VirtualisedRows: the grid becomes virtualised -- the browser keeps only the first ten rows.
+
+The one mutation that injects a script, and the only script any bench page ever carries (bench
+spec §5). The served HTML keeps every row; after DOMContentLoaded the browser's DOM holds ten.
+Every row the resolver sees is real and correctly placed, so no rung and no value check can
+object -- only the row-count contract (Task 29) notices that 50 rows became 10. It is also why
+the served-equals-tested test (Task 8) compares browser DOMs, not HTTP bodies.
+"""
+
+from __future__ import annotations
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import data_rows, elements, grids
+
+KEEP = 10
+SCRIPT = (
+    'document.addEventListener("DOMContentLoaded",function(){'
+    'var r=Array.prototype.filter.call(document.querySelectorAll("tr,[role=row]"),'
+    'function(x){return x.querySelector("td,[role=cell],[role=gridcell]")!==null});'
+    f"r.slice({KEEP}).forEach(function(x){{x.remove()}})}});"
+)
+
+
+class VirtualisedRows(MutationBase):
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        body = doc.find("body")
+        has_rows = any(data_rows(grid) for grid in grids(doc))
+        already = any(s.text == SCRIPT for s in elements(doc.xpath("//script")))
+        if body is None or not has_rows or already:
+            return serialise(doc)
+        script = body.makeelement("script", {})
+        script.text = SCRIPT
+        body.append(script)
+        return serialise(doc)
+```
+
+```python
+# testbench/mutations/adversarial/image_header.py
+"""ImageHeader: the Amount header is rendered as an image of its label.
+
+<th><img alt="Amount"></th>: a sighted user and a screen reader both read "Amount"; the header's
+textContent is empty. Rung 4's header verification must read accessible text, not textContent,
+or it cannot confirm the column -- and a resolver that falls back to the nearest header with
+text lands on the neighbour.
+"""
+
+from __future__ import annotations
+
+from testbench.mutations.base import MutationBase, parse, serialise
+from testbench.mutations.grid import grids, header_cells, header_row, innermost, text_of
+from testbench.mutations.vocabulary import find_column
+
+
+class ImageHeader(MutationBase):
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for grid in grids(doc):
+            head = header_row(grid)
+            if head is None:
+                continue
+            header = header_cells(head)
+            index = find_column(header, "amount")
+            if index is None:
+                continue
+            label = text_of(header[index])
+            holder = innermost(header[index])
+            for child in list(holder):
+                holder.remove(child)
+            holder.text = None
+            holder.append(holder.makeelement("img", {"alt": label}))
+        return serialise(doc)
+```
+
+- [ ] **Step 5: Register them — the final catalogue**
+
+```python
+# testbench/mutations/catalogue.py
+"""Every mutation class the schedule may draw from. Tasks 9-11A append their classes here.
+
+Adding a class changes which mutations every future AND past day draws, so a day's DOM is
+reproducible from (date, commit), not from the date alone. The seed tag on each stored snapshot
+records what was actually applied.
+"""
+
+from __future__ import annotations
+
+from testbench.mutations.adversarial.decoy_column import DecoyColumn
+from testbench.mutations.adversarial.duplicate_label import DuplicateLabel
+from testbench.mutations.adversarial.hidden_decoy import HiddenDecoy
+from testbench.mutations.adversarial.image_header import ImageHeader
+from testbench.mutations.adversarial.locale_flip import LocaleFlip
+from testbench.mutations.adversarial.value_swap import ValueSwap
+from testbench.mutations.adversarial.virtualised_rows import VirtualisedRows
+from testbench.mutations.base import CatalogueEntry, entry
+from testbench.mutations.class_rename import ClassRename
+from testbench.mutations.column_reorder import ColumnReorder
+from testbench.mutations.dom_restructure import DomRestructure
+from testbench.mutations.framework_markup import FrameworkMarkup
+from testbench.mutations.id_churn import IdChurn
+from testbench.mutations.label_reword import LabelReword
+from testbench.mutations.pagination import Pagination
+from testbench.mutations.table_to_div import TableToDiv
+
+CATALOGUE: tuple[CatalogueEntry, ...] = (
+    *(
+        entry(c, adversarial=False)
+        for c in (
+            ClassRename,
+            DomRestructure,
+            ColumnReorder,
+            TableToDiv,
+            LabelReword,
+            IdChurn,
+            FrameworkMarkup,
+            Pagination,
+        )
+    ),
+    *(
+        entry(c, adversarial=True)
+        for c in (
+            DecoyColumn,
+            HiddenDecoy,
+            DuplicateLabel,
+            ValueSwap,
+            LocaleFlip,
+            VirtualisedRows,
+            ImageHeader,
+        )
+    ),
+)
+```
+
+- [ ] **Step 6: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/testbench/test_adversarial_set.py tests/testbench/test_scheduled_days.py -v`
+Expected: PASS — 36 tests (`test_adversarial_set.py` 34, of which 15 are `test_only_virtualised_rows_emits_a_script`; `test_scheduled_days.py` 2).
+
+Run: `uv run pytest tests/testbench -m unit -q`
+Expected: PASS — 260: Task 11's 182, plus 36, plus 36 new contract cases (6 rules × 6 classes), plus 6 new cases of `test_the_truth_marker_changes_attributes_only`. Nothing here asserts a refusal: that is Task 26.
+
+Run: `uv run pytest tests/testbench -m e2e -v`
+Expected: PASS — Task 8's `FIXED_DAYS` now includes the first day from 2026-09-01 that schedules `VirtualisedRows`, and the browser's post-script DOM equals the engine's.
+
+Run: `uv run ruff check testbench tests/testbench && uv run ruff format --check testbench/mutations tests/testbench && uv run mypy --strict testbench && uv run lint-imports`
+Expected: clean; every contract kept (nothing under `testbench/mutations` imports `selector_drift`).
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add testbench/mutations/adversarial tests/testbench/test_adversarial.py
+git add testbench/mutations/adversarial/hidden_decoy.py testbench/mutations/adversarial/duplicate_label.py testbench/mutations/adversarial/value_swap.py testbench/mutations/adversarial/locale_flip.py testbench/mutations/adversarial/virtualised_rows.py testbench/mutations/adversarial/image_header.py testbench/mutations/catalogue.py tests/testbench/helpers.py tests/testbench/test_adversarial_set.py tests/testbench/test_scheduled_days.py
 git commit -m "feat(testbench): six further adversarial mutation classes"
 ```
 
@@ -4499,21 +9137,33 @@ git push
 
 ---
 
-### Task 13: The `Rung` protocol, the trace, and the runner
+### Task 13: The `PageSource`, the `Rung` protocol, the trace, and the runner
 
 **Files:**
-- Create: `selector_drift/resolve/page.py` — **the `PageSource` protocol (R9)**
-- Create: `selector_drift/resolve/rungs/base.py`, `selector_drift/resolve/trace.py`, `selector_drift/resolve/cascade.py`
-- Test: `tests/resolve/test_cascade.py`, `tests/resolve/test_page_source_parity.py`
+- Create: `selector_drift/resolve/aria.py` — role and accessible-name computation, shared by both sources
+- Create: `selector_drift/resolve/page.py` — **the `PageSource` protocol (R9)**, `AxNode`, `NODE_ATTR`, `ParsedPage`, `StaticPageSource`
+- Create: `selector_drift/resolve/trace.py` — `Family`, `AnchorEvidence`, `ResolvedElement`, `Miss`, `RungAttempt`, `CascadeTrace`, `Rung`, `DiagnosableRung`
+- Create: `selector_drift/resolve/cache.py` — **read side only, and at this task only** `CachedSelector`, `CacheReader`, `NO_CACHE` (`SelectorCache` lands in Task 17)
+- Create: `selector_drift/resolve/escalation.py` — `EscalateToHuman` (the runner raises it from this task on; Task 18 is its second raiser)
+- Create: `selector_drift/resolve/recording.py` — the one `resolutions` writer (C4)
+- Create: `selector_drift/resolve/cascade.py` — `resolve_cascade`, `REGISTERED_RUNGS` (empty until Task 14), `parse_run_key`
+- Create: `selector_drift/resolve/rungs/base.py` — re-exports `Rung`; `RungBase`, `css_path`, `text_of`, `unique`
+- Create: `selector_drift/browser/page_source.py` — `LivePageSource`
+- Modify: `selector_drift/browser/driver.py` — `PageHandle.raw`
+- Modify: `pyproject.toml` — `cssselect` (runtime), `lxml-stubs` (dev)
+- Test: `tests/__init__.py` and `tests/resolve/__init__.py` (empty; test modules import `tests.resolve.conftest`), `tests/resolve/conftest.py`, `tests/resolve/test_page.py`, `tests/resolve/test_cascade.py`, `tests/resolve/test_recording.py`, `tests/resolve/test_page_source_parity.py`
 
 **Interfaces:**
-- Consumes: `FieldTarget` (Task 5). **Not `browser/`** — see below.
+- Consumes: `FieldTarget`, `Relation`, `load_spec` (Task 5); `Resolution`, `Run`, `Session` (Task 3); `PageHandle` (Task 4). Tests only: `render_results` (`testbench.portal.render`, Task 7), `CATALOGUE`, `apply_all` (Tasks 8–11A), `FIXTURE_DAY` (`tests.testbench.helpers`). **Not `browser/` from anywhere under `resolve/`.**
 - Produces:
-  - `PageSource` protocol in `resolve/page.py` — `dom() -> str`, `ax() -> AxNode`, `query(selector) -> list[Node]`, `node_id(node) -> str`, `visible(node) -> bool`. Two implementations: `LivePageSource` in `browser/` (Playwright) and `StaticPageSource` in `resolve/` (parsed DOM + a computed role/accessible-name mapping)
-  - `Family` — `StrEnum` with `TEXT_SEMANTIC`, `STRUCTURAL`, **`VALUE`**, `NONE`
-  - `Rung` protocol — `rung_id: int`, `family: Family`, `resolve(page: PageSource, target: FieldTarget) -> ResolvedElement | None`
-  - `AnchorEvidence(accessible_name: str | None, label_text: str | None, header_text: str | None)`
-  - `ResolvedElement(selector: str, node_id: str, anchor: AnchorEvidence, rung_id: int)`
+  - `resolve/page.py`: `NODE_ATTR = "data-sd-node"`; `AxNode(role, name, node_id, children)` with `.walk()`; `PageSource` protocol — the five pinned names `dom() -> str`, `ax() -> AxNode`, `query(selector) -> list[HtmlElement]`, `node_id(node) -> str`, `visible(node) -> bool`, plus four read-only additions every rung needs: `node(node_id) -> HtmlElement | None`, `root() -> HtmlElement`, `role(node) -> str | None`, `name(node) -> str`; `ParsedPage` (shared base); `StaticPageSource(html)` — `node_id` is **exactly** `el.getroottree().getpath(el)`, and it has no `bbox()` (Task 19 asserts that)
+  - `resolve/trace.py`: `Family(StrEnum)` = `TEXT_SEMANTIC`/`STRUCTURAL`/`VALUE`/`NONE`, values upper-case names; `AnchorEvidence(accessible_name, label_text, header_text)` (frozen Pydantic, all `str | None = None`); `ResolvedElement(selector, node_id, anchor, rung_id)`; `AttemptOutcome` (the six literals); `Miss(outcome, detail)`; `RungAttempt(rung, family, outcome, ms)` with `.as_json()`; `CascadeTrace(attempts, winner, resolution_id=None)` with `.healed` (`winner != 1`) and `.as_json()`; `Rung` protocol (`rung_id`, `family`, `resolve(page, target) -> ResolvedElement | None`); `DiagnosableRung` (adds `attempt(page, target) -> ResolvedElement | Miss`)
+  - `resolve/cache.py`: `CachedSelector(selector, anchor, set_by_rung)`, `CacheReader` protocol `get(target, field, spec_version=None)`, `NO_CACHE`
+  - `resolve/escalation.py`: `EscalateToHuman(reason, *, trace=None, case=None)`
+  - `resolve/recording.py`: `ResolutionRecorder` protocol, `record_resolution(*, run_key, portal, target, trace, node_id, ms) -> int`
+  - `resolve/cascade.py`: `resolve_cascade(page, target, cache, *, record=True, run_key=None, recorder=record_resolution) -> tuple[ResolvedElement, CascadeTrace]`; `REGISTERED_RUNGS: list[Rung]`; `CacheBound` and `Escalator` protocols; `parse_run_key(run_key) -> tuple[str, int]`
+  - `resolve/rungs/base.py`: `Rung` (re-export), `RungBase`, `css_path(el)`, `text_of(el)`, `unique(els)`
+  - `browser/page_source.py`: `LivePageSource`, built by `await LivePageSource.snapshot(page: PageHandle)` (or `from_playwright(page)` in tests); `node_id` is the injected `data-sd-node`; `.browser_ax` holds Chromium's own ARIA snapshot
 
 **`PageSource` replaces `PageHandle` in every rung signature, and it is not a refactor for tidiness —
 three separate things in the plan were unsatisfiable without it (R9/C6, P1, H9).**
@@ -4523,184 +9173,2420 @@ three separate things in the plan were unsatisfiable without it (R9/C6, P1, H9).
    **indirect** imports by default, so `heallog → resolve → browser` breaks the contract the moment
    Task 19 lands — and even suppressed, rung 2 cannot build an accessibility tree from a string
    without a browser. With `PageSource`, `replay()` constructs a `StaticPageSource` and the contract
-   holds because it is true.
+   holds because it is true. The arrow now runs `browser → resolve` (`LivePageSource` subclasses
+   `ParsedPage`), which no contract forbids.
 2. **It is design §6's best idea, made real:** *"the mutation regression suite and the replay path are
    the same code."* A mutation test becomes "build a `StaticPageSource` from this mutated fixture,
-   assert this rung and this verdict set" — with no browser, which is what moves the whole `unit`
+   assert this rung and this verdict set" — with no browser, which is what keeps the whole `unit`
    tier under a minute (M26).
-3. **Snapshot once, resolve many (P1).** As originally drafted every rung call is one or more CDP
-   round-trips, so five fields × four rungs × N rows is hundreds of round-trips per run, doubled again
-   by `IndependentRungAgreement` on every heal. `LivePageSource` captures the DOM and the AX tree
-   **once** per page and every rung then runs in-process.
+3. **Snapshot once, resolve many (P1).** As first drafted every rung call was one or more CDP
+   round-trips — five fields × four rungs × N rows, doubled again by `IndependentRungAgreement` on
+   every heal. `LivePageSource.snapshot()` stamps `data-sd-node` on every element, asks the browser
+   what is rendered and what has a box, and reads `outerHTML`, all in **one** `evaluate()`; it then
+   reads the accessibility tree **once**. Every rung then runs in-process.
 
-`visible(node)` on the protocol is what closes H9: a hidden or off-screen element carrying
-`aria-label="Claim Number"` currently resolves ahead of the real one at rung 2, and every value it
-yields can satisfy the format assertion. **Every rung filters candidates through `visible()` before
-returning.**
-  - `RungAttempt(rung_id: int, ok: bool, reason: str, ms: int)`
-  - `CascadeTrace(attempts: list[RungAttempt], winner: int | None)` with property `.healed: bool` — **`True` when `winner != 1`**. Task 20's asymmetry reads exactly this property.
-  - `resolve_cascade(page: PageSource, target, cache) -> tuple[ResolvedElement, CascadeTrace]` — writes one `resolutions` row per call, win or lose (R5/C4), which is what gives `rung_stats()` a denominator
-  - `node_id` is minted by the `PageSource`, **never derived from the selector (R10/C5)**. Live: inject a `data-sd-node` attribute and read it back. Static: the element's absolute XPath in the parsed tree, **exactly `el.getroottree().getpath(el)` from `lxml`** — pinned 2026-09-26 so the bench's answer key (`expected_xpaths`, Task 8), which uses the same call, is directly comparable with no selector-string step. Task 22 compares `node_id`; comparing `selector` strings would be wrong in both directions — `#claim` and `td:nth-child(1)` routinely name the same node, and the same selector string can be produced against different snapshots
-  - `REGISTERED_RUNGS: list[Rung]` — populated as Tasks 14–18 land; Task 41 asserts its ids are `[1,2,3,4,5]`
+**One role/name computation, two sources — so parity is by construction where it can be, and
+tested where it cannot (R9).** Both sources parse the DOM with `lxml.html.fromstring` and compute
+role and accessible name with the same `aria.py` (the ARIA 1.2 / HTML-AAM / accname subset a portal
+uses: tables and role grids, `th` scope, `<label for>`, `aria-label`, `aria-labelledby`, `img alt`,
+`caption`). They differ in exactly two things: **identity** (lxml path vs injected id) and
+**visibility** (inferred from markup and inline/`<style>` CSS vs computed by the browser). Visibility
+is the one fact a static parse can get wrong, so `test_page_source_parity.py` checks it against
+Chromium element by element, checks our header names against Chromium's own ARIA snapshot, and — as
+Tasks 14–16 register rungs — checks every rung resolves the same cell on both sources for every
+mutation class. The first draft's `LivePageSource.from_html(bench_html)` did not exist; the test now
+serves the page through a real browser with `set_content`.
+
+**`visible(node)` closes H9, and the runner enforces it too.** A hidden or off-screen element carrying
+`aria-label="Claim Number"` resolves ahead of the real one at rung 2, and every value it yields can
+satisfy the format assertion. The precondition is design §5.1's — no `aria-hidden`, no `display:none`
+(or `hidden`, or `visibility:hidden`) on the node or an ancestor, a box bigger than 1×1 px, on the
+page. Every rung filters its candidates through it (Tasks 14–18), **and `resolve_cascade` refuses any
+`ResolvedElement` whose node is not visible**, recording `not_visible`, so a rung that forgets cannot
+win.
+
+**`node_id` is minted by the `PageSource`, never derived from the selector (R10/C5).** Static: exactly
+`el.getroottree().getpath(el)` from `lxml` — pinned 2026-09-26 so the bench's answer key
+(`expected_xpaths`, Task 8) and Task 27's `locate()`, which use the same call on the same parser, are
+directly comparable. Live: the injected `data-sd-node` value (`n0`, `n1`, …), which stays on the live
+page so Task 19's `LiveCapture` masks and measures the same nodes. Task 22 compares `node_id`;
+comparing selector strings is wrong in both directions — `#claim` and `td:nth-child(1)` routinely name
+the same node, and one selector string can name different nodes on different snapshots.
+
+**Folded in from the 2026-09-26 amendments, so each name has exactly one home.**
+- The vocabulary (`Family`, `AnchorEvidence`, `ResolvedElement`, `RungAttempt`, `CascadeTrace`,
+  `Rung`) lives in `resolve/trace.py`, **not** `resolve/rungs/`: `validate/` must reach it and
+  `judge-reaches-rungs-only-by-protocol` forbids `validate → resolve.rungs`; Task 34's
+  `api-is-read-side` permits `api → resolve.trace` (which imports only `resolve.page`,
+  `resolve.aria` and `spec`). `rungs/base.py` re-exports `Rung` for the concrete rungs.
+- `RungAttempt(rung, family, outcome, ms)` is the frozen shape `resolutions.attempts` and
+  `heal_events.trace` store and `RungAttemptView` publishes. The first draft's
+  `RungAttempt(rung_id, ok, reason, ms)` is gone: it carried neither a family nor a closed outcome.
+  **A rung never writes `resolutions`**; it returns an element or a `Miss(outcome, detail)` and the
+  runner builds the attempt.
+- `Family` values are their upper-case names — what `heal_events.confirmer_family` stores.
+- `resolve_cascade(..., *, record=True)`: `record=False` is replay (Task 19) and the suites — no
+  `resolutions` row and **rung 5 never runs**, so neither the published denominator (C4) nor the
+  escalation corpus grows on a replay.
+- `CascadeTrace.resolution_id` (Task 26A's amendment) is set here, by the runner, from the row it
+  wrote; `None` on replay. `heal_events.resolution_id` is its FK.
+
+**Two additions over the amendments, each because something downstream could not work without it.**
+- **`run_key=` on `resolve_cascade`.** `resolutions.run_key` is a FK and `selector_cache` is keyed by
+  `(target, field, spec_version)`; nothing else tells the runner either. The runner parses Task 6's
+  `f"{target}:{spec_version}:{window}"` once and binds rung 1 to that portal and version (M14).
+  `record=True` without a `run_key` raises rather than writing an orphan row. **Task 26A Step 3's
+  call becomes `resolve_cascade(page, t, reader, run_key=key)`.**
+- **The runner raises `EscalateToHuman` itself when no rung wins, with the trace attached**, after
+  writing the row — so a loss is counted (C4), replay's `NotReproducible` (Task 19) has something to
+  catch, and the pipeline can quarantine with the attempts that were tried.
+
+- [ ] **Step 0: Add the two dependencies this task introduces**
+
+```bash
+uv add cssselect
+uv add --dev lxml-stubs
+```
+
+`PageSource.query()` takes CSS, and `lxml`'s `cssselect()` imports the separate `cssselect`
+package at call time — without it every CSS query raises `ImportError`. `lxml` ships no type
+information, so `mypy --strict` rejects every `lxml` import (`import-untyped`) until `lxml-stubs` is
+installed; Tasks 19, 27 and 33 import `lxml` too, and this is the first task that does.
 
 - [ ] **Step 1: Write the failing tests**
 
+```bash
+touch tests/__init__.py tests/resolve/__init__.py
+```
+
+```python
+# tests/resolve/conftest.py
+"""The bench page, unmutated and under one mutation class, with its answer key alongside.
+
+`marked` is the same page rendered with data-sd-truth on every true cell (Task 7), put through
+the same mutation instance -- Task 8's technique -- so `truth()` lists lxml paths that are
+directly comparable with a StaticPageSource node_id.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+from lxml import html as lh
+
+from selector_drift.resolve.page import StaticPageSource
+from selector_drift.spec.loader import load_spec
+from testbench.mutations.base import apply_all
+from testbench.mutations.catalogue import CATALOGUE
+from testbench.portal.render import render_results
+from tests.testbench.helpers import FIXTURE_DAY
+
+SPEC = load_spec(Path("specs/testbench.yaml"))  # version 2 (Task 12 Step 0): six fields
+CLAIM_NUMBER = next(t for t in SPEC.targets if t.name == "claim_number")
+AMOUNT = next(t for t in SPEC.targets if t.name == "amount")
+RESERVE = next(t for t in SPEC.targets if t.name == "reserve")
+RUN_KEY = "testbench:2:2026-10-01"
+
+
+@dataclass(frozen=True)
+class BenchPage:
+    html: str
+    marked: str
+
+    def source(self) -> StaticPageSource:
+        return StaticPageSource(self.html)
+
+    def truth(self, field: str) -> list[str]:
+        root = lh.fromstring(self.marked)
+        tree = root.getroottree()
+        return [tree.getpath(e) for e in root.xpath("//*[@data-sd-truth=$f]", f=field)]
+
+    def mutated(self, name: str) -> BenchPage:
+        entry = next(e for e in CATALOGUE if e.name == name)
+        mutation = entry.build(random.Random(0))
+        return BenchPage(apply_all([mutation], self.html), apply_all([mutation], self.marked))
+
+
+@pytest.fixture
+def bench() -> BenchPage:
+    return BenchPage(render_results(FIXTURE_DAY), render_results(FIXTURE_DAY, mark_truth=True))
+```
+
+```python
+# tests/resolve/test_page.py
+from __future__ import annotations
+
+import pytest
+
+from selector_drift.resolve.page import StaticPageSource
+from tests.resolve.conftest import BenchPage
+
+SEMANTICS = """<!doctype html><html><head><title>Fixture</title><style>
+.gone { display: none }
+.away { position: absolute; left: -10000px }
+@media print { .results { display: none } }
+</style></head><body>
+<table id="t"><caption>Claims</caption>
+<thead><tr><th>Claim Number</th><th><img alt="Amount" src="a.png"></th></tr></thead>
+<tbody><tr><th scope="row">Row One</th><td>AB12345678</td></tr></tbody></table>
+<div role="table"><div role="row"><div role="columnheader" id="st">Status</div></div></div>
+<label for="q">Search claims</label><input id="q">
+<span id="lbl">Filed on</span><input id="f" aria-labelledby="lbl">
+<button id="b" aria-label="Close"><img alt="x" src="x.png"></button>
+<img id="deco" alt="" src="d.png">
+<p data-probe="plain">plain</p>
+<p data-probe="attr" hidden>hidden attribute</p>
+<div class="gone"><p data-probe="sheet">styled away</p></div>
+<div aria-hidden="true"><p data-probe="aria">aria hidden</p></div>
+<p data-probe="inline" style="display:none">inline none</p>
+<p style="visibility:hidden"><span data-probe="vis">invisible</span>
+  <span data-probe="revis" style="visibility:visible">visible again</span></p>
+<p data-probe="away" class="away">off screen</p>
+<p data-probe="sronly" style="position:absolute;width:1px;height:1px;overflow:hidden;
+  clip:rect(0,0,0,0)">screen reader only</p>
+<input data-probe="csrf" type="hidden" name="csrf" value="x">
+</body></html>"""
+
+
+@pytest.fixture
+def page() -> StaticPageSource:
+    return StaticPageSource(SEMANTICS)
+
+
+@pytest.mark.unit
+def test_node_id_is_exactly_lxmls_getpath(bench: BenchPage) -> None:
+    """Pinned 2026-09-26: comparable with the answer key and Task 27's locate() as-is."""
+    page = bench.source()
+    el = page.query("tbody > tr:nth-of-type(1) > td:nth-of-type(1)")[0]
+    assert page.node_id(el) == el.getroottree().getpath(el) == bench.truth("claim_number")[0]
+
+
+@pytest.mark.unit
+def test_node_id_is_not_derived_from_the_selector(bench: BenchPage) -> None:
+    """C5. Two selectors naming the same node must yield the same node_id."""
+    page = bench.source()
+    a = page.query("#results td")[0]
+    b = page.query("//table[@id='results']/tbody/tr[1]/td[1]")[0]
+    assert page.node_id(a) == page.node_id(b)
+
+
+@pytest.mark.unit
+def test_a_node_id_round_trips_to_the_same_element(bench: BenchPage) -> None:
+    page = bench.source()
+    el = page.query("tbody td")[3]
+    assert page.node(page.node_id(el)) is el
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", ["//*", "n1", "/html/body/../..", "td"])
+def test_node_accepts_only_a_path_it_could_have_minted(bench: BenchPage, bad: str) -> None:
+    assert bench.source().node(bad) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", ["td[", "//td[", "td:hover-ish("])
+def test_a_broken_selector_matches_nothing_rather_than_raising(
+    page: StaticPageSource, bad: str
+) -> None:
+    assert page.query(bad) == []
+
+
+@pytest.mark.unit
+def test_an_empty_dom_is_refused() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        StaticPageSource("  ")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("selector", "role", "name"),
+    [
+        ("#t", "table", "Claims"),
+        ("thead th:nth-of-type(1)", "columnheader", "Claim Number"),
+        ("thead th:nth-of-type(2)", "columnheader", "Amount"),  # ImageHeader: alt text
+        ("tbody th", "rowheader", "Row One"),
+        ("tbody td", "cell", "AB12345678"),
+        ("#st", "columnheader", "Status"),  # TableToDiv's roles
+        ("#q", "textbox", "Search claims"),  # <label for>
+        ("#f", "textbox", "Filed on"),  # aria-labelledby
+        ("#b", "button", "Close"),  # aria-label beats content
+    ],
+)
+def test_roles_and_accessible_names(
+    page: StaticPageSource, selector: str, role: str, name: str
+) -> None:
+    el = page.query(selector)[0]
+    assert page.role(el) == role
+    assert page.name(el) == name
+
+
+@pytest.mark.unit
+def test_an_image_with_empty_alt_is_presentational(page: StaticPageSource) -> None:
+    assert page.role(page.query("#deco")[0]) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("probe", "visible"),
+    [
+        ("plain", True),
+        ("attr", False),
+        ("sheet", False),
+        ("aria", False),
+        ("inline", False),
+        ("vis", False),
+        ("revis", True),
+        ("away", False),
+        ("sronly", False),
+        ("csrf", False),
+    ],
+)
+def test_visibility_is_the_h9_precondition(
+    page: StaticPageSource, probe: str, visible: bool
+) -> None:
+    """H9: rendered, not aria-hidden, a real box, on the page."""
+    el = page.query(f'[data-probe="{probe}"]')[0]
+    assert page.visible(el) is visible
+
+
+@pytest.mark.unit
+def test_a_media_query_is_not_applied_statically(bench: BenchPage) -> None:
+    html = bench.html.replace(
+        "</head>", "<style>@media print { table { display: none } }</style></head>"
+    )
+    page = StaticPageSource(html)
+    assert page.visible(page.query("#results")[0])
+
+
+@pytest.mark.unit
+def test_the_ax_tree_excludes_what_is_hidden_and_keeps_what_is_named(
+    page: StaticPageSource,
+) -> None:
+    nodes = list(page.ax().walk())
+    assert ("columnheader", "Claim Number") in {(n.role, n.name) for n in nodes}
+    assert not any("aria hidden" in n.name or "styled away" in n.name for n in nodes)
+    assert all(page.node(n.node_id) is not None for n in nodes)
+```
+
 ```python
 # tests/resolve/test_cascade.py
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
+
+from selector_drift.resolve import cascade
+from selector_drift.resolve.cache import NO_CACHE
+from selector_drift.resolve.cascade import parse_run_key, resolve_cascade
+from selector_drift.resolve.escalation import EscalateToHuman
+from selector_drift.resolve.page import PageSource, StaticPageSource
+from selector_drift.resolve.trace import (
+    AnchorEvidence,
+    CascadeTrace,
+    Family,
+    Miss,
+    ResolvedElement,
+    Rung,
+    RungAttempt,
+)
+from selector_drift.spec.schema import FieldTarget
+from tests.resolve.conftest import CLAIM_NUMBER, RUN_KEY
+
+PAGE = """<html><body><table>
+<tr><th>Claim Number</th></tr>
+<tr><td id="real">AB12345678</td></tr>
+<tr><td id="ghost" style="display:none">ZZ00000000</td></tr>
+</table></body></html>"""
+
+
+@dataclass
+class FakeRung:
+    rung_id: int
+    family: Family
+    answer: str | None  # a CSS selector this rung "resolves" to, or None
+    calls: list[int] = field(default_factory=list)
+
+    def resolve(self, page: PageSource, target: FieldTarget) -> ResolvedElement | None:
+        self.calls.append(self.rung_id)
+        if self.answer is None:
+            return None
+        el = page.query(self.answer)[0]
+        return ResolvedElement(
+            selector=self.answer,
+            node_id=page.node_id(el),
+            anchor=AnchorEvidence(accessible_name="Claim Number"),
+            rung_id=self.rung_id,
+        )
+
+
+@dataclass
+class DecliningRung(FakeRung):
+    def attempt(self, page: PageSource, target: FieldTarget) -> ResolvedElement | Miss:
+        self.calls.append(self.rung_id)
+        return Miss("ambiguous", "two candidates")
+
+
+@dataclass
+class EscalatingRung(FakeRung):
+    def escalate(
+        self,
+        page: PageSource,
+        target: FieldTarget,
+        *,
+        run_key: str | None,
+        attempts: tuple[RungAttempt, ...],
+    ) -> ResolvedElement:
+        self.calls.append(self.rung_id)
+        raise EscalateToHuman("escalated", case=Path("case.json"))
+
+
+@dataclass
+class SpyRecorder:
+    rows: list[CascadeTrace] = field(default_factory=list)
+
+    def __call__(
+        self,
+        *,
+        run_key: str,
+        portal: str,
+        target: FieldTarget,
+        trace: CascadeTrace,
+        node_id: str | None,
+        ms: int,
+    ) -> int:
+        assert (run_key, portal) == (RUN_KEY, "testbench")
+        self.rows.append(trace)
+        return 41 + len(self.rows)
+
+
+@pytest.fixture
+def use(monkeypatch: pytest.MonkeyPatch) -> Callable[..., list[Rung]]:
+    def install(*rungs: Rung) -> list[Rung]:
+        monkeypatch.setattr(cascade, "REGISTERED_RUNGS", list(rungs))
+        return list(rungs)
+
+    return install
+
+
+@pytest.fixture
+def page() -> StaticPageSource:
+    return StaticPageSource(PAGE)
+
+
+@pytest.mark.unit
+def test_cascade_tries_rungs_in_order_and_records_every_attempt(use, page) -> None:
+    use(FakeRung(1, Family.NONE, None), FakeRung(2, Family.TEXT_SEMANTIC, "#real"))
+    el, trace = resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, record=False)
+    assert [(a.rung, a.family, a.outcome) for a in trace.attempts] == [
+        (1, Family.NONE, "no_match"),
+        (2, Family.TEXT_SEMANTIC, "resolved"),
+    ]
+    assert trace.winner == 2 and el.rung_id == 2
+
+
+@pytest.mark.unit
+def test_the_first_winner_stops_the_cascade(use, page) -> None:
+    _first, second = use(
+        FakeRung(2, Family.TEXT_SEMANTIC, "#real"), FakeRung(3, Family.TEXT_SEMANTIC, "#real")
+    )
+    resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, record=False)
+    assert isinstance(second, FakeRung) and second.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("winner", "healed"), [(1, False), (2, True), (4, True)])
+def test_healed_is_false_only_on_a_rung_one_win(use, page, winner: int, healed: bool) -> None:
+    use(FakeRung(winner, Family.NONE, "#real"))
+    _, trace = resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, record=False)
+    assert trace.winner == winner and trace.healed is healed
+
+
+@pytest.mark.unit
+def test_every_attempt_is_timed_in_whole_milliseconds(use, page) -> None:
+    use(FakeRung(1, Family.NONE, None), FakeRung(2, Family.TEXT_SEMANTIC, "#real"))
+    _, trace = resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, record=False)
+    assert all(isinstance(a.ms, int) and a.ms >= 0 for a in trace.attempts)
+
+
+@pytest.mark.unit
+def test_a_rungs_reason_for_declining_is_recorded(use, page) -> None:
+    use(DecliningRung(3, Family.TEXT_SEMANTIC, None), FakeRung(4, Family.STRUCTURAL, "#real"))
+    _, trace = resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, record=False)
+    assert trace.attempts[0].outcome == "ambiguous"
+
+
+@pytest.mark.unit
+def test_a_hidden_element_is_never_accepted_whatever_the_rung_says(use, page) -> None:
+    """H9, enforced by the runner as well as by every rung."""
+    use(FakeRung(2, Family.TEXT_SEMANTIC, "#ghost"), FakeRung(4, Family.STRUCTURAL, "#real"))
+    el, trace = resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, record=False)
+    assert trace.attempts[0].outcome == "not_visible"
+    assert page.visible(page.query("#real")[0]) and el.node_id == page.node_id(
+        page.query("#real")[0]
+    )
+
+
+@pytest.mark.unit
+def test_no_winner_escalates_and_carries_the_trace(use, page) -> None:
+    use(FakeRung(2, Family.TEXT_SEMANTIC, None))
+    with pytest.raises(EscalateToHuman) as caught:
+        resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, record=False)
+    assert caught.value.trace is not None and caught.value.trace.winner is None
+
+
+@pytest.mark.unit
+def test_replay_writes_nothing_and_never_runs_rung_five(use, page) -> None:
+    """Task 19: record=False is replay and the suites -- not the published denominator."""
+    spy = SpyRecorder()
+    _, _, five = use(
+        FakeRung(2, Family.TEXT_SEMANTIC, None),
+        FakeRung(4, Family.STRUCTURAL, None),
+        EscalatingRung(5, Family.NONE, None),
+    )
+    with pytest.raises(EscalateToHuman):
+        resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, record=False, recorder=spy)
+    assert spy.rows == [] and isinstance(five, FakeRung) and five.calls == []
+
+
+@pytest.mark.unit
+def test_a_scheduled_resolution_is_recorded_once_on_a_win(use, page) -> None:
+    spy = SpyRecorder()
+    use(FakeRung(2, Family.TEXT_SEMANTIC, "#real"))
+    _, trace = resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, run_key=RUN_KEY, recorder=spy)
+    assert len(spy.rows) == 1 and trace.resolution_id == 42
+
+
+@pytest.mark.unit
+def test_a_scheduled_resolution_is_recorded_once_on_an_escalation(use, page) -> None:
+    """C4: the denominator counts the losses too."""
+    spy = SpyRecorder()
+    use(FakeRung(2, Family.TEXT_SEMANTIC, None), EscalatingRung(5, Family.NONE, None))
+    with pytest.raises(EscalateToHuman) as caught:
+        resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, run_key=RUN_KEY, recorder=spy)
+    assert len(spy.rows) == 1 and spy.rows[0].winner is None
+    trace = caught.value.trace
+    assert trace is not None and trace.resolution_id == 42
+    assert trace.attempts[-1].outcome == "escalated" and caught.value.case == Path("case.json")
+
+
+@pytest.mark.unit
+def test_a_scheduled_resolution_without_a_run_key_is_refused(use, page) -> None:
+    use(FakeRung(2, Family.TEXT_SEMANTIC, "#real"))
+    with pytest.raises(ValueError, match="run_key"):
+        resolve_cascade(page, CLAIM_NUMBER, NO_CACHE)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", ["testbench", "testbench:v2:2026-10-01", ":2:2026-10-01"])
+def test_a_malformed_run_key_is_refused(bad: str) -> None:
+    with pytest.raises(ValueError):
+        parse_run_key(bad)
+
+
+@pytest.mark.unit
+def test_an_attempt_serialises_to_the_frozen_shape() -> None:
+    """resolutions.attempts and heal_events.trace are published via RungAttemptView."""
+    assert RungAttempt(2, Family.TEXT_SEMANTIC, "resolved", 3).as_json() == {
+        "rung": 2,
+        "family": "TEXT_SEMANTIC",
+        "outcome": "resolved",
+        "ms": 3,
+    }
+
+
+@pytest.mark.unit
+def test_registered_rungs_run_cheapest_first() -> None:
+    ids = [r.rung_id for r in cascade.REGISTERED_RUNGS]
+    assert ids == sorted(set(ids))
+```
+
+```python
+# tests/resolve/test_recording.py
+"""C4 against the real table. Postgres, so integration."""
+
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Iterator
+
+import pytest
+from sqlalchemy import delete, func, select
+
+from selector_drift.db.models import Resolution, Run
+from selector_drift.db.session import Session
+from selector_drift.resolve import cascade
+from selector_drift.resolve.cache import NO_CACHE
 from selector_drift.resolve.cascade import resolve_cascade
+from selector_drift.resolve.escalation import EscalateToHuman
+from selector_drift.resolve.page import StaticPageSource
+from selector_drift.resolve.trace import Family
+from tests.resolve.conftest import CLAIM_NUMBER
+from tests.resolve.test_cascade import PAGE, FakeRung
 
-def test_cascade_tries_rungs_in_order_and_records_every_attempt(fake_page):
-    el, trace = resolve_cascade(fake_page, TARGET, EmptyCache())
-    assert [a.rung_id for a in trace.attempts] == [1, 2]
-    assert trace.winner == 2
-    assert trace.attempts[0].reason
+RUN_KEY = "testbench:2:1999-01-01"  # a window no scheduled run will ever have
 
-def test_healed_is_false_only_on_a_rung_one_win(fake_page_cache_hit):
-    _, trace = resolve_cascade(fake_page_cache_hit, TARGET, WarmCache())
-    assert trace.winner == 1 and trace.healed is False
 
-def test_every_attempt_is_timed(fake_page):
-    _, trace = resolve_cascade(fake_page, TARGET, EmptyCache())
-    assert all(a.ms >= 0 for a in trace.attempts)
+@pytest.fixture
+def run_row() -> Iterator[str]:
+    def clear() -> None:
+        with Session() as s:
+            s.execute(delete(Resolution).where(Resolution.run_key == RUN_KEY))
+            s.execute(delete(Run).where(Run.run_key == RUN_KEY))
+            s.commit()
 
-def test_every_resolution_is_recorded_win_or_lose(fake_page, session):
+    clear()
+    with Session() as s:
+        s.add(
+            Run(
+                run_key=RUN_KEY,
+                target="testbench",
+                spec_version=2,
+                window=dt.date(1999, 1, 1),
+                first_started_at=dt.datetime.now(dt.UTC),
+                state="completed",
+            )
+        )
+        s.commit()
+    yield RUN_KEY
+    clear()
+
+
+@pytest.mark.integration
+def test_every_resolution_is_recorded_win_or_lose(run_row: str, monkeypatch) -> None:
     """C4. rung_stats() is a published claim and needs a denominator, not just heals."""
-    resolve_cascade(fake_page, TARGET, EmptyCache())
-    assert session.query(Resolution).count() == 1
+    page = StaticPageSource(PAGE)
+    monkeypatch.setattr(cascade, "REGISTERED_RUNGS", [FakeRung(2, Family.TEXT_SEMANTIC, "#real")])
+    _, won = resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, run_key=run_row)
+    monkeypatch.setattr(cascade, "REGISTERED_RUNGS", [FakeRung(2, Family.TEXT_SEMANTIC, None)])
+    with pytest.raises(EscalateToHuman):
+        resolve_cascade(page, CLAIM_NUMBER, NO_CACHE, run_key=run_row)
+    with Session() as s:
+        rows = s.scalars(
+            select(Resolution).where(Resolution.run_key == run_row).order_by(Resolution.id)
+        ).all()
+        assert [r.winning_rung for r in rows] == [2, None]
+        assert rows[0].id == won.resolution_id
+        assert rows[0].target == "testbench" and rows[0].field == "claim_number"
+        assert rows[0].attempts == [
+            {
+                "rung": 2,
+                "family": "TEXT_SEMANTIC",
+                "outcome": "resolved",
+                "ms": rows[0].attempts[0]["ms"],
+            }
+        ]
+        assert rows[1].node_id is None
 
-def test_a_hidden_element_is_never_a_candidate(bench_page):
-    """H9. A hidden node carrying the right accessible name resolves ahead of the real
-    one and every value it yields satisfies the format assertion."""
-    page = bench_page.mutated(HiddenDecoy())
-    el, _ = resolve_cascade(page, CLAIM_NUMBER, EmptyCache())
-    assert page.visible(page.node(el.node_id))
 
-def test_node_id_is_not_derived_from_the_selector(bench_page):
-    """C5. Two selectors naming the same node must yield the same node_id."""
-    a = bench_page.resolve_by("#claim-number"); b = bench_page.resolve_by("td:nth-child(1)")
-    assert a.node_id == b.node_id and a.selector != b.selector
+@pytest.mark.integration
+def test_replay_adds_nothing_to_the_denominator(run_row: str, monkeypatch) -> None:
+    monkeypatch.setattr(cascade, "REGISTERED_RUNGS", [FakeRung(2, Family.TEXT_SEMANTIC, "#real")])
+    count = select(func.count()).select_from(Resolution)
+    with Session() as s:
+        before = s.scalar(count)
+    resolve_cascade(StaticPageSource(PAGE), CLAIM_NUMBER, NO_CACHE, record=False)
+    with Session() as s:
+        assert s.scalar(count) == before
 ```
 
 ```python
 # tests/resolve/test_page_source_parity.py
-@pytest.mark.parametrize("rung", REGISTERED_RUNGS)
-def test_live_and_static_sources_resolve_identically(rung, bench_html):
-    """R9. If the two implementations disagree, replay is theatre and every mutation
-    test is testing something the log never saw."""
-    live = LivePageSource.from_html(bench_html)
-    static = StaticPageSource(bench_html)
-    assert rung.resolve(live, CLAIM_NUMBER).node_id == rung.resolve(static, CLAIM_NUMBER).node_id
+"""R9. If the two PageSources disagree, replay is theatre and every mutation test is testing
+something the log never saw. Browser-backed, so e2e; the unit tier never needs a browser."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from lxml.html import HtmlElement
+from playwright.async_api import async_playwright
+
+from selector_drift.browser.page_source import LivePageSource
+from selector_drift.resolve.cascade import REGISTERED_RUNGS
+from selector_drift.resolve.page import PageSource, StaticPageSource
+from selector_drift.resolve.trace import ResolvedElement
+from tests.resolve.conftest import AMOUNT, CLAIM_NUMBER, BenchPage
+from tests.resolve.test_page import SEMANTICS
+
+PAGES = [
+    "ClassRename",
+    "DomRestructure",
+    "ColumnReorder",
+    "TableToDiv",
+    "LabelReword",
+    "IdChurn",
+    "FrameworkMarkup",
+    "Pagination",
+    "DecoyColumn",
+    "HiddenDecoy",
+    "DuplicateLabel",
+    "ImageHeader",
+]
+
+
+async def _live(html: str) -> LivePageSource:
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1280, "height": 900})
+        await page.set_content(html)
+        source = await LivePageSource.from_playwright(page)
+        await browser.close()
+        return source
+
+
+def _identity(page: PageSource, el: ResolvedElement | None) -> tuple[str, str] | None:
+    """Node ids differ by construction (getpath vs data-sd-node); what must agree is WHICH
+    cell: its truth mark and its text."""
+    if el is None:
+        return None
+    node = page.node(el.node_id)
+    assert isinstance(node, HtmlElement)
+    return node.get("data-sd-truth") or "", " ".join(node.text_content().split())
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("name", ["unmutated", *PAGES])
+def test_live_and_static_sources_resolve_identically(name: str, bench: BenchPage) -> None:
+    page = bench if name == "unmutated" else bench.mutated(name)
+    live, static = asyncio.run(_live(page.marked)), StaticPageSource(page.marked)
+    for rung in [r for r in REGISTERED_RUNGS if r.rung_id in (2, 3, 4)]:
+        for field in (CLAIM_NUMBER, AMOUNT):
+            assert _identity(live, rung.resolve(live, field)) == _identity(
+                static, rung.resolve(static, field)
+            ), (name, rung.rung_id, field.name)
+
+
+@pytest.mark.e2e
+def test_visibility_agrees_with_the_browser() -> None:
+    live, static = asyncio.run(_live(SEMANTICS)), StaticPageSource(SEMANTICS)
+    for probe in static.query("[data-probe]"):
+        [twin] = live.query(f'[data-probe="{probe.get("data-probe")}"]')
+        assert live.visible(twin) is static.visible(probe), probe.get("data-probe")
+
+
+@pytest.mark.e2e
+def test_our_header_names_are_chromiums(bench: BenchPage) -> None:
+    """The computed names are ours (aria.py); this checks them against Chromium's tree."""
+    live = asyncio.run(_live(bench.html))
+    for node in live.ax().walk():
+        if node.role == "columnheader":
+            assert f'columnheader "{node.name}"' in live.browser_ax, node.name
 ```
+
+**What changed from the first draft's tests, and why.** They called fixtures nothing defined
+(`fake_page`, `fake_page_cache_hit`, `bench_page`, `session`, `EmptyCache`, `WarmCache`, `TARGET`), so
+none could run. `test_a_hidden_element_is_never_a_candidate` needs a rung and moves to Task 14; the
+runner's own H9 guarantee is tested here with a fake rung. `test_node_id_is_not_derived_from_the_selector`
+called a `bench_page.resolve_by()` that no task defined; it now queries the real bench page with two
+different selectors. `test_every_resolution_is_recorded_win_or_lose` asserted `count() == 1` on a
+shared table; it now counts its own run's rows, in a Postgres test (`integration`), win **and** loss.
+The parity test called `LivePageSource.from_html`, which cannot exist (a live source needs a browser);
+it now serves the page through Chromium. The 13 parametrised cases of
+`test_live_and_static_sources_resolve_identically` pass vacuously here — `REGISTERED_RUNGS` is empty
+until Task 14 — and become real one rung at a time.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/resolve -v`
-Expected: FAIL — `ModuleNotFoundError: selector_drift.resolve.cascade`.
+Run: `uv run pytest tests/resolve -m unit -v`
+Expected: FAIL — collection error in `tests/resolve/conftest.py`: `ModuleNotFoundError: No module named 'selector_drift.resolve.page'`.
 
-- [ ] **Step 3: Implement the protocol, trace and runner.** The runner iterates `REGISTERED_RUNGS`, timing each, recording a `RungAttempt` for every one including failures, and stops at the first non-`None`.
+- [ ] **Step 3: Implement role and name computation, and the two page sources**
 
-- [ ] **Step 4: Run the tests and make sure they pass**
+```python
+# selector_drift/resolve/aria.py
+"""Role and accessible-name computation over a parsed DOM.
 
-Run: `uv run pytest tests/resolve -v && uv run mypy --strict selector_drift/resolve`
-Expected: PASS, 3 tests. mypy clean.
+One implementation serves both PageSources (R9): StaticPageSource runs it over a stored
+snapshot, LivePageSource over the live page's serialised DOM, so the two cannot disagree
+about a name. Agreement with Chromium's own accessibility tree is checked in e2e
+(tests/resolve/test_page_source_parity.py), not assumed.
 
-- [ ] **Step 5: Commit**
+Scope: the subset of ARIA 1.2 / HTML-AAM / accname 1.2 a data portal uses -- tables and
+grids, headers, form labels, aria-label, aria-labelledby, img alt, caption, legend. Not
+implemented, deliberately: CSS generated content, shadow DOM, aria-owns, and embedded-control
+values inside a name. A page that needs them fails to resolve and escalates; it never guesses.
+"""
 
-```bash
-git add selector_drift/resolve tests/resolve
-git commit -m "feat(resolve): Rung protocol, cascade trace, instrumented runner"
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+
+from lxml.html import HtmlElement
+
+
+def _words(spec: str) -> frozenset[str]:
+    return frozenset(spec.split())
+
+
+def _pairs(spec: str) -> dict[str, str]:
+    return {k: v for k, _, v in (p.partition("=") for p in spec.split())}
+
+
+KNOWN_ROLES = _words(
+    "alert article banner button caption cell checkbox columnheader combobox complementary "
+    "contentinfo definition dialog document figure form grid gridcell group heading img link "
+    "list listbox listitem main menu menuitem meter navigation option paragraph progressbar "
+    "radio region row rowgroup rowheader searchbox separator slider spinbutton status switch "
+    "tab table tablist tabpanel term textbox tree treegrid treeitem"
+)
+NAME_FROM_CONTENT = _words(
+    "button cell checkbox columnheader gridcell heading link menuitem option radio row "
+    "rowheader switch tab term treeitem"
+)
+CELL_ROLES = frozenset({"cell", "gridcell", "columnheader", "rowheader"})
+DATA_CELL_ROLES = frozenset({"cell", "gridcell"})
+TABLE_ROLES = frozenset({"table", "grid", "treegrid"})
+NON_RENDERED = _words("head script style template noscript meta link title base")
+_INLINE = _words(
+    "a abbr b bdi bdo cite code data dfn em i img kbd label mark q s samp small span strong "
+    "sub sup time u var"
+)
+
+
+# HTML-AAM implicit roles, for the tags whose role does not depend on context.
+_SIMPLE = _pairs(
+    "article=article aside=complementary button=button caption=caption dd=definition "
+    "details=group dialog=dialog dt=term fieldset=group figure=figure form=form h1=heading "
+    "h2=heading h3=heading h4=heading h5=heading h6=heading hr=separator li=listitem main=main "
+    "menu=list meter=meter nav=navigation ol=list option=option output=status p=paragraph "
+    "progress=progressbar table=table tbody=rowgroup textarea=textbox tfoot=rowgroup "
+    "thead=rowgroup tr=row ul=list"
+)
+_INPUT = _pairs(
+    "button=button checkbox=checkbox email=textbox image=button number=spinbutton radio=radio "
+    "range=slider reset=button search=searchbox submit=button tel=textbox text=textbox "
+    "url=textbox password=textbox"
+)
+_SECTIONING = frozenset({"article", "aside", "main", "nav", "section"})
+
+Hidden = Callable[[HtmlElement], bool]
+
+
+def tag_of(el: HtmlElement) -> str:
+    tag = el.tag
+    return tag.lower() if isinstance(tag, str) else ""
+
+
+def element_children(el: HtmlElement) -> list[HtmlElement]:
+    return [c for c in el if isinstance(c, HtmlElement) and isinstance(c.tag, str)]
+
+
+def parent_of(el: HtmlElement) -> HtmlElement | None:
+    parent = el.getparent()
+    return parent if isinstance(parent, HtmlElement) else None
+
+
+def ancestors(el: HtmlElement) -> list[HtmlElement]:
+    out: list[HtmlElement] = []
+    node = parent_of(el)
+    while node is not None:
+        out.append(node)
+        node = parent_of(node)
+    return out
+
+
+def role_of(el: HtmlElement) -> str | None:
+    for token in (el.get("role") or "").split():
+        t = token.casefold()
+        if t in ("presentation", "none"):
+            return None
+        if t in KNOWN_ROLES:
+            return t
+    return _implicit_role(el)
+
+
+def _implicit_role(el: HtmlElement) -> str | None:
+    tag = tag_of(el)
+    if tag == "td":
+        return "gridcell" if _table_role(el) in ("grid", "treegrid") else "cell"
+    if tag == "th":
+        return _th_role(el)
+    if tag in ("a", "area"):
+        return "link" if el.get("href") is not None else None
+    if tag == "input":
+        return _INPUT.get((el.get("type") or "text").casefold())
+    if tag == "select":
+        size = el.get("size") or "1"
+        multi = el.get("multiple") is not None or (size.isdigit() and int(size) > 1)
+        return "listbox" if multi else "combobox"
+    if tag == "img":
+        return None if el.get("alt") == "" else "img"
+    if tag in ("header", "footer"):
+        if any(tag_of(a) in _SECTIONING for a in ancestors(el)):
+            return None
+        return "banner" if tag == "header" else "contentinfo"
+    if tag == "section":
+        named = el.get("aria-label") or el.get("aria-labelledby")
+        return "region" if named else None
+    return _SIMPLE.get(tag)
+
+
+def _table_role(el: HtmlElement) -> str | None:
+    for a in ancestors(el):
+        if tag_of(a) == "table" or (a.get("role") or "").casefold() in TABLE_ROLES:
+            return role_of(a)
+    return None
+
+
+def _th_role(th: HtmlElement) -> str:
+    scope = (th.get("scope") or "").casefold()
+    if scope in ("row", "rowgroup"):
+        return "rowheader"
+    if scope in ("col", "colgroup"):
+        return "columnheader"
+    row = parent_of(th)
+    if row is None or tag_of(row) != "tr":
+        return "columnheader"
+    group = parent_of(row)
+    if group is not None and tag_of(group) == "thead":
+        return "columnheader"
+    cells = [c for c in element_children(row) if tag_of(c) in ("td", "th")]
+    return "columnheader" if all(tag_of(c) == "th" for c in cells) else "rowheader"
+
+
+@dataclass(frozen=True)
+class NameContext:
+    hidden: Hidden  # excluded from the AX tree
+    by_id: Mapping[str, HtmlElement]
+    labels_for: Mapping[str, Sequence[HtmlElement]]  # id -> <label for=id> elements
+
+
+def accessible_name(el: HtmlElement, ctx: NameContext) -> str:
+    return " ".join(_text_alt(el, ctx, frozenset(), referenced=False, recursing=False).split())
+
+
+def _text_alt(
+    el: HtmlElement,
+    ctx: NameContext,
+    seen: frozenset[HtmlElement],
+    *,
+    referenced: bool,
+    recursing: bool,
+) -> str:
+    if el in seen:
+        return ""
+    seen = seen | {el}
+    if ctx.hidden(el) and not referenced:
+        return ""
+    if not referenced:
+        refs = [ctx.by_id[i] for i in (el.get("aria-labelledby") or "").split() if i in ctx.by_id]
+        if refs:
+            joined = " ".join(
+                _text_alt(r, ctx, seen, referenced=True, recursing=True) for r in refs
+            )
+            if joined.strip():
+                return joined
+    label = (el.get("aria-label") or "").strip()
+    if label:
+        return label
+    native = _native(el, ctx, seen, referenced)
+    if native is not None and native.strip():
+        return native
+    if recursing or role_of(el) in NAME_FROM_CONTENT:
+        content = _from_content(el, ctx, seen, referenced)
+        if content.strip():
+            return content
+    title = (el.get("title") or "").strip()
+    if title:
+        return title
+    if tag_of(el) in ("input", "textarea"):
+        return (el.get("placeholder") or "").strip()
+    return ""
+
+
+def _native(
+    el: HtmlElement, ctx: NameContext, seen: frozenset[HtmlElement], referenced: bool
+) -> str | None:
+    tag = tag_of(el)
+    kind = (el.get("type") or "text").casefold()
+    if tag in ("img", "area") or (tag == "input" and kind == "image"):
+        alt = el.get("alt")
+        return None if alt is None else str(alt)
+    if tag == "input" and kind in ("button", "submit", "reset"):
+        default = {"submit": "Submit", "reset": "Reset"}.get(kind, "")
+        return str(el.get("value") or default)
+    if tag in ("input", "select", "textarea", "meter", "progress", "output"):
+        labels = list(ctx.labels_for.get(el.get("id") or "", ()))
+        labels += [a for a in ancestors(el) if tag_of(a) == "label"]
+        texts = [_from_content(lab, ctx, seen, referenced) for lab in labels]
+        return " ".join(t for t in texts if t.strip()) or None
+    wrapper = {"table": "caption", "fieldset": "legend", "figure": "figcaption"}.get(tag)
+    if wrapper is not None:
+        for child in element_children(el):
+            if tag_of(child) == wrapper:
+                return _from_content(child, ctx, seen, referenced)
+    return None
+
+
+def _from_content(
+    el: HtmlElement, ctx: NameContext, seen: frozenset[HtmlElement], referenced: bool
+) -> str:
+    parts = [el.text or ""]
+    for child in el:
+        if not isinstance(child, HtmlElement) or not isinstance(child.tag, str):
+            parts.append(child.tail or "")
+            continue
+        tag = tag_of(child)
+        if tag in NON_RENDERED:
+            parts.append(child.tail or "")
+            continue
+        sep = "" if tag in _INLINE else " "
+        if tag == "br":
+            sep = " "
+        sub = _text_alt(child, ctx, seen, referenced=referenced, recursing=True)
+        parts.append(f"{sep}{sub}{sep}")
+        parts.append(child.tail or "")
+    return "".join(parts)
 ```
 
-**Amendments of 2026-09-26 — names later tasks depend on, pinned so each has exactly one home.**
+```python
+# selector_drift/resolve/page.py
+"""What a rung reads: a page, snapshotted once (R9/C6, P1).
 
-- **`Family`, `AnchorEvidence`, `ResolvedElement`, `CascadeTrace`, `RungAttempt` and the `Rung`
-  protocol live in `selector_drift/resolve/trace.py`**, not in `resolve/rungs/` (`rungs/base.py`
-  re-exports `Rung` for the concrete rungs' convenience). `validate/` must reach them and the
-  `judge-reaches-rungs-only-by-protocol` contract forbids `validate → resolve.rungs`; the API's
-  `api-is-read-side` contract (Task 34) permits `api → resolve.trace` and nothing else under `resolve/`.
-- **`RungAttempt` has a fixed shape**, because `resolutions.attempts` is published through
-  `RungAttemptView` (API spec §4.3) and is frozen from day one:
+Rungs take a PageSource, never a browser handle. Two implementations share one parser and
+one role/name computation (aria.py) and differ in exactly two things -- how a node is
+identified and how visibility is decided:
 
-  ```python
-  # selector_drift/resolve/trace.py  (addition)
-  AttemptOutcome = Literal["resolved", "no_match", "ambiguous", "not_visible",
-                           "anchor_mismatch", "escalated"]
+- StaticPageSource (here): node_id is lxml's el.getroottree().getpath(el), exactly, so it
+  is directly comparable with the bench's answer key (Task 8) and Task 27's locate();
+  visibility is inferred from markup and inline / <style> CSS.
+- LivePageSource (browser/page_source.py): node_id is the injected data-sd-node value;
+  visibility is what the browser computed, in the same evaluate() that injected the ids.
+"""
 
-  @dataclass(frozen=True)
-  class RungAttempt:
-      rung: int
-      family: Family
-      outcome: AttemptOutcome
-      ms: int
+from __future__ import annotations
 
-      def as_json(self) -> dict[str, object]:     # exactly what resolutions.attempts stores
-          return {"rung": self.rung, "family": self.family.value,
-                  "outcome": self.outcome, "ms": self.ms}
-  ```
+import re
+from collections import defaultdict
+from collections.abc import Iterator
+from dataclasses import dataclass
+from typing import Protocol
 
-  The runner builds each `RungAttempt` from the rung's result; a rung never writes `resolutions`.
-- **`Family` values are their names, upper-case:** `Family(StrEnum)` with `TEXT_SEMANTIC =
-  "TEXT_SEMANTIC"`, `STRUCTURAL = "STRUCTURAL"`, `VALUE = "VALUE"`, `NONE = "NONE"`. The value is what
-  `resolutions.attempts` and `heal_events.confirmer_family` store, and the web's fixtures seed it.
-- **`resolve_cascade(page, target, cache, *, record: bool = True)`.** `record=False` is replay
-  (Task 19) and the mutation suites: no `resolutions` row, and rung 5 never runs. Without it every
-  replay and every suite run would add rows to the denominator of a published figure (C4).
-- **The static `node_id` is exactly lxml's `el.getroottree().getpath(el)`** (see the Produces bullet).
-- **`LivePageSource` lives in `selector_drift/browser/page_source.py` and is built by `await LivePageSource.snapshot(page: PageHandle)`**: it injects
-  `data-sd-node` on every element in one `evaluate()` call, then reads `outerHTML` and the
-  accessibility tree once. Its `node_id(node)` is that attribute's value. This is P1's snapshot-once,
-  named.
+import lxml.html
+from cssselect import SelectorError
+from lxml import etree
+from lxml.html import HtmlElement
+
+from selector_drift.resolve.aria import (
+    NON_RENDERED,
+    NameContext,
+    accessible_name,
+    ancestors,
+    element_children,
+    role_of,
+    tag_of,
+)
+
+NODE_ATTR = "data-sd-node"
+_STATIC_ID = re.compile(r"^(?:/[a-z][a-z0-9]*(?:\[\d+\])?)+$")
+_PX = re.compile(r"^(-?\d+(?:\.\d+)?)px$")
+_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+
+@dataclass(frozen=True)
+class AxNode:
+    """One node of the accessibility tree: a role, its computed name, the DOM node behind it."""
+
+    role: str
+    name: str
+    node_id: str
+    children: tuple[AxNode, ...] = ()
+
+    def walk(self) -> Iterator[AxNode]:
+        yield self
+        for child in self.children:
+            yield from child.walk()
+
+
+class PageSource(Protocol):
+    def dom(self) -> str: ...
+
+    def ax(self) -> AxNode: ...
+
+    def query(self, selector: str) -> list[HtmlElement]: ...
+
+    def node_id(self, node: HtmlElement) -> str: ...
+
+    def visible(self, node: HtmlElement) -> bool: ...
+
+    # Additions to the five names above, all read-only and all computed from the same snapshot.
+    def node(self, node_id: str) -> HtmlElement | None: ...
+
+    def root(self) -> HtmlElement: ...
+
+    def role(self, node: HtmlElement) -> str | None: ...
+
+    def name(self, node: HtmlElement) -> str: ...
+
+
+def _declarations(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in text.split(";"):
+        prop, sep, value = part.partition(":")
+        if sep:
+            out[prop.strip().casefold()] = value.replace("!important", "").strip().casefold()
+    return out
+
+
+def _style_rules(css: str) -> Iterator[tuple[str, dict[str, str]]]:
+    """Top-level rules of a stylesheet. @-blocks (media queries) are skipped, not guessed at."""
+    css = _COMMENT.sub("", css)
+    i, n = 0, len(css)
+    while i < n:
+        brace = css.find("{", i)
+        if brace < 0:
+            return
+        prelude = css[i:brace].strip()
+        depth, j = 1, brace + 1
+        while j < n and depth:
+            depth += {"{": 1, "}": -1}.get(css[j], 0)
+            j += 1
+        if not prelude.startswith("@"):
+            yield prelude, _declarations(css[brace + 1 : j - 1])
+        i = j
+
+
+def _px(value: str | None) -> float | None:
+    m = _PX.match(value or "")
+    return float(m.group(1)) if m else (0.0 if value == "0" else None)
+
+
+class ParsedPage:
+    """Everything both PageSources share. Subclasses decide identity and visibility."""
+
+    def __init__(self, html: str) -> None:
+        if not html.strip():
+            raise ValueError("a PageSource needs a DOM; got an empty string")
+        self._html = html
+        self._root: HtmlElement = lxml.html.fromstring(html)
+        self._by_id: dict[str, HtmlElement] = {}
+        labels: defaultdict[str, list[HtmlElement]] = defaultdict(list)
+        for el in self.elements():
+            ident = el.get("id")
+            if ident and ident not in self._by_id:
+                self._by_id[ident] = el
+            if tag_of(el) == "label" and el.get("for"):
+                labels[el.get("for") or ""].append(el)
+        self._names = NameContext(hidden=self.ax_hidden, by_id=self._by_id, labels_for=labels)
+        self._role_memo: dict[HtmlElement, str | None] = {}
+        self._name_memo: dict[HtmlElement, str] = {}
+        self._ax: AxNode | None = None
+
+    # -- the protocol --------------------------------------------------------------------
+    def dom(self) -> str:
+        return self._html
+
+    def root(self) -> HtmlElement:
+        return self._root
+
+    def query(self, selector: str) -> list[HtmlElement]:
+        """CSS, or XPath when the selector starts with '/' or '('. A bad selector matches
+        nothing -- rung 1 then fails, which is the correct outcome for a broken selector."""
+        try:
+            if selector.startswith(("/", "(")):
+                found = self._root.xpath(selector)
+            else:
+                found = self._root.cssselect(selector)
+        except (etree.XPathError, SelectorError):
+            return []
+        if not isinstance(found, list):
+            return []
+        return [e for e in found if isinstance(e, HtmlElement) and isinstance(e.tag, str)]
+
+    def role(self, node: HtmlElement) -> str | None:
+        if node not in self._role_memo:
+            self._role_memo[node] = role_of(node)
+        return self._role_memo[node]
+
+    def name(self, node: HtmlElement) -> str:
+        if node not in self._name_memo:
+            self._name_memo[node] = accessible_name(node, self._names)
+        return self._name_memo[node]
+
+    def visible(self, node: HtmlElement) -> bool:
+        """H9: rendered, not aria-hidden, a box bigger than 1x1 px, on the page."""
+        return not self.ax_hidden(node) and self.boxed(node)
+
+    def ax(self) -> AxNode:
+        if self._ax is None:
+            title = next((squashed(t) for t in self._root.iter("title")), "")
+            self._ax = AxNode(
+                role="document",
+                name=title,
+                node_id=self.node_id(self._root),
+                children=tuple(self._ax_children(self._root)),
+            )
+        return self._ax
+
+    def node_id(self, node: HtmlElement) -> str:
+        raise NotImplementedError
+
+    def node(self, node_id: str) -> HtmlElement | None:
+        raise NotImplementedError
+
+    # -- visibility, decided by the subclass ---------------------------------------------
+    def ax_hidden(self, node: HtmlElement) -> bool:
+        raise NotImplementedError
+
+    def boxed(self, node: HtmlElement) -> bool:
+        raise NotImplementedError
+
+    # -- helpers ---------------------------------------------------------------------------
+    def elements(self) -> Iterator[HtmlElement]:
+        for el in self._root.iter():
+            if isinstance(el, HtmlElement) and isinstance(el.tag, str):
+                yield el
+
+    def by_id(self, ident: str) -> HtmlElement | None:
+        return self._by_id.get(ident)
+
+    def _ax_children(self, el: HtmlElement) -> list[AxNode]:
+        out: list[AxNode] = []
+        for child in element_children(el):
+            if self.ax_hidden(child):
+                continue
+            kids = self._ax_children(child)
+            role = self.role(child)
+            if role is None:
+                out.extend(kids)
+            else:
+                out.append(
+                    AxNode(
+                        role=role,
+                        name=self.name(child),
+                        node_id=self.node_id(child),
+                        children=tuple(kids),
+                    )
+                )
+        return out
+
+
+def squashed(el: HtmlElement) -> str:
+    return " ".join(el.text_content().split())
+
+
+class StaticPageSource(ParsedPage):
+    """A stored DOM. No browser, no layout engine -- so no bbox(), by design (Task 19)."""
+
+    def __init__(self, html: str) -> None:
+        super().__init__(html)
+        self._styles: dict[HtmlElement, dict[str, str]] = defaultdict(dict)
+        for style in self._root.iter("style"):
+            for prelude, decls in _style_rules(style.text or ""):
+                for sel in prelude.split(","):
+                    try:
+                        matched = self._root.cssselect(sel.strip())
+                    except SelectorError:
+                        continue  # :hover and friends: not a static fact
+                    for el in matched:
+                        self._styles[el].update(decls)
+        for el in self.elements():
+            if el.get("style"):
+                self._styles[el].update(_declarations(el.get("style") or ""))
+        self._hidden_memo: dict[HtmlElement, bool] = {}
+        self._boxed_memo: dict[HtmlElement, bool] = {}
+
+    def node_id(self, node: HtmlElement) -> str:
+        return str(node.getroottree().getpath(node))
+
+    def node(self, node_id: str) -> HtmlElement | None:
+        if not _STATIC_ID.fullmatch(node_id):
+            return None
+        hits = self.query(node_id)
+        return hits[0] if len(hits) == 1 else None
+
+    def _style(self, el: HtmlElement) -> dict[str, str]:
+        return self._styles.get(el, {})
+
+    def _hard_hidden(self, el: HtmlElement) -> bool:
+        """Hidden in a way no descendant can undo."""
+        return (
+            tag_of(el) in NON_RENDERED
+            or el.get("hidden") is not None
+            or (el.get("aria-hidden") or "").casefold() == "true"
+            or self._style(el).get("display") == "none"
+            or (tag_of(el) == "input" and (el.get("type") or "").casefold() == "hidden")
+        )
+
+    def ax_hidden(self, node: HtmlElement) -> bool:
+        if node not in self._hidden_memo:
+            hidden = any(self._hard_hidden(e) for e in (node, *ancestors(node)))
+            if not hidden:
+                for e in (node, *ancestors(node)):  # nearest explicit visibility wins
+                    vis = self._style(e).get("visibility")
+                    if vis is not None:
+                        hidden = vis in ("hidden", "collapse")
+                        break
+            self._hidden_memo[node] = hidden
+        return self._hidden_memo[node]
+
+    def _own_box_hidden(self, el: HtmlElement, *, self_node: bool) -> bool:
+        s = self._style(el)
+        width, height = _px(s.get("width")), _px(s.get("height"))
+        tiny = (width is not None and width <= 1) or (height is not None and height <= 1)
+        if tiny and (self_node or s.get("overflow") == "hidden"):
+            return True
+        if s.get("clip", "").replace(" ", "") in (
+            "rect(0,0,0,0)",
+            "rect(0000)",
+            "rect(1px,1px,1px,1px)",
+        ):
+            return True
+        if s.get("clip-path", "").replace(" ", "") in ("inset(50%)", "inset(100%)"):
+            return True
+        if s.get("position") in ("absolute", "fixed"):
+            for side in ("left", "top"):
+                offset = _px(s.get(side))
+                if offset is not None and offset <= -500:
+                    return True
+        return False
+
+    def boxed(self, node: HtmlElement) -> bool:
+        if node not in self._boxed_memo:
+            clipped = self._own_box_hidden(node, self_node=True) or any(
+                self._own_box_hidden(a, self_node=False) for a in ancestors(node)
+            )
+            self._boxed_memo[node] = not clipped
+        return self._boxed_memo[node]
+
+
+__all__ = [
+    "NODE_ATTR",
+    "AxNode",
+    "PageSource",
+    "ParsedPage",
+    "StaticPageSource",
+    "squashed",
+]
+```
+
+- [ ] **Step 4: Implement the vocabulary, the read-side cache protocol, escalation, recording, the rung base and the runner**
+
+```python
+# selector_drift/resolve/trace.py
+"""The resolver's vocabulary: what a rung returns, what the cascade records.
+
+Lives here, not in resolve/rungs/, because validate/ must reach it and the
+judge-reaches-rungs-only-by-protocol contract forbids validate -> resolve.rungs; the API's
+api-is-read-side contract permits api -> resolve.trace and nothing else under resolve/.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Literal, Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict
+
+from selector_drift.resolve.page import PageSource
+from selector_drift.spec.schema import FieldTarget
+
+
+class Family(StrEnum):
+    """Signal family. The value is what resolutions.attempts and
+    heal_events.confirmer_family store, so it is the name, upper-case."""
+
+    TEXT_SEMANTIC = "TEXT_SEMANTIC"
+    STRUCTURAL = "STRUCTURAL"
+    VALUE = "VALUE"
+    NONE = "NONE"
+
+
+class AnchorEvidence(BaseModel):
+    """What justified a selector at heal time (design 5.2). Rung 1 re-verifies it every run."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    accessible_name: str | None = None  # rung 2
+    label_text: str | None = None  # rung 3
+    header_text: str | None = None  # rung 4
+
+    def is_empty(self) -> bool:
+        return self.accessible_name is None and self.label_text is None and self.header_text is None
+
+
+@dataclass(frozen=True)
+class ResolvedElement:
+    selector: str
+    node_id: str  # minted by the PageSource, never derived from the selector (C5)
+    anchor: AnchorEvidence
+    rung_id: int
+
+
+AttemptOutcome = Literal[
+    "resolved", "no_match", "ambiguous", "not_visible", "anchor_mismatch", "escalated"
+]
+MissOutcome = Literal["no_match", "ambiguous", "not_visible", "anchor_mismatch"]
+
+
+@dataclass(frozen=True)
+class Miss:
+    """Why a rung declined. The cascade records `outcome`; `detail` is for humans and logs."""
+
+    outcome: MissOutcome
+    detail: str
+
+
+@dataclass(frozen=True)
+class RungAttempt:
+    rung: int
+    family: Family
+    outcome: AttemptOutcome
+    ms: int
+
+    def as_json(self) -> dict[str, object]:  # exactly what resolutions.attempts stores
+        return {
+            "rung": self.rung,
+            "family": self.family.value,
+            "outcome": self.outcome,
+            "ms": self.ms,
+        }
+
+
+@dataclass(frozen=True)
+class CascadeTrace:
+    attempts: tuple[RungAttempt, ...]
+    winner: int | None
+    resolution_id: int | None = None  # the resolutions row written; None on replay
+
+    @property
+    def healed(self) -> bool:
+        """True unless rung 1 won. Task 20's asymmetry reads exactly this."""
+        return self.winner != 1
+
+    def as_json(self) -> list[dict[str, object]]:
+        return [a.as_json() for a in self.attempts]
+
+
+@runtime_checkable
+class Rung(Protocol):
+    """The only thing validate/ may know about a rung (Task 1 contract)."""
+
+    @property
+    def rung_id(self) -> int: ...
+
+    @property
+    def family(self) -> Family: ...
+
+    def resolve(self, page: PageSource, target: FieldTarget) -> ResolvedElement | None: ...
+
+
+@runtime_checkable
+class DiagnosableRung(Rung, Protocol):
+    """A rung that can say why it declined. The cascade prefers this to resolve()."""
+
+    def attempt(self, page: PageSource, target: FieldTarget) -> ResolvedElement | Miss: ...
+```
+
+```python
+# selector_drift/resolve/cache.py  (this task's version -- Task 17 adds SelectorCache)
+"""The selector cache, READ side only. The write-back is orchestrate/cache_writer.py (C2)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from selector_drift.resolve.trace import AnchorEvidence
+
+
+@dataclass(frozen=True)
+class CachedSelector:
+    selector: str
+    anchor: AnchorEvidence  # the evidence that justified the selector (design 5.2)
+    set_by_rung: int
+
+
+class CacheReader(Protocol):
+    """What rung 1 reads. SelectorCache satisfies it; so does replay's HealTimeCache."""
+
+    def get(
+        self, target: str, field: str, spec_version: int | None = None
+    ) -> CachedSelector | None: ...
+
+
+class _NoCache:
+    def get(
+        self, target: str, field: str, spec_version: int | None = None
+    ) -> CachedSelector | None:
+        return None
+
+
+NO_CACHE: CacheReader = _NoCache()
+```
+
+```python
+# selector_drift/resolve/escalation.py
+"""Escalation to a human: rung 5's only v1 behaviour (design 5.3)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from selector_drift.resolve.trace import CascadeTrace
+
+
+class EscalateToHuman(Exception):
+    """No rung 1-4 resolved. The run quarantines; a human decides. Never a guess.
+
+    `trace` is set by resolve_cascade, so the caller can record the resolution it refused;
+    `case` is the escalation-corpus file rung 5 wrote, if it ran.
+    """
+
+    def __init__(
+        self, reason: str, *, trace: CascadeTrace | None = None, case: Path | None = None
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.trace = trace
+        self.case = case
+```
+
+```python
+# selector_drift/resolve/recording.py
+"""One resolutions row per scheduled resolution, win or lose (R5/C4)."""
+
+from __future__ import annotations
+
+import datetime as dt
+from typing import Protocol
+
+from selector_drift.db.models import Resolution
+from selector_drift.db.session import Session
+from selector_drift.resolve.trace import CascadeTrace
+from selector_drift.spec.schema import FieldTarget
+
+
+class ResolutionRecorder(Protocol):
+    def __call__(
+        self,
+        *,
+        run_key: str,
+        portal: str,
+        target: FieldTarget,
+        trace: CascadeTrace,
+        node_id: str | None,
+        ms: int,
+    ) -> int: ...
+
+
+def record_resolution(
+    *,
+    run_key: str,
+    portal: str,
+    target: FieldTarget,
+    trace: CascadeTrace,
+    node_id: str | None,
+    ms: int,
+) -> int:
+    """The denominator of every published rung share. Returns the row id (heal_events FK)."""
+    with Session() as s:
+        row = Resolution(
+            run_key=run_key,
+            target=portal,
+            field=target.name,
+            winning_rung=trace.winner,
+            attempts=trace.as_json(),
+            node_id=node_id,
+            ms=ms,
+            at=dt.datetime.now(dt.UTC),
+        )
+        s.add(row)
+        s.commit()
+        return int(row.id)
+```
+
+```python
+# selector_drift/resolve/rungs/base.py
+"""Shared by the concrete rungs. Re-exports the Rung protocol from resolve.trace."""
+
+from __future__ import annotations
+
+from lxml.html import HtmlElement
+
+from selector_drift.resolve.aria import element_children, parent_of, tag_of
+from selector_drift.resolve.page import PageSource
+from selector_drift.resolve.trace import (
+    AnchorEvidence,
+    DiagnosableRung,
+    Family,
+    Miss,
+    ResolvedElement,
+    Rung,
+)
+from selector_drift.spec.schema import FieldTarget
+
+__all__ = [
+    "AnchorEvidence",
+    "DiagnosableRung",
+    "Family",
+    "Miss",
+    "ResolvedElement",
+    "Rung",
+    "RungBase",
+    "css_path",
+    "text_of",
+    "unique",
+]
+
+
+def text_of(el: HtmlElement) -> str:
+    return " ".join(el.text_content().split())
+
+
+def css_path(el: HtmlElement) -> str:
+    """An absolute, structural CSS path: exactly one element by construction. Deliberately
+    not an id or class selector -- IdChurn and ClassRename then break rung 1 and a heal is
+    recorded, rather than a restyled page silently matching something else."""
+    steps: list[str] = []
+    node: HtmlElement | None = el
+    while node is not None:
+        parent = parent_of(node)
+        tag = tag_of(node)
+        if parent is None:
+            steps.append(tag)
+        else:
+            same = [c for c in element_children(parent) if tag_of(c) == tag]
+            steps.append(f"{tag}:nth-of-type({same.index(node) + 1})")
+        node = parent
+    return " > ".join(reversed(steps))
+
+
+def unique(found: list[HtmlElement]) -> list[HtmlElement]:
+    out: list[HtmlElement] = []
+    for el in found:
+        if not any(el is o for o in out):
+            out.append(el)
+    return out
+
+
+class RungBase:
+    """resolve() is attempt() with the reason dropped -- the Rung protocol validate/ uses."""
+
+    rung_id: int = 0
+    family: Family = Family.NONE
+
+    def attempt(self, page: PageSource, target: FieldTarget) -> ResolvedElement | Miss:
+        raise NotImplementedError
+
+    def resolve(self, page: PageSource, target: FieldTarget) -> ResolvedElement | None:
+        result = self.attempt(page, target)
+        return result if isinstance(result, ResolvedElement) else None
+
+    def found(self, page: PageSource, el: HtmlElement, anchor: AnchorEvidence) -> ResolvedElement:
+        return ResolvedElement(
+            selector=css_path(el), node_id=page.node_id(el), anchor=anchor, rung_id=self.rung_id
+        )
+```
+
+```python
+# selector_drift/resolve/cascade.py  (this task's version -- Tasks 14-18 each add one import and one list entry)
+"""The cascade: cheapest and most reliable rung first, every attempt recorded."""
+
+from __future__ import annotations
+
+import dataclasses
+import time
+from typing import Protocol, runtime_checkable
+
+from selector_drift.resolve.cache import CacheReader
+from selector_drift.resolve.escalation import EscalateToHuman
+from selector_drift.resolve.page import PageSource
+from selector_drift.resolve.recording import ResolutionRecorder, record_resolution
+from selector_drift.resolve.trace import (
+    AttemptOutcome,
+    CascadeTrace,
+    DiagnosableRung,
+    Miss,
+    ResolvedElement,
+    Rung,
+    RungAttempt,
+)
+from selector_drift.spec.schema import FieldTarget
+
+# Tasks 14-18 each add one import above and one entry here, cheapest rung first.
+REGISTERED_RUNGS: list[Rung] = []
+
+
+@runtime_checkable
+class CacheBound(Protocol):
+    """Rung 1: rebuilt per call around the caller's cache and the run's spec version."""
+
+    def bind(self, cache: CacheReader, *, portal: str, spec_version: int | None) -> Rung: ...
+
+
+@runtime_checkable
+class Escalator(Protocol):
+    """Rung 5: told what the cascade already tried, so the corpus case carries it."""
+
+    def escalate(
+        self,
+        page: PageSource,
+        target: FieldTarget,
+        *,
+        run_key: str | None,
+        attempts: tuple[RungAttempt, ...],
+    ) -> ResolvedElement: ...
+
+
+def parse_run_key(run_key: str) -> tuple[str, int]:
+    """Task 6's run_key(): f"{target}:{spec_version}:{window}"."""
+    portal, version, window = run_key.split(":")
+    if not portal or not version.isdigit() or not window:
+        raise ValueError(f"not a run key: {run_key!r}")
+    return portal, int(version)
+
+
+def _ms(t0: float) -> int:
+    return int((time.perf_counter() - t0) * 1000)
+
+
+def resolve_cascade(
+    page: PageSource,
+    target: FieldTarget,
+    cache: CacheReader,
+    *,
+    record: bool = True,
+    run_key: str | None = None,
+    recorder: ResolutionRecorder = record_resolution,
+) -> tuple[ResolvedElement, CascadeTrace]:
+    """First rung to return an element wins. Raises EscalateToHuman when none does.
+
+    record=True (a scheduled run) needs run_key, writes exactly one resolutions row win or
+    lose (C4) and may run rung 5. record=False (replay, the suites) writes nothing and never
+    runs rung 5, whose escalation would otherwise add a corpus case per failed replay.
+    """
+    if record and run_key is None:
+        raise ValueError("record=True writes resolutions.run_key (a FK); pass run_key")
+    portal, spec_version = parse_run_key(run_key) if run_key is not None else ("", None)
+    rungs = [
+        r.bind(cache, portal=portal, spec_version=spec_version) if isinstance(r, CacheBound) else r
+        for r in REGISTERED_RUNGS
+        if record or r.rung_id < 5
+    ]
+
+    started = time.perf_counter()
+    attempts: list[RungAttempt] = []
+    winner: ResolvedElement | None = None
+    escalation: EscalateToHuman | None = None
+    for rung in rungs:
+        t0 = time.perf_counter()
+        outcome: AttemptOutcome
+        try:
+            if isinstance(rung, Escalator):
+                result: ResolvedElement | Miss | None = rung.escalate(
+                    page, target, run_key=run_key, attempts=tuple(attempts)
+                )
+            elif isinstance(rung, DiagnosableRung):
+                result = rung.attempt(page, target)
+            else:
+                result = rung.resolve(page, target)
+        except EscalateToHuman as exc:
+            attempts.append(RungAttempt(rung.rung_id, rung.family, "escalated", _ms(t0)))
+            escalation = exc
+            break
+        if isinstance(result, ResolvedElement):
+            node = page.node(result.node_id)
+            if result.rung_id != rung.rung_id or node is None or not page.visible(node):
+                outcome = "not_visible"  # H9, enforced here too, whatever the rung did
+            else:
+                attempts.append(RungAttempt(rung.rung_id, rung.family, "resolved", _ms(t0)))
+                winner = result
+                break
+        else:
+            outcome = result.outcome if isinstance(result, Miss) else "no_match"
+        attempts.append(RungAttempt(rung.rung_id, rung.family, outcome, _ms(t0)))
+
+    trace = CascadeTrace(
+        attempts=tuple(attempts), winner=winner.rung_id if winner is not None else None
+    )
+    if record and run_key is not None:
+        rid = recorder(
+            run_key=run_key,
+            portal=portal,
+            target=target,
+            trace=trace,
+            node_id=winner.node_id if winner is not None else None,
+            ms=_ms(started),
+        )
+        trace = dataclasses.replace(trace, resolution_id=rid)
+    if winner is None:
+        reason = escalation.reason if escalation else f"no rung resolved {target.name!r}"
+        raise EscalateToHuman(
+            reason, trace=trace, case=escalation.case if escalation else None
+        ) from escalation
+    return winner, trace
+```
+
+**Why the runner looks for three shapes of rung.** `validate/` sees only `Rung.resolve()` (Task 22
+re-resolves with confirmers through it). The runner additionally uses `attempt()` when a rung offers
+it, so the recorded outcome says *why* a rung declined (`ambiguous`, `anchor_mismatch`, …) rather than
+collapsing every refusal into `no_match` — the heal screen and the published rung table read that
+field. Rung 1 is rebuilt per call around the caller's cache (`CacheBound.bind`), because the `Rung`
+protocol has no cache argument and `REGISTERED_RUNGS` is a module-level list. Rung 5 is handed the
+attempts so far (`Escalator.escalate`), so its corpus case records what rungs 1–4 tried.
+
+- [ ] **Step 5: Implement `LivePageSource`, and expose the Playwright page to `browser/`**
+
+```python
+# selector_drift/browser/page_source.py
+"""The live page, snapshotted once (P1).
+
+One evaluate() stamps data-sd-node on every element and asks the browser what is rendered
+and what has a real box; the outerHTML is read in the same call and the accessibility tree
+once after it. Every rung then runs in-process over that snapshot -- no CDP round-trip per
+rung, per field, per row. The stamped ids stay on the live page, which is how LiveCapture
+(Task 19) masks and measures the same nodes the rungs resolved.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from lxml.html import HtmlElement
+from playwright.async_api import Page
+
+from selector_drift.browser.driver import PageHandle
+from selector_drift.resolve.page import NODE_ATTR, ParsedPage
+
+_LIVE_ID = re.compile(r"^n\d{1,7}$")
+
+_SNAPSHOT_JS = """(attr) => {
+  const all = Array.from(document.querySelectorAll('*'));
+  all.forEach((el, i) => el.setAttribute(attr, 'n' + i));
+  const clipMemo = new Map();
+  const clips = (el) => {
+    if (clipMemo.has(el)) return clipMemo.get(el);
+    const s = getComputedStyle(el);
+    const w = parseFloat(s.width), h = parseFloat(s.height);
+    const v = s.clip === 'rect(0px, 0px, 0px, 0px)' || s.clipPath === 'inset(50%)'
+      || ((w <= 1 || h <= 1) && s.overflow === 'hidden');
+    clipMemo.set(el, v);
+    return v;
+  };
+  const rendered = [], boxed = [];
+  for (const el of all) {
+    const id = el.getAttribute(attr);
+    const shown = el.checkVisibility({checkVisibilityCSS: true, visibilityProperty: true})
+      && el.closest('[aria-hidden="true"]') === null;
+    if (shown) rendered.push(id);
+    const r = el.getBoundingClientRect();
+    const onPage = r.right + window.scrollX > 0 && r.bottom + window.scrollY > 0;
+    let clipped = clips(el);
+    for (let a = el.parentElement; a && !clipped; a = a.parentElement) clipped = clips(a);
+    if (r.width > 1 && r.height > 1 && onPage && !clipped) boxed.push(id);
+  }
+  return {html: document.documentElement.outerHTML, rendered, boxed};
+}"""
+
+
+class LivePageSource(ParsedPage):
+    def __init__(
+        self, html: str, *, rendered: frozenset[str], boxed: frozenset[str], browser_ax: str
+    ) -> None:
+        super().__init__(html)
+        self._rendered, self._boxed = rendered, boxed
+        self.browser_ax = browser_ax  # Chromium's own tree, for parity checks and evidence
+
+    @classmethod
+    async def snapshot(cls, page: PageHandle) -> LivePageSource:
+        return await cls.from_playwright(page.raw)
+
+    @classmethod
+    async def from_playwright(cls, page: Page) -> LivePageSource:
+        raw: dict[str, Any] = await page.evaluate(_SNAPSHOT_JS, NODE_ATTR)
+        browser_ax = await page.locator("html").aria_snapshot()
+        return cls(
+            str(raw["html"]),
+            rendered=frozenset(map(str, raw["rendered"])),
+            boxed=frozenset(map(str, raw["boxed"])),
+            browser_ax=browser_ax,
+        )
+
+    def node_id(self, node: HtmlElement) -> str:
+        ident = node.get(NODE_ATTR)
+        if not ident:
+            raise LookupError("element carries no data-sd-node: not part of this snapshot")
+        return str(ident)
+
+    def node(self, node_id: str) -> HtmlElement | None:
+        if not _LIVE_ID.fullmatch(node_id):
+            return None
+        hits = self.root().xpath(f"//*[@{NODE_ATTR}=$n]", n=node_id)
+        if isinstance(hits, list) and len(hits) == 1 and isinstance(hits[0], HtmlElement):
+            return hits[0]
+        return None
+
+    def ax_hidden(self, node: HtmlElement) -> bool:
+        return node.get(NODE_ATTR) not in self._rendered
+
+    def boxed(self, node: HtmlElement) -> bool:
+        return node.get(NODE_ATTR) in self._boxed
+```
+
+In `selector_drift/browser/driver.py`, `PageHandle` gains (Task 19 listed this as its own change; it
+lands here, where it is first needed):
+
+```python
+    @property
+    def raw(self) -> Page:
+        """browser/-internal. Nothing outside browser/ receives a Playwright page."""
+        return self._page
+```
+
+- [ ] **Step 6: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/resolve -m unit -v`
+Expected: PASS, 51 tests (`test_page.py` 33, `test_cascade.py` 18), in well under a second.
+
+Run: `docker compose up -d postgres && uv run pytest tests/resolve -m integration -v`
+Expected: PASS, 2 tests.
+
+Run: `uv run pytest tests/resolve -m e2e -v`
+Expected: PASS, 15 tests (13 resolve-parity cases, vacuous until Task 14; visibility parity; header-name parity).
+
+Run: `uv run mypy --strict selector_drift && uv run lint-imports && uv run ruff check . && uv run ruff format --check .`
+Expected: clean. `heallog-cannot-refetch`, `judged-cannot-call-judge`, `resolver-cannot-write` kept.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add pyproject.toml uv.lock selector_drift/resolve selector_drift/browser/page_source.py \
+        selector_drift/browser/driver.py tests/__init__.py tests/resolve
+git commit -m "feat(resolve): PageSource, rung protocol, cascade trace and instrumented runner"
+```
 
 ---
 
 ### Task 14: Rung 2 — the accessibility tree
 
 **Files:**
+- Create: `selector_drift/resolve/labels.py` — what text a field is looked for by
+- Create: `selector_drift/resolve/grid.py` — tables and role grids as one model, header-verified cells
 - Create: `selector_drift/resolve/rungs/r2_axtree.py`
+- Modify: `selector_drift/resolve/cascade.py` — register `AxTreeRung()`
 - Test: `tests/resolve/test_r2_axtree.py`
 
 **Interfaces:**
-- Consumes: `Rung`, `ResolvedElement`, `AnchorEvidence`, `Family` (Task 13).
-- Produces: `AxTreeRung` with `rung_id = 2`, `family = Family.TEXT_SEMANTIC`. Populates `AnchorEvidence.accessible_name`.
+- Consumes: `PageSource`, `AxNode` (Task 13); `RungBase`, `AnchorEvidence`, `Family`, `Miss`, `ResolvedElement` (Task 13); `FieldTarget` (Task 5).
+- Produces:
+  - `labels.py`: `squash(text)`, `normalise(text)`, `expected_label(target) -> str`, `tokens(value) -> tuple[str, ...]`, `field_tokens(target)`
+  - `grid.py`: `nearest`, `grid_of`, `row_of`, `rows`, `cells`, `span`, `column_of`, `cell_at`, `width`, `is_header_row`, `header_rows`, `data_rows`, `first_data_row`, `column_header`, `row_header`, `cell_under`, `cell_right_of`, `headers_named`
+  - `AxTreeRung`: `rung_id = 2`, `family = Family.TEXT_SEMANTIC`. Populates `AnchorEvidence.accessible_name` only
+  - `locate_by_name(page, name) -> tuple[HtmlElement, str] | Miss` — also rung 1's re-verification of a stored `accessible_name` (Task 17)
+
+**What rung 2 looks for, given that `FieldTarget` carries no label.** Task 5's `FieldTarget` has
+`name`, `description`, `relation`, `assertions` — no visible label. The expected label is therefore the
+field name humanised (`claim_number` → "claim number"), compared **normalised and whole** —
+case-folded, whitespace collapsed, a trailing `:`/`*` dropped, never a substring. That is why
+"Prior Amount" (Task 11's decoy header) can never match `amount`, and why a reword to "Claim No." is
+a clean `no_match`, not a near miss. The bench's six headers are exactly its six field names
+humanised (bench spec §4). A client portal whose label differs from the field name needs a label on
+the spec — flagged against Task 5, not worked around here.
+
+**Role + accessible name + relationship, read from `page.ax()`, not from Playwright.** The first
+draft said "implement using Playwright's `get_by_role`"; a rung that calls Playwright cannot run in
+replay or in the unit tier (Task 13, R9). The relationship is the grid's: a `columnheader` named for
+the field labels the first data row's cell **under it**, a `rowheader` the first data cell after it,
+and a value-bearing role (`textbox`, `cell`, `definition`, …) named for the field labels itself. The
+column relation is **header-verified** in `grid.cell_under()`: the cell's own header, recomputed from
+the cell's position (colspans counted, `headers=""` honoured), must be the header we started from.
+
+**H9 lives here.** Rung 2 is what `HiddenDecoy` attacks (Task 11A table): an `aria-hidden` /
+`display:none` / off-screen element named "Claim Number" with a format-valid value. A hidden labelled
+node is skipped before its relationship is followed; if the only candidates were hidden, the outcome is
+`not_visible`, not `no_match`, so the heal log says what happened. Two visible candidates are
+`ambiguous` — never a first match (`DuplicateLabel`).
+
+**Why `TableToDiv` and `ImageHeader` are free.** `grid.py` models tables by role, not tag, so the
+`role="table"/"row"/"columnheader"/"cell"` divs Task 9's `TableToDiv` emits (amendment note 4) are
+the same grid; and a header's accessible name reads `img alt`, so `<th><img alt="Amount"></th>` is
+still "Amount".
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/resolve/test_r2_axtree.py
+from __future__ import annotations
+
 import pytest
+
+from selector_drift.resolve.page import StaticPageSource
 from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
-from testbench.mutations.class_rename import ClassRename
-from testbench.mutations.dom_restructure import DomRestructure
-from testbench.mutations.id_churn import IdChurn
-from testbench.mutations.table_to_div import TableToDiv
-from testbench.mutations.label_reword import LabelReword
+from selector_drift.resolve.trace import Family, Miss, ResolvedElement
+from tests.resolve.conftest import AMOUNT, CLAIM_NUMBER, BenchPage
 
-@pytest.mark.parametrize("mutation", [ClassRename(), DomRestructure(), IdChurn(), TableToDiv()])
-def test_axtree_survives_structural_mutations(mutation, bench_page):
-    el = AxTreeRung().resolve(bench_page.mutated(mutation), CLAIM_NUMBER)
-    assert el is not None and el.anchor.accessible_name == "Claim Number"
+TABLE = """<html><body>{decoy}<table>
+<thead><tr><th>Claim Number</th><th>Amount</th></tr></thead>
+<tbody><tr><td id="real">AB12345678</td><td>100.00</td></tr></tbody></table></body></html>"""
 
-def test_axtree_fails_on_label_reword(bench_page):
-    assert AxTreeRung().resolve(bench_page.mutated(LabelReword()), CLAIM_NUMBER) is None
+DECOYS = [
+    '<div aria-hidden="true"><span role="textbox" aria-label="Claim Number">'
+    "ZZ00000000</span></div>",
+    '<div style="display:none"><input aria-label="Claim Number" value="ZZ00000000"></div>',
+    '<input aria-label="Claim Number" value="ZZ00000000" style="position:absolute;left:-9999px">',
+    '<input aria-label="Claim Number" value="ZZ00000000" hidden>',
+]
+
+
+@pytest.mark.unit
+def test_rung_two_is_text_semantic() -> None:
+    assert (AxTreeRung.rung_id, AxTreeRung.family) == (2, Family.TEXT_SEMANTIC)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mutation", ["ClassRename", "DomRestructure", "IdChurn", "TableToDiv"])
+def test_axtree_survives_structural_mutations(mutation: str, bench: BenchPage) -> None:
+    page = bench.mutated(mutation)
+    el = AxTreeRung().resolve(page.source(), CLAIM_NUMBER)
+    assert el is not None and el.node_id in page.truth("claim_number")
+    assert el.anchor.accessible_name == "Claim Number"
+
+
+@pytest.mark.unit
+def test_axtree_fails_on_label_reword(bench: BenchPage) -> None:
+    """Fails -- does not mis-resolve (design 5.1)."""
+    got = AxTreeRung().attempt(bench.mutated("LabelReword").source(), CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "no_match"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "decoy", DECOYS, ids=["aria-hidden", "display-none-ancestor", "off-screen", "hidden-attribute"]
+)
+def test_a_hidden_element_is_never_a_candidate(decoy: str) -> None:
+    """H9. A hidden node carrying the right accessible name resolves ahead of the real one,
+    and every value it yields satisfies the format assertion -- unless visibility gates it."""
+    page = StaticPageSource(TABLE.format(decoy=decoy))
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#real")[0])
+
+
+@pytest.mark.unit
+def test_the_bench_hidden_decoy_never_wins(bench: BenchPage) -> None:
+    page = bench.mutated("HiddenDecoy")
+    el = AxTreeRung().resolve(page.source(), CLAIM_NUMBER)
+    assert el is None or el.node_id in page.truth("claim_number")
+
+
+@pytest.mark.unit
+def test_two_elements_with_the_name_is_ambiguous_not_a_first_match(bench: BenchPage) -> None:
+    got = AxTreeRung().attempt(bench.mutated("DuplicateLabel").source(), CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "ambiguous"
+
+
+@pytest.mark.unit
+def test_an_image_header_is_named_by_its_alt_text(bench: BenchPage) -> None:
+    page = bench.mutated("ImageHeader")
+    el = AxTreeRung().resolve(page.source(), AMOUNT)
+    assert el is not None and el.node_id in page.truth("amount")
+
+
+@pytest.mark.unit
+def test_a_header_named_by_aria_labelledby_is_followed_to_its_column() -> None:
+    page = StaticPageSource("""<html><body><span id="h" hidden>Claim Number</span><table>
+<tr><th aria-labelledby="h">#</th></tr><tr><td id="real">AB12345678</td></tr></table>
+</body></html>""")
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#real")[0])
+
+
+@pytest.mark.unit
+def test_a_labelled_form_control_is_its_own_value() -> None:
+    page = StaticPageSource(
+        '<html><body><label for="c">Claim Number</label>'
+        '<input id="c" value="AB12345678"></body></html>'
+    )
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#c")[0])
+
+
+@pytest.mark.unit
+def test_the_anchor_is_the_name_as_the_page_spells_it() -> None:
+    page = StaticPageSource(TABLE.format(decoy="").replace("Claim Number", "CLAIM  NUMBER:"))
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, ResolvedElement) and got.anchor.accessible_name == "CLAIM NUMBER:"
+    assert got.anchor.label_text is None and got.anchor.header_text is None
+
+
+@pytest.mark.unit
+def test_the_selector_it_mints_names_exactly_that_element(bench: BenchPage) -> None:
+    page = bench.source()
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None
+    assert [page.node_id(e) for e in page.query(el.selector)] == [el.node_id]
 ```
+
+**Changes from the first draft's two tests.** Both kept, both strengthened: survival now asserts the
+resolved node is the **true** claim-number cell (`page.truth(...)`, the answer-key technique), not
+merely "something"; the reword asserts the outcome is `no_match` (fails, does not mis-resolve —
+design §5.1). `bench_page.mutated(ClassRename())` was an undefined fixture; `bench.mutated("ClassRename")`
+builds the catalogue's instance (Task 26's technique). The H9 test moved here from Task 13 and is
+parametrised over the four ways to hide a decoy; the bench's own `HiddenDecoy` is asserted as "never
+the decoy", because Task 11A pins its property, not its markup.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/resolve/test_r2_axtree.py -v`
-Expected: FAIL.
+Run: `uv run pytest tests/resolve/test_r2_axtree.py -m unit -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.resolve.rungs.r2_axtree'`.
 
-- [ ] **Step 3: Implement using Playwright's `get_by_role` / ARIA snapshot,** matching on role + accessible name + relationship, and register it in `REGISTERED_RUNGS`.
+- [ ] **Step 3: Implement the label rules and the grid model**
 
-- [ ] **Step 4: Run them and make sure they pass**
+```python
+# selector_drift/resolve/labels.py
+"""How a field's name becomes the text the rungs look for.
 
-Run: `uv run pytest tests/resolve -v`
-Expected: PASS, 5 new tests.
+Task 5's FieldTarget carries no label, so the expected visible label is the field name,
+humanised: `claim_number` -> "claim number". Comparison is on normalised text only --
+case-folded, whitespace-collapsed, a trailing ':' or '*' dropped -- never on substrings, so
+"Prior Amount" never matches `amount`.
+"""
 
-- [ ] **Step 5: Commit**
+from __future__ import annotations
+
+import re
+
+from selector_drift.spec.schema import FieldTarget
+
+_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_NON_ALNUM = re.compile(r"[^A-Za-z0-9]+")
+
+
+def squash(text: str | None) -> str:
+    return " ".join((text or "").split())
+
+
+def normalise(text: str | None) -> str:
+    return squash(text).rstrip(":*").strip().casefold()
+
+
+def expected_label(target: FieldTarget) -> str:
+    return normalise(target.name.replace("_", " "))
+
+
+def tokens(value: str) -> tuple[str, ...]:
+    """`claimNumber`, `claim-number`, `col-claim_number` -> ('claim', 'number') and friends."""
+    spaced = _CAMEL.sub(" ", value)
+    return tuple(t.casefold() for t in _NON_ALNUM.split(spaced) if t)
+
+
+def field_tokens(target: FieldTarget) -> tuple[str, ...]:
+    return tokens(target.name)
+```
+
+```python
+# selector_drift/resolve/grid.py
+"""Tables and grids by role, so a native <table> and TableToDiv's role="table" divs are one model.
+
+Column positions count colspan (aria-colspan on divs); rowspan is not modelled -- a header
+that relies on rowspan fails header verification and the rung declines rather than guessing.
+"""
+
+from __future__ import annotations
+
+from lxml.html import HtmlElement
+
+from selector_drift.resolve.aria import CELL_ROLES, DATA_CELL_ROLES, TABLE_ROLES, ancestors
+from selector_drift.resolve.labels import normalise
+from selector_drift.resolve.page import PageSource
+
+
+def nearest(
+    page: PageSource, el: HtmlElement, roles: frozenset[str], *, include_self: bool = True
+) -> HtmlElement | None:
+    for node in ([el] if include_self else []) + ancestors(el):
+        if page.role(node) in roles:
+            return node
+    return None
+
+
+def grid_of(page: PageSource, el: HtmlElement) -> HtmlElement | None:
+    return nearest(page, el, TABLE_ROLES)
+
+
+def row_of(page: PageSource, el: HtmlElement) -> HtmlElement | None:
+    return nearest(page, el, frozenset({"row"}))
+
+
+def _descendants(el: HtmlElement) -> list[HtmlElement]:
+    return [
+        d for d in el.iterdescendants() if isinstance(d, HtmlElement) and isinstance(d.tag, str)
+    ]
+
+
+def rows(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
+    return [
+        d
+        for d in _descendants(grid)
+        if page.role(d) == "row" and nearest(page, d, TABLE_ROLES, include_self=False) is grid
+    ]
+
+
+def cells(page: PageSource, row: HtmlElement) -> list[HtmlElement]:
+    return [d for d in _descendants(row) if page.role(d) in CELL_ROLES and row_of(page, d) is row]
+
+
+def span(cell: HtmlElement) -> int:
+    raw = cell.get("colspan") or cell.get("aria-colspan") or "1"
+    return min(max(int(raw), 1), 1000) if raw.isdigit() else 1
+
+
+def column_of(page: PageSource, cell: HtmlElement) -> int | None:
+    row = row_of(page, cell)
+    if row is None:
+        return None
+    index = 0
+    for c in cells(page, row):
+        if c is cell:
+            return index
+        index += span(c)
+    return None
+
+
+def cell_at(page: PageSource, row: HtmlElement, index: int) -> HtmlElement | None:
+    start = 0
+    for c in cells(page, row):
+        if start <= index < start + span(c):
+            return c
+        start += span(c)
+    return None
+
+
+def width(page: PageSource, row: HtmlElement) -> int:
+    return sum(span(c) for c in cells(page, row))
+
+
+def is_header_row(page: PageSource, row: HtmlElement) -> bool:
+    cs = cells(page, row)
+    return bool(cs) and all(page.role(c) == "columnheader" for c in cs)
+
+
+def header_rows(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
+    return [r for r in rows(page, grid) if is_header_row(page, r)]
+
+
+def data_rows(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
+    """Visible rows holding data. A single cell spanning a multi-column grid is a pager or a
+    footer, not data (Pagination mutation)."""
+    all_rows = rows(page, grid)
+    columns = max((width(page, r) for r in all_rows), default=0)
+    out = []
+    for r in all_rows:
+        cs = cells(page, r)
+        if not cs or is_header_row(page, r) or not page.visible(r):
+            continue
+        if not any(page.role(c) in DATA_CELL_ROLES for c in cs):
+            continue
+        if columns > 1 and len(cs) == 1:
+            continue
+        out.append(r)
+    return out
+
+
+def first_data_row(page: PageSource, grid: HtmlElement) -> HtmlElement | None:
+    found = data_rows(page, grid)
+    return found[0] if found else None
+
+
+def column_header(page: PageSource, cell: HtmlElement) -> HtmlElement | None:
+    """The header a cell sits under: its headers="" idrefs first, else by column position."""
+    for ident in (cell.get("headers") or "").split():
+        hits = page.root().xpath("//*[@id=$i]", i=ident)
+        if isinstance(hits, list):
+            for h in hits:
+                if isinstance(h, HtmlElement) and page.role(h) == "columnheader":
+                    return h
+    grid, index = grid_of(page, cell), column_of(page, cell)
+    if grid is None or index is None:
+        return None
+    for hr in reversed(header_rows(page, grid)):
+        h = cell_at(page, hr, index)
+        if h is not None and page.role(h) == "columnheader":
+            return h
+    return None
+
+
+def row_header(page: PageSource, cell: HtmlElement) -> HtmlElement | None:
+    row = row_of(page, cell)
+    if row is None:
+        return None
+    for c in cells(page, row):
+        if c is cell:
+            return None
+        if page.role(c) == "rowheader":
+            return c
+    return None
+
+
+def cell_under(page: PageSource, header: HtmlElement) -> HtmlElement | None:
+    """The first data row's cell in this header's column -- header-verified: the cell's own
+    header, recomputed from the cell's position, must be this header."""
+    grid, index = grid_of(page, header), column_of(page, header)
+    if grid is None or index is None:
+        return None
+    row = first_data_row(page, grid)
+    if row is None:
+        return None
+    cell = cell_at(page, row, index)
+    if cell is None or page.role(cell) not in DATA_CELL_ROLES:
+        return None
+    return cell if column_header(page, cell) is header else None
+
+
+def cell_right_of(page: PageSource, header: HtmlElement) -> HtmlElement | None:
+    """For a row header: the first data cell after it in its row."""
+    row = row_of(page, header)
+    if row is None:
+        return None
+    seen = False
+    for c in cells(page, row):
+        if c is header:
+            seen = True
+        elif seen and page.role(c) in DATA_CELL_ROLES:
+            return c
+    return None
+
+
+def headers_named(page: PageSource, label: str) -> list[HtmlElement]:
+    """Visible column headers anywhere on the page whose accessible name is `label`."""
+    want = normalise(label)
+    return [
+        el
+        for el in _descendants(page.root())
+        if page.role(el) == "columnheader" and page.visible(el) and normalise(page.name(el)) == want
+    ]
+```
+
+- [ ] **Step 4: Implement rung 2**
+
+```python
+# selector_drift/resolve/rungs/r2_axtree.py
+"""Rung 2: role + accessible name + relationship, read from the accessibility tree."""
+
+from __future__ import annotations
+
+from lxml.html import HtmlElement
+
+from selector_drift.resolve.grid import cell_right_of, cell_under
+from selector_drift.resolve.labels import expected_label, normalise
+from selector_drift.resolve.page import PageSource
+from selector_drift.resolve.rungs.base import (
+    AnchorEvidence,
+    Family,
+    Miss,
+    ResolvedElement,
+    RungBase,
+    unique,
+)
+from selector_drift.spec.schema import FieldTarget
+
+# Roles whose own accessible name labels the value they hold.
+VALUE_ROLES = frozenset(
+    {
+        "textbox",
+        "searchbox",
+        "combobox",
+        "spinbutton",
+        "listbox",
+        "cell",
+        "gridcell",
+        "definition",
+        "status",
+        "meter",
+        "progressbar",
+        "slider",
+    }
+)
+
+
+def locate_by_name(page: PageSource, name: str) -> tuple[HtmlElement, str] | Miss:
+    """The one visible element that `name` labels, and the name as the page spells it.
+    Also rung 1's re-verification of a stored accessible_name (Task 17)."""
+    want = normalise(name)
+    hits: list[tuple[HtmlElement, str]] = []
+    saw_hidden = False
+    for node in page.ax().walk():
+        if not want or normalise(node.name) != want:
+            continue
+        anchor = page.node(node.node_id)
+        if anchor is None:
+            continue
+        if not page.visible(anchor):
+            saw_hidden = True  # H9: a hidden labelled node is never a hit
+            continue
+        if node.role == "columnheader":
+            value = cell_under(page, anchor)
+        elif node.role == "rowheader":
+            value = cell_right_of(page, anchor)
+        elif node.role in VALUE_ROLES:
+            value = anchor
+        else:
+            continue
+        if value is None:
+            continue
+        if not page.visible(value):
+            saw_hidden = True
+            continue
+        hits.append((value, node.name))
+    values = unique([v for v, _ in hits])
+    if not values:
+        return Miss(
+            "not_visible" if saw_hidden else "no_match", f"no visible element is named {name!r}"
+        )
+    if len(values) > 1:
+        return Miss("ambiguous", f"{len(values)} elements are named {name!r}")
+    return values[0], next(n for v, n in hits if v is values[0])
+
+
+class AxTreeRung(RungBase):
+    rung_id: int = 2
+    family: Family = Family.TEXT_SEMANTIC
+
+    def attempt(self, page: PageSource, target: FieldTarget) -> ResolvedElement | Miss:
+        found = locate_by_name(page, expected_label(target))
+        if isinstance(found, Miss):
+            return found
+        el, spelled = found
+        return self.found(page, el, AnchorEvidence(accessible_name=spelled))
+```
+
+- [ ] **Step 5: Register it**
+
+In `selector_drift/resolve/cascade.py`, add the import and replace the empty list:
+
+```python
+from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
+
+REGISTERED_RUNGS: list[Rung] = [AxTreeRung()]
+```
+
+- [ ] **Step 6: Run them and make sure they pass**
+
+Run: `uv run pytest tests/resolve -m unit -v`
+Expected: PASS, 68 tests (51 from Task 13, 17 new).
+
+Run: `uv run pytest tests/resolve/test_page_source_parity.py -m e2e -v`
+Expected: PASS, 15 tests — the 13 resolve-parity cases now exercise rung 2 on both sources.
+
+Run: *the fast check*. Expected: clean.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add selector_drift/resolve/rungs/r2_axtree.py tests/resolve/test_r2_axtree.py
-git commit -m "feat(resolve): rung 2, accessibility tree"
+git add selector_drift/resolve/labels.py selector_drift/resolve/grid.py \
+        selector_drift/resolve/rungs/r2_axtree.py selector_drift/resolve/cascade.py \
+        tests/resolve/test_r2_axtree.py
+git commit -m "feat(resolve): rung 2, accessibility tree, visibility-gated"
 ```
 
 ---
@@ -4709,50 +11595,356 @@ git commit -m "feat(resolve): rung 2, accessibility tree"
 
 **Files:**
 - Create: `selector_drift/resolve/rungs/r3_anchors.py`
+- Modify: `selector_drift/resolve/cascade.py` — register `AnchorRung()`
 - Test: `tests/resolve/test_r3_anchors.py`
 
 **Interfaces:**
-- Consumes: `Rung`, `AnchorEvidence`, `Family` (Task 13), `Relation` (Task 5).
-- Produces: `AnchorRung`, `rung_id = 3`, `family = Family.TEXT_SEMANTIC`. Resolves "the value in the cell to the right of the label X". Populates `AnchorEvidence.label_text`.
+- Consumes: `RungBase`, `AnchorEvidence`, `Family`, `Miss` (Task 13); `grid.py`, `labels.py` (Task 14); `FieldTarget`, `Relation` (Task 5).
+- Produces:
+  - `AnchorRung`: `rung_id = 3`, `family = Family.TEXT_SEMANTIC`. Resolves "the value in the cell to the right of the label X". Populates `AnchorEvidence.label_text` only
+  - `value_for(page, label_element, relation) -> HtmlElement | None`
+  - `locate_by_label(page, label, relation) -> tuple[HtmlElement, str] | Miss` — also rung 1's re-verification of a stored `label_text` (Task 17)
+
+**Rung 3 anchors on visible text, not on the accessibility tree — that is what makes it a different
+rung from 2 in the same family.** The anchor is the deepest visible element whose whole text is the
+label. So an `img alt` header (`ImageHeader`) is a rung-2 case and a `no_match` here, while a label
+rendered as plain text in a layout rung 2 cannot relate (a `<span>` beside a `<span>`) is rung 3's.
+
+**Where HTML already defines the relation, the markup wins over the spec.** A column header relates
+to its column, a row header to its row, `<dt>` to its `<dd>`, `<label>` to its control.
+`FieldTarget.relation` (`RIGHT_OF`, `BELOW`, `WITHIN`) governs free-text anchors only. This is not a
+nicety: the bench spec gives `claim_number` `relation: right_of` (it describes the detail page's
+`dt`/`dd`), and applied literally to the results table's header it would land on the **next header**
+— a rung that "heals" to the Claimant column. A free-text anchor with no declared relation resolves
+nothing rather than guessing a direction.
+
+**An ambiguous anchor is refused, never taken first (Task 11A, `DuplicateLabel`).** Two visible
+elements whose text is "Claim Number" that anchor two different values is `ambiguous`. A hidden label
+anchors nothing (H9) and reports `not_visible`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/resolve/test_r3_anchors.py
+from __future__ import annotations
+
 import pytest
+
+from selector_drift.resolve.page import StaticPageSource
 from selector_drift.resolve.rungs.r3_anchors import AnchorRung
-from testbench.mutations.class_rename import ClassRename
-from testbench.mutations.id_churn import IdChurn
-from testbench.mutations.framework_markup import FrameworkMarkup
-from testbench.mutations.table_to_div import TableToDiv
-from testbench.mutations.label_reword import LabelReword
+from selector_drift.resolve.trace import Family, Miss
+from selector_drift.spec.schema import Relation
+from tests.resolve.conftest import CLAIM_NUMBER, BenchPage
 
-@pytest.mark.parametrize("mutation", [ClassRename(), IdChurn(), FrameworkMarkup(), TableToDiv()])
-def test_anchors_survive_restyling_and_markup_swaps(mutation, bench_page):
-    el = AnchorRung().resolve(bench_page.mutated(mutation), CLAIM_NUMBER)
-    assert el is not None and el.anchor.label_text == "Claim Number"
+DETAIL = """<html><body><h1>Claim AB12345678</h1><dl class="claim-detail">
+<dt>Claim Number</dt><dd id="value">AB12345678</dd>
+<dt>Claimant</dt><dd>Test Person One</dd></dl></body></html>"""
 
-def test_anchors_fail_on_label_reword(bench_page):
-    assert AnchorRung().resolve(bench_page.mutated(LabelReword()), CLAIM_NUMBER) is None
+
+def _page(body: str) -> StaticPageSource:
+    return StaticPageSource(f"<html><body>{body}</body></html>")
+
+
+@pytest.mark.unit
+def test_rung_three_is_text_semantic() -> None:
+    assert (AnchorRung.rung_id, AnchorRung.family) == (3, Family.TEXT_SEMANTIC)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mutation", ["ClassRename", "IdChurn", "FrameworkMarkup", "TableToDiv"])
+def test_anchors_survive_restyling_and_markup_swaps(mutation: str, bench: BenchPage) -> None:
+    page = bench.mutated(mutation)
+    el = AnchorRung().resolve(page.source(), CLAIM_NUMBER)
+    assert el is not None and el.node_id in page.truth("claim_number")
+    assert el.anchor.label_text == "Claim Number"
+
+
+@pytest.mark.unit
+def test_anchors_fail_on_label_reword(bench: BenchPage) -> None:
+    got = AnchorRung().attempt(bench.mutated("LabelReword").source(), CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "no_match"
+
+
+@pytest.mark.unit
+def test_a_duplicated_label_is_refused_not_taken_first(bench: BenchPage) -> None:
+    """Task 11A: rung 3 must refuse an ambiguous anchor rather than take the first."""
+    got = AnchorRung().attempt(bench.mutated("DuplicateLabel").source(), CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "ambiguous"
+
+
+@pytest.mark.unit
+def test_a_column_header_relates_to_its_column_whatever_the_spec_relation(bench: BenchPage) -> None:
+    """The bench spec says right_of (it describes the detail page); applied literally to a
+    results-table header it would land on the next header."""
+    assert CLAIM_NUMBER.relation is Relation.RIGHT_OF
+    el = AnchorRung().resolve(bench.source(), CLAIM_NUMBER)
+    assert el is not None and el.node_id == bench.truth("claim_number")[0]
+
+
+@pytest.mark.unit
+def test_a_definition_term_relates_to_its_definition() -> None:
+    page = StaticPageSource(DETAIL)
+    el = AnchorRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#value")[0])
+
+
+@pytest.mark.unit
+def test_a_label_element_relates_to_its_control() -> None:
+    page = _page('<label for="c">Claim Number:</label><input id="c" value="AB12345678">')
+    el = AnchorRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#c")[0])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("relation", "body"),
+    [
+        (Relation.RIGHT_OF, '<div><span>Claim Number</span><span id="v">AB12345678</span></div>'),
+        (Relation.BELOW, '<div><p>Claim Number</p></div><div><p id="v">AB12345678</p></div>'),
+        (
+            Relation.WITHIN,
+            '<section><h2>Claim Number</h2><div><b id="v">AB12345678</b></div></section>',
+        ),
+    ],
+)
+def test_a_free_text_anchor_follows_the_declared_relation(relation: Relation, body: str) -> None:
+    page = _page(body)
+    target = CLAIM_NUMBER.model_copy(update={"relation": relation})
+    el = AnchorRung().resolve(page, target)
+    assert el is not None and el.node_id == page.node_id(page.query("#v")[0])
+
+
+@pytest.mark.unit
+def test_a_free_text_anchor_with_no_declared_relation_resolves_nothing() -> None:
+    page = _page("<div><span>Claim Number</span><span>AB12345678</span></div>")
+    target = CLAIM_NUMBER.model_copy(update={"relation": None})
+    assert AnchorRung().resolve(page, target) is None
+
+
+@pytest.mark.unit
+def test_a_hidden_label_is_never_an_anchor() -> None:
+    page = _page("<div hidden><span>Claim Number</span><span>ZZ00000000</span></div>")
+    got = AnchorRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "not_visible"
+
+
+@pytest.mark.unit
+def test_label_text_is_the_label_as_the_page_spells_it() -> None:
+    page = StaticPageSource(DETAIL.replace("<dt>Claim Number</dt>", "<dt>Claim  number:</dt>"))
+    el = AnchorRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.anchor.label_text == "Claim number:"
+    assert el.anchor.accessible_name is None and el.anchor.header_text is None
 ```
+
+**Changes from the first draft's two tests.** Kept; survival now asserts the true node, and the reword
+asserts `no_match`. Added: the duplicate-label refusal Task 11A asks of rung 3, the markup-over-spec
+relation rule proved on the bench spec's own `right_of`, the detail page's `dt`/`dd` (a fixture
+modelled on Task 7's `detail.html`, since the bench has no render function for it named in the plan),
+`<label for>`, and each free-text relation.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/resolve/test_r3_anchors.py -v`
-Expected: FAIL.
+Run: `uv run pytest tests/resolve/test_r3_anchors.py -m unit -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.resolve.rungs.r3_anchors'`.
 
-- [ ] **Step 3: Implement** — locate the label text node, walk the declared `Relation` (`RIGHT_OF`, `BELOW`, `WITHIN`), return the target. Register in `REGISTERED_RUNGS`.
+- [ ] **Step 3: Implement rung 3**
 
-- [ ] **Step 4: Run them and make sure they pass**
+```python
+# selector_drift/resolve/rungs/r3_anchors.py
+"""Rung 3: a visible text anchor and a structural relation from it.
 
-Run: `uv run pytest tests/resolve -v`
-Expected: PASS, 5 new tests.
+Where HTML already defines the relation, the markup wins over the spec: a column header
+relates to its column, a row header to its row, <dt> to its <dd>, <label> to its control.
+FieldTarget.relation governs free-text anchors only -- the spec's `right_of` describes the
+detail page, and applied to a results-table header it would land on the next header.
+"""
 
-- [ ] **Step 5: Commit**
+from __future__ import annotations
+
+from lxml.html import HtmlElement
+
+from selector_drift.resolve.aria import NON_RENDERED, ancestors, element_children, tag_of
+from selector_drift.resolve.grid import cell_right_of, cell_under, nearest
+from selector_drift.resolve.labels import expected_label, normalise
+from selector_drift.resolve.page import PageSource
+from selector_drift.resolve.rungs.base import (
+    AnchorEvidence,
+    Family,
+    Miss,
+    ResolvedElement,
+    RungBase,
+    text_of,
+    unique,
+)
+from selector_drift.spec.schema import FieldTarget, Relation
+
+_CONTROLS = ("input", "select", "textarea")
+
+
+def _label_elements(page: PageSource, want: str) -> list[HtmlElement]:
+    """The deepest elements whose whole visible text is the label."""
+    out = []
+    for el in page.root().iter():
+        if not isinstance(el, HtmlElement) or not isinstance(el.tag, str):
+            continue
+        if tag_of(el) in NON_RENDERED or normalise(text_of(el)) != want:
+            continue
+        if any(normalise(text_of(c)) == want for c in element_children(el)):
+            continue
+        out.append(el)
+    return out
+
+
+def _leaf_with_text(
+    candidates: list[HtmlElement], page: PageSource, exclude: HtmlElement
+) -> HtmlElement | None:
+    for el in candidates:
+        if el is exclude or any(a is el for a in ancestors(exclude)):
+            continue
+        if not text_of(el) or not page.visible(el):
+            continue
+        if any(text_of(c) for c in element_children(el)):
+            continue
+        return el
+    return None
+
+
+def _free_relation(
+    page: PageSource, label: HtmlElement, relation: Relation | None
+) -> HtmlElement | None:
+    if relation is Relation.RIGHT_OF:
+        box: HtmlElement | None = label
+        for _ in range(3):
+            if box is None or tag_of(box) == "body":
+                return None
+            sib = box.getnext()
+            while sib is not None:
+                if (
+                    isinstance(sib, HtmlElement)
+                    and isinstance(sib.tag, str)
+                    and page.visible(sib)
+                    and text_of(sib)
+                ):
+                    return sib
+                sib = sib.getnext()
+            parent = box.getparent()
+            box = parent if isinstance(parent, HtmlElement) else None
+        return None
+    if relation is Relation.BELOW:
+        following = [e for e in label.xpath("following::*") if isinstance(e, HtmlElement)]
+        return _leaf_with_text(following, page, label)
+    if relation is Relation.WITHIN:
+        container = label.getparent()
+        if not isinstance(container, HtmlElement):
+            return None
+        inside = [e for e in container.iterdescendants() if isinstance(e, HtmlElement)]
+        return _leaf_with_text(inside, page, label)
+    return None
+
+
+def value_for(
+    page: PageSource, label: HtmlElement, relation: Relation | None
+) -> HtmlElement | None:
+    header = nearest(page, label, frozenset({"columnheader", "rowheader"}))
+    if header is not None:
+        if page.role(header) == "columnheader":
+            return cell_under(page, header)
+        return cell_right_of(page, header)
+    term = next((a for a in [label, *ancestors(label)] if tag_of(a) == "dt"), None)
+    if term is not None:
+        sib = term.getnext()
+        while sib is not None and not (isinstance(sib, HtmlElement) and tag_of(sib) == "dd"):
+            if isinstance(sib, HtmlElement) and tag_of(sib) == "dt":
+                return None
+            sib = sib.getnext()
+        return sib if isinstance(sib, HtmlElement) else None
+    lab = next((a for a in [label, *ancestors(label)] if tag_of(a) == "label"), None)
+    if lab is not None:
+        target_id = lab.get("for")
+        if target_id:
+            hits = page.root().xpath("//*[@id=$i]", i=target_id)
+            if isinstance(hits, list) and len(hits) == 1 and isinstance(hits[0], HtmlElement):
+                return hits[0]
+            return None
+        return next(
+            (
+                d
+                for d in lab.iterdescendants()
+                if isinstance(d, HtmlElement) and tag_of(d) in _CONTROLS
+            ),
+            None,
+        )
+    return _free_relation(page, label, relation)
+
+
+def locate_by_label(
+    page: PageSource, label: str, relation: Relation | None
+) -> tuple[HtmlElement, str] | Miss:
+    """The one visible value the text `label` anchors. Also rung 1's re-verification of a
+    stored label_text (Task 17)."""
+    want = normalise(label)
+    if not want:
+        return Miss("no_match", "empty label")
+    hits: list[tuple[HtmlElement, str]] = []
+    saw_hidden = False
+    for lab in _label_elements(page, want):
+        if not page.visible(lab):
+            saw_hidden = True  # H9: a hidden label anchors nothing
+            continue
+        value = value_for(page, lab, relation)
+        if value is None:
+            continue
+        if not page.visible(value):
+            saw_hidden = True
+            continue
+        hits.append((value, text_of(lab)))
+    values = unique([v for v, _ in hits])
+    if not values:
+        return Miss(
+            "not_visible" if saw_hidden else "no_match",
+            f"no visible value is anchored by the text {label!r}",
+        )
+    if len(values) > 1:
+        return Miss("ambiguous", f"the text {label!r} anchors {len(values)} values")
+    return values[0], next(t for v, t in hits if v is values[0])
+
+
+class AnchorRung(RungBase):
+    rung_id: int = 3
+    family: Family = Family.TEXT_SEMANTIC
+
+    def attempt(self, page: PageSource, target: FieldTarget) -> ResolvedElement | Miss:
+        found = locate_by_label(page, expected_label(target), target.relation)
+        if isinstance(found, Miss):
+            return found
+        el, spelled = found
+        return self.found(page, el, AnchorEvidence(label_text=spelled))
+```
+
+- [ ] **Step 4: Register it**
+
+```python
+from selector_drift.resolve.rungs.r3_anchors import AnchorRung
+
+REGISTERED_RUNGS: list[Rung] = [AxTreeRung(), AnchorRung()]
+```
+
+- [ ] **Step 5: Run them and make sure they pass**
+
+Run: `uv run pytest tests/resolve -m unit -v`
+Expected: PASS, 84 tests (68 before, 16 new).
+
+Run: `uv run pytest tests/resolve/test_page_source_parity.py -m e2e -v`
+Expected: PASS, 15 tests, now over rungs 2 and 3.
+
+Run: *the fast check*. Expected: clean.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add selector_drift/resolve/rungs/r3_anchors.py tests/resolve/test_r3_anchors.py
-git commit -m "feat(resolve): rung 3, text anchors and relations"
+git add selector_drift/resolve/rungs/r3_anchors.py selector_drift/resolve/cascade.py \
+        tests/resolve/test_r3_anchors.py
+git commit -m "feat(resolve): rung 3, text anchors with markup-defined relations"
 ```
 
 ---
@@ -4761,49 +11953,348 @@ git commit -m "feat(resolve): rung 3, text anchors and relations"
 
 **Files:**
 - Create: `selector_drift/resolve/rungs/r4_heuristics.py`
+- Modify: `selector_drift/resolve/cascade.py` — register `HeuristicRung()`
 - Test: `tests/resolve/test_r4_heuristics.py`
 
 **Interfaces:**
-- Consumes: `Rung`, `AnchorEvidence`, `Family` (Task 13).
-- Produces: `HeuristicRung`, `rung_id = 4`, `family = Family.STRUCTURAL`. Tries `data-testid`, then stable id patterns, then **column index with header verification** — it reads the header cell at the resolved index and requires it to match the expected header. Populates `AnchorEvidence.header_text`.
+- Consumes: `RungBase`, `AnchorEvidence`, `Family`, `Miss` (Task 13); `grid.py`, `labels.py` (Task 14); `FieldTarget` (Task 5).
+- Produces:
+  - `HeuristicRung`: `rung_id = 4`, `family = Family.STRUCTURAL`. In order: a test id naming the field (`data-testid`, `data-test-id`, `data-test`, `data-qa`, `data-cy`); a **stable** `id`, `name` or class naming the field; the column under the header that names the field, **header-verified**. Populates `AnchorEvidence.header_text` only — the resolved cell's column header, whichever strategy won
+  - `names_field(value, want_tokens) -> bool`, `AFFIXES`, `UNSTABLE_ID`, `TESTID_ATTRS`
+  - `header_holds(page, el, header_text) -> bool` — rung 1's re-verification of a stored `header_text` (Task 17)
+
+**Rung 4 is the one structural rung, so it must not read label text except through the header —
+that is what lets it heal the one benign class the text family cannot (design §5.6a).** On a
+`LabelReword`, rungs 2 and 3 return `None`; rung 4 finds the cell by an attribute that names the field.
+"Names the field" is **token equality after dropping affixes** (`col`, `cell`, `field`, `value`, …):
+`claim-number`, `claimNumber` and `col-claim_number` name `claim_number`; `prior-claim-number` and
+`claim` do not. A generated id (`claim-number-8f3a2c19`, `ember123`, `:r1:`) is not evidence — it is
+exactly what `IdChurn` churns.
+
+**On the real bench this heal rides on a class, not a test id.** Task 7's `results.html` renders
+`<td class="col-claim_number">` and no `data-testid` at all; Task 22's table says rung 4 "heals via
+`data-testid`", which is true only of Task 19's hand-written fixture. The class survives
+`LabelReword` (Task 10: "changes the header and nothing else"); if `ClassRename` and `LabelReword`
+ever land on the same bench day, rung 4 has no signal and the field escalates — which the log should
+show, not hide.
+
+**Header verification is what stops a bare column index being a guess.** The third strategy takes the
+header whose accessible name is the field's (so `ImageHeader`'s `<img alt="Amount">` counts — Task
+11A: *"header verification must read accessible text, not `textContent`"*), finds the first data
+row's cell at that column index, and then recomputes **that cell's** header from the cell's own
+position (colspans counted, `headers=""` honoured). If it is not the same header, the outcome is
+`anchor_mismatch` and nothing is returned.
+
+**The first draft's `ColumnReorder → None` test is replaced, and the reason is worth stating.** It
+assumed rung 4 holds a remembered column index that a reorder makes wrong. It holds none — the `Rung`
+protocol takes no cache, and Tasks 22/26 construct `HeuristicRung()` with no arguments — so it reads
+attributes and headers **on today's page**, and on the bench's reorder both still point at the true
+cell. Its obligation is the safety property, asserted as such: **after a reorder rung 4 returns the
+true cell or nothing, never another column.** The positional failure the old test wanted is now
+tested directly (a colspan shifts the row under the header), and the reorder's real danger — a stale
+*cached* position — is rung 1's to refuse (Task 17). This is a deliberate divergence from design §5.1's
+"column reorder (mis-resolves)" for rung 4; see the inconsistency note on Task 26's decoy assertion.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/resolve/test_r4_heuristics.py
-from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
-from testbench.mutations.label_reword import LabelReword
-from testbench.mutations.class_rename import ClassRename
-from testbench.mutations.column_reorder import ColumnReorder
+from __future__ import annotations
 
-def test_heuristics_heals_through_label_reword(bench_page):
-    assert HeuristicRung().resolve(bench_page.mutated(LabelReword()), CLAIM_NUMBER) is not None
+import pytest
 
-def test_heuristics_heals_through_restyling(bench_page):
-    assert HeuristicRung().resolve(bench_page.mutated(ClassRename()), CLAIM_NUMBER) is not None
+from selector_drift.resolve.page import StaticPageSource
+from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung, names_field
+from selector_drift.resolve.trace import Family, Miss
+from tests.resolve.conftest import AMOUNT, CLAIM_NUMBER, BenchPage
 
-def test_heuristics_refuses_when_the_header_at_that_index_does_not_match(bench_page):
-    """Header verification is what stops a bare column index being a guess."""
-    assert HeuristicRung().resolve(bench_page.mutated(ColumnReorder()), CLAIM_NUMBER) is None
+
+def _page(body: str) -> StaticPageSource:
+    return StaticPageSource(f"<html><body>{body}</body></html>")
+
+
+@pytest.mark.unit
+def test_rung_four_is_structural() -> None:
+    assert (HeuristicRung.rung_id, HeuristicRung.family) == (4, Family.STRUCTURAL)
+
+
+@pytest.mark.unit
+def test_heuristics_heals_through_label_reword(bench: BenchPage) -> None:
+    """The one benign class the text family cannot survive (design 5.6a)."""
+    page = bench.mutated("LabelReword")
+    el = HeuristicRung().resolve(page.source(), CLAIM_NUMBER)
+    assert el is not None and el.node_id in page.truth("claim_number")
+
+
+@pytest.mark.unit
+def test_heuristics_heals_through_restyling(bench: BenchPage) -> None:
+    page = bench.mutated("ClassRename")
+    el = HeuristicRung().resolve(page.source(), CLAIM_NUMBER)
+    assert el is not None and el.node_id in page.truth("claim_number")
+
+
+@pytest.mark.unit
+def test_heuristics_never_lands_on_another_column_after_a_reorder(bench: BenchPage) -> None:
+    """Replaces the first draft's `ColumnReorder -> None`, which assumed rung 4 has a
+    remembered column index to be wrong about. It has none: it reads attributes and headers
+    on today's page. Its obligation under a reorder is never to return a wrong cell."""
+    page = bench.mutated("ColumnReorder")
+    el = HeuristicRung().resolve(page.source(), CLAIM_NUMBER)
+    assert el is None or el.node_id in page.truth("claim_number")
+
+
+@pytest.mark.unit
+def test_header_verification_refuses_a_cell_that_sits_under_another_header() -> None:
+    """Header verification is what stops a bare column index being a guess: the first data
+    row's cell at the header's index spans in from the Claimant column."""
+    page = _page("""<table><tr><th>Claimant</th><th>Claim Number</th><th>Amount</th></tr>
+<tr><td colspan="2">Test Person One AB12345678</td><td>100.00</td></tr></table>""")
+    got = HeuristicRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "anchor_mismatch"
+
+
+@pytest.mark.unit
+def test_header_verification_honours_the_headers_attribute() -> None:
+    page = _page("""<table><tr><th id="n">Claim Number</th><th id="a">Amount</th></tr>
+<tr><td headers="a">100.00</td><td headers="n">AB12345678</td></tr></table>""")
+    got = HeuristicRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "anchor_mismatch"
+
+
+@pytest.mark.unit
+def test_a_test_id_beats_a_class_and_a_header() -> None:
+    page = _page("""<table><tr><th>Claim Number</th><th>Other</th></tr>
+<tr><td class="col-claim_number">AB12345678</td>
+<td data-testid="claim-number" id="v">CD23456789</td></tr></table>""")
+    el = HeuristicRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#v")[0])
+
+
+@pytest.mark.unit
+def test_a_generated_id_is_not_evidence() -> None:
+    page = _page('<p id="claim-number-8f3a2c19">AB12345678</p>')
+    assert HeuristicRung().resolve(page, CLAIM_NUMBER) is None
+
+
+@pytest.mark.unit
+def test_our_own_and_the_benchs_data_sd_attributes_are_never_read() -> None:
+    page = _page('<p data-sd-truth="claim_number" data-sd-node="claim_number">AB12345678</p>')
+    assert HeuristicRung().resolve(page, CLAIM_NUMBER) is None
+
+
+@pytest.mark.unit
+def test_two_headers_with_the_label_and_no_attribute_is_ambiguous() -> None:
+    page = _page("""<table><tr><th>Claim Number</th><th>Claim Number</th></tr>
+<tr><td>AB12345678</td><td>CD23456789</td></tr></table>""")
+    got = HeuristicRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "ambiguous"
+
+
+@pytest.mark.unit
+def test_an_image_header_is_verified_by_its_accessible_text(bench: BenchPage) -> None:
+    """Task 11A: header verification reads accessible text, not textContent."""
+    page = bench.mutated("ImageHeader")
+    html = page.html.replace("col-amount", "c9")  # force the header strategy
+    source = StaticPageSource(html)
+    el = HeuristicRung().resolve(source, AMOUNT)
+    assert el is not None and el.node_id in page.truth("amount")
+    assert el.anchor.header_text == "Amount"
+
+
+@pytest.mark.unit
+def test_header_text_is_recorded_whichever_strategy_won(bench: BenchPage) -> None:
+    page = bench.mutated("LabelReword")
+    el = HeuristicRung().resolve(page.source(), CLAIM_NUMBER)
+    assert el is not None and el.anchor.header_text not in (None, "Claim Number")
+    assert el.anchor.accessible_name is None and el.anchor.label_text is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("value", "names"),
+    [
+        ("claim-number", True),
+        ("claimNumber", True),
+        ("col-claim_number", True),
+        ("claim_number_value", True),
+        ("prior-claim-number", False),
+        ("claim", False),
+    ],
+)
+def test_names_field_is_token_equality_not_substring(value: str, names: bool) -> None:
+    assert names_field(value, ("claim", "number")) is names
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/resolve/test_r4_heuristics.py -v`
-Expected: FAIL.
+Run: `uv run pytest tests/resolve/test_r4_heuristics.py -m unit -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.resolve.rungs.r4_heuristics'`.
 
-- [ ] **Step 3: Implement, header verification included** — a column index whose header does not match is never returned. Register in `REGISTERED_RUNGS`.
+- [ ] **Step 3: Implement rung 4, header verification included**
 
-- [ ] **Step 4: Run them and make sure they pass**
+```python
+# selector_drift/resolve/rungs/r4_heuristics.py
+"""Rung 4: attribute and structural heuristics -- the STRUCTURAL family.
 
-Run: `uv run pytest tests/resolve -v`
-Expected: PASS, 3 new tests.
+In order: a test id naming the field; a stable id / name / class naming the field; the
+column under the header that names the field, header-verified. No strategy reads visible
+label text except through the header, so a label reword does not defeat the first two.
+Never reads a data-sd-* attribute: those are ours (node ids) and the bench's (truth marks).
+"""
 
-- [ ] **Step 5: Commit**
+from __future__ import annotations
+
+import re
+
+from lxml.html import HtmlElement
+
+from selector_drift.resolve.grid import (
+    cell_at,
+    column_header,
+    column_of,
+    first_data_row,
+    grid_of,
+    headers_named,
+    row_of,
+)
+from selector_drift.resolve.labels import expected_label, field_tokens, normalise, tokens
+from selector_drift.resolve.page import PageSource
+from selector_drift.resolve.rungs.base import (
+    AnchorEvidence,
+    Family,
+    Miss,
+    ResolvedElement,
+    RungBase,
+)
+from selector_drift.spec.schema import FieldTarget
+
+TESTID_ATTRS = ("data-testid", "data-test-id", "data-test", "data-qa", "data-cy")
+AFFIXES = frozenset({"col", "column", "cell", "field", "value", "val", "td", "th", "data", "js"})
+# Generated ids churn by design (IdChurn); an id that looks generated is not evidence.
+UNSTABLE_ID = re.compile(
+    r"\d{3,}|[0-9a-f]{6,}|^:r|^(?:ember|ng-|react-|mui-|css-|sc-|jsx-)", re.IGNORECASE
+)
+
+
+def names_field(value: str, want: tuple[str, ...]) -> bool:
+    return tuple(t for t in tokens(value) if t not in AFFIXES) == want
+
+
+def _pick(page: PageSource, found: list[HtmlElement]) -> HtmlElement | Miss | None:
+    """The first visible data-bearing match; ambiguous if its row holds another."""
+    candidates = [el for el in found if page.visible(el) and page.role(el) != "columnheader"]
+    if not candidates:
+        return None
+    first = candidates[0]
+    row = row_of(page, first)
+    same = [c for c in candidates if row is not None and row_of(page, c) is row]
+    if row is None and len(candidates) > 1:
+        return Miss("ambiguous", f"{len(candidates)} elements outside any row name the field")
+    if len(same) > 1:
+        return Miss("ambiguous", f"{len(same)} cells in one row name the field")
+    return first
+
+
+def _by_attributes(page: PageSource, target: FieldTarget) -> HtmlElement | Miss | None:
+    want = field_tokens(target)
+    everything = [
+        el for el in page.root().iter() if isinstance(el, HtmlElement) and isinstance(el.tag, str)
+    ]
+    by_testid = [
+        el for el in everything if any(names_field(el.get(a) or "", want) for a in TESTID_ATTRS)
+    ]
+    picked = _pick(page, by_testid)
+    if picked is not None:
+        return picked
+
+    def stable(el: HtmlElement) -> bool:
+        ident = el.get("id") or ""
+        if ident and not UNSTABLE_ID.search(ident) and names_field(ident, want):
+            return True
+        if names_field(el.get("name") or "", want):
+            return True
+        return any(names_field(c, want) for c in (el.get("class") or "").split())
+
+    return _pick(page, [el for el in everything if stable(el)])
+
+
+def _by_header(page: PageSource, target: FieldTarget) -> HtmlElement | Miss | None:
+    headers = headers_named(page, expected_label(target))
+    if not headers:
+        return None
+    if len(headers) > 1:
+        return Miss("ambiguous", f"{len(headers)} visible headers read {target.name!r}")
+    header = headers[0]
+    grid, index = grid_of(page, header), column_of(page, header)
+    row = first_data_row(page, grid) if grid is not None else None
+    if row is None or index is None:
+        return None
+    cell = cell_at(page, row, index)
+    if cell is None:
+        return Miss("no_match", f"the first data row has no cell at column {index}")
+    if column_header(page, cell) is not header:
+        return Miss(
+            "anchor_mismatch",
+            f"header verification: the cell at column {index} sits under another header",
+        )
+    return cell
+
+
+class HeuristicRung(RungBase):
+    rung_id: int = 4
+    family: Family = Family.STRUCTURAL
+
+    def attempt(self, page: PageSource, target: FieldTarget) -> ResolvedElement | Miss:
+        refusal: Miss | None = None
+        for strategy in (_by_attributes, _by_header):
+            got = strategy(page, target)
+            if isinstance(got, Miss):
+                refusal = refusal or got
+                continue
+            if got is not None:
+                header = column_header(page, got)
+                text = page.name(header) if header is not None else None
+                return self.found(page, got, AnchorEvidence(header_text=text or None))
+        return refusal or Miss("no_match", f"no structural signal names {target.name!r}")
+
+
+def header_holds(page: PageSource, el: HtmlElement, header_text: str) -> bool:
+    """Rung 1's re-verification of a stored header_text: the element's column header still
+    reads it, and no other visible header on the page does (DuplicateLabel)."""
+    header = column_header(page, el)
+    if header is None or normalise(page.name(header)) != normalise(header_text):
+        return False
+    return len(headers_named(page, header_text)) == 1
+```
+
+**It never reads a `data-sd-*` attribute.** `data-sd-node` is ours (Task 13) and `data-sd-truth` is the
+bench's answer-key mark (Task 7): a heuristic that read either would be reading the answer. The
+test-id list and the stable-attribute list name their attributes explicitly, so neither can match.
+
+- [ ] **Step 4: Register it**
+
+```python
+from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
+
+REGISTERED_RUNGS: list[Rung] = [AxTreeRung(), AnchorRung(), HeuristicRung()]
+```
+
+- [ ] **Step 5: Run them and make sure they pass**
+
+Run: `uv run pytest tests/resolve -m unit -v`
+Expected: PASS, 102 tests (84 before, 18 new).
+
+Run: `uv run pytest tests/resolve/test_page_source_parity.py -m e2e -v`
+Expected: PASS, 15 tests, now over rungs 2, 3 and 4.
+
+Run: *the fast check*. Expected: clean.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add selector_drift/resolve/rungs/r4_heuristics.py tests/resolve/test_r4_heuristics.py
-git commit -m "feat(resolve): rung 4, heuristics with header verification"
+git add selector_drift/resolve/rungs/r4_heuristics.py selector_drift/resolve/cascade.py \
+        tests/resolve/test_r4_heuristics.py
+git commit -m "feat(resolve): rung 4, structural heuristics with header verification"
 ```
 
 ---
@@ -4811,233 +12302,1142 @@ git commit -m "feat(resolve): rung 4, heuristics with header verification"
 ### Task 17: Rung 1 — the cache that verifies provenance, not just the selector
 
 **Files:**
-- Create: `selector_drift/resolve/rungs/r1_cache.py`, `selector_drift/resolve/cache.py`
-- Test: `tests/resolve/test_r1_cache.py`
+- Create: `selector_drift/resolve/rungs/r1_cache.py`
+- Modify: `selector_drift/resolve/cache.py` — add `SelectorCache` (the Postgres read side)
+- Modify: `selector_drift/resolve/cascade.py` — register `CacheRung()` at position 0
+- Test: `tests/resolve/test_r1_cache.py`, `tests/resolve/test_selector_cache.py`, `tests/test_cache_write_site.py`
+- **Written here, landed with Task 26A** (Step 8 below): `selector_drift/orchestrate/cache_writer.py`, `tests/orchestrate/test_cache_writer.py`, and the `only-orchestrate-writes-the-cache` stanza in `.importlinter`
 
 **Interfaces:**
-- Consumes: `Rung`, `AnchorEvidence`, `Family` (Task 13), `selector_cache` table (Task 3).
+- Consumes: `CachedSelector`, `CacheReader`, `NO_CACHE` (Task 13); `locate_by_name` (Task 14), `locate_by_label` (Task 15), `header_holds` (Task 16); `matches` (`selector_drift.spec.schema`, Task 5 — M23); `SelectorCacheEntry`, `Session` (Task 3). Step 8 only: `ValidatedExtraction`, `gate`, `HealContext` (Task 20), `QuarantinedRun` (Task 25), `CandidateExtraction` (Task 27).
 - Produces:
-  - `CachedSelector(selector: str, anchor: AnchorEvidence, set_by_rung: int)`
-  - `SelectorCache.get(target: str, field: str) -> CachedSelector | None`
-  - ~~`SelectorCache.put(validated, element)`~~ — **moved 2026-09-26 to `orchestrate/cache_writer.py` as `CacheWriter.put(validated, element, *, field)`**; see *"Amended 2026-09-26"* at the end of this task. It is still **the entire write-back — self-healing is this line and nothing else** — and its first argument is still the gate's output type (R11/C2). It left `resolve/` because keeping it there made `resolve/` import `validate/`, which Task 1's `judged-cannot-call-judge` contract forbids.
+  - `CacheRung(cache=NO_CACHE, *, portal="", spec_version=None)`, `rung_id = 1`, `family = Family.NONE`; `.bind(cache, *, portal, spec_version)` (the runner's `CacheBound` hook)
+  - `anchor_holds(page, el, cached, target) -> str | None` — `None` when every recorded piece of anchor evidence still lands on `el`, else the reason
+  - `SelectorCache(session_factory=Session).get(target, field, spec_version=None) -> CachedSelector | None` — **read only**; `spec_version=None` reads the highest version (replay and tests only; the runner always passes the run's version, M14)
+  - Step 8: `CacheWriter(*, target, spec_version, session_factory=Session)`, `CacheWriter.for_run_key(run_key)`, `CacheWriter.put(validated: ValidatedExtraction, element: ResolvedElement, *, field: str) -> None` — **the entire write-back; self-healing is this line and nothing else**
 
-> **Executor note.** In Step 1 below, the three tests that call `warm_cache.put(...)` are written in
-> `tests/orchestrate/test_cache_writer.py` against `CacheWriter`, and run with Task 26A. Do **not**
-> implement `put` in `resolve/cache.py`; this task delivers the read side only.
+**Rung 1 is built after rungs 2–4 on purpose:** the anchor evidence it stores is produced by whichever
+rung healed, and it re-verifies that evidence **with the same rung's own locate step**.
 
-**When `put()` is called is the whole safety argument, and the first draft did not say (C2).**
-It described `put()` as the write-back and left the timing to the implementer. The obvious reading —
-write the cache the moment a rung heals — is catastrophic and silent:
+**The most dangerous hole in a naive version of this design (design §5.2).** Columns are reordered;
+the cached selector still matches exactly one element; the value still satisfies
+`^[A-Z]{2}\d{8}$`. Rung 1 "succeeds", **no heal is recorded, and the strict path in Task 20 never
+engages** — the adjacent-column failure arriving through the one door left open. So `CacheRung`
+returns an element only if **all four** hold:
 
-> heal at 04:12 → `put()` → gate quarantines the run → **the cache now holds the wrong selector with
-> the wrong anchor** → 04:12 tomorrow, rung 1 matches exactly one element, the stored anchor verifies
-> (it was stored from the bad heal), `trace.healed` is `False`, the strict path in Task 20 never
-> engages, and the wrong column flows into the client's system every night from then on.
+1. the selector matches **exactly one visible** element (H9) — two is `ambiguous`, not a first match;
+2. every recorded piece of anchor evidence **still lands on that element and on no other**: a stored
+   `accessible_name` is re-resolved by rung 2's `locate_by_name`, a stored `label_text` by rung 3's
+   `locate_by_label`, a stored `header_text` must still head the element's column **and be the only
+   visible header on the page that reads so** (`DuplicateLabel`). An entry with no anchor evidence
+   verifies nothing and never hits;
+3. the element's value passes the spec's format via **`spec.matches()`, not
+   `validate.FormatAssertion`** — `judged-cannot-call-judge` forbids `resolve → validate`, so the
+   matcher lives in `spec/` and both packages import it (M23);
+4. the entry is for **this spec version** (M14): a spec edit changes what the field means.
 
-That is the adjacent-column failure made permanent, arriving through the one door §5.2 worked hardest
-to close. Taking `ValidatedExtraction` — which only `validate/gate.py` can mint — makes the ordering
-structural rather than a comment: **there is no way to spell "write the cache" that does not first
-spell "the gate passed".**
-  - `CacheRung(cache: SelectorCache)`, `rung_id = 1`, `family = Family.NONE`
+"Re-verify by re-running the recording rung" is stronger than comparing stored strings: it catches a
+reorder (the name now labels a different cell), a duplicate (the name labels two), and a hidden decoy
+(hidden candidates are never hits) with one mechanism, and it cannot drift from what rungs 2–4 mean by
+a match.
 
-**Rung 1 is built after rungs 2–4 on purpose:** the anchor evidence it stores is produced by whichever rung healed, so those must exist first.
+**When the cache is written is the whole safety argument, and the first draft did not say (C2).**
+The obvious reading — write the cache the moment a rung heals — is catastrophic and silent:
 
-- [ ] **Step 1: Write the failing tests — the most important tests in the repo**
+> heal at 04:12 → write → gate quarantines the run → **the cache now holds the wrong selector with the
+> wrong anchor** → 04:12 tomorrow, rung 1 matches exactly one element, the stored anchor verifies (it
+> was stored from the bad heal), `trace.healed` is `False`, the strict path never engages, and the
+> wrong column flows into the client's system every night from then on.
+
+`CacheWriter.put()` takes a `ValidatedExtraction` — which only `validate/gate.py` can mint — so the
+ordering is structural rather than a comment: **there is no way to spell "write the cache" that does
+not first spell "the gate passed".** It lives in `orchestrate/`, not `resolve/`, because the first
+draft's `SelectorCache.put(validated, element)` made `resolve/` import `validate/`, which
+`judged-cannot-call-judge` forbids (amended 2026-09-26). `tests/test_cache_write_site.py` makes the
+single write site structural too: no module but `orchestrate/cache_writer.py` constructs a
+`SelectorCacheEntry`.
+
+**Why the write-back's code is here but lands with Task 26A.** `CacheWriter` imports
+`ValidatedExtraction` (Task 20) and its tests need `QuarantinedRun` (Task 25) and
+`CandidateExtraction` (Task 27); creating the module now would break `mypy --strict` on the fast check
+for eight tasks. The code has one home — this task — and one landing point — Task 26A, whose
+`accept()` is its only caller.
+
+- [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/resolve/test_r1_cache.py
+from __future__ import annotations
+
+import lxml.html
+import pytest
+
+from selector_drift.resolve.cache import NO_CACHE, CachedSelector
+from selector_drift.resolve.cascade import resolve_cascade
+from selector_drift.resolve.page import StaticPageSource
+from selector_drift.resolve.rungs.base import css_path
 from selector_drift.resolve.rungs.r1_cache import CacheRung
-from testbench.mutations.column_reorder import ColumnReorder
+from selector_drift.resolve.trace import AnchorEvidence, Family, Miss, ResolvedElement
+from selector_drift.spec.schema import matches
+from tests.resolve.conftest import AMOUNT, CLAIM_NUMBER, RESERVE, BenchPage
 
-def test_cache_hit_requires_exactly_one_match(bench_page, warm_cache):
-    page = bench_page.with_duplicate_matching_element()
-    assert CacheRung(warm_cache).resolve(page, CLAIM_NUMBER) is None
 
-def test_column_reorder_fails_rung_one_even_though_the_selector_still_matches(bench_page, warm_cache):
-    """Spec 5.2. The selector still matches exactly one element and the value
-    still satisfies the format assertion — but the anchor has moved, so rung 1
-    MUST fail, so a heal is recorded, so the strict path in Task 20 engages.
-    Without this, the adjacent-column failure is silent and permanent."""
-    page = bench_page.mutated(ColumnReorder())
-    cached = warm_cache.get("testbench", "claim_number")
-    assert page.count_matching(cached.selector) == 1
-    assert CacheRung(warm_cache).resolve(page, CLAIM_NUMBER) is None
+class DictCache:
+    """A CacheReader keyed exactly as selector_cache is: (target, field, spec_version)."""
 
-def test_unchanged_page_is_a_cache_hit(bench_page, warm_cache):
-    el = CacheRung(warm_cache).resolve(bench_page, CLAIM_NUMBER)
+    def __init__(self, entries: dict[tuple[str, str, int], CachedSelector]) -> None:
+        self.entries = entries
+
+    def get(
+        self, target: str, field: str, spec_version: int | None = None
+    ) -> CachedSelector | None:
+        hits = [
+            (v, c)
+            for (t, f, v), c in self.entries.items()
+            if (t, f) == (target, field) and spec_version in (None, v)
+        ]
+        return max(hits, key=lambda h: h[0])[1] if hits else None
+
+
+def warm(html: str, *fields: str) -> DictCache:
+    """The cache after a clean run on `html`: what rungs 2-4 resolved, at spec version 2."""
+    page = StaticPageSource(html)
+    targets = {"claim_number": CLAIM_NUMBER, "amount": AMOUNT, "reserve": RESERVE}
+    entries = {}
+    for name in fields:
+        el, _ = resolve_cascade(page, targets[name], NO_CACHE, record=False)
+        entries[("testbench", name, 2)] = CachedSelector(el.selector, el.anchor, el.rung_id)
+    return DictCache(entries)
+
+
+def rung(cache: DictCache, spec_version: int = 2) -> CacheRung:
+    return CacheRung(cache, portal="testbench", spec_version=spec_version)
+
+
+@pytest.fixture
+def warm_cache(bench: BenchPage) -> DictCache:
+    return warm(bench.html, "claim_number", "amount", "reserve")
+
+
+@pytest.mark.unit
+def test_rung_one_has_no_family_and_is_never_a_confirmer() -> None:
+    assert (CacheRung.rung_id, CacheRung.family) == (1, Family.NONE)
+
+
+@pytest.mark.unit
+def test_unchanged_page_is_a_cache_hit(bench: BenchPage, warm_cache: DictCache) -> None:
+    el = rung(warm_cache).resolve(bench.source(), CLAIM_NUMBER)
     assert el is not None and el.rung_id == 1
+    assert el.node_id == bench.truth("claim_number")[0]
 
-def test_put_stores_the_anchor_from_the_healing_rung(warm_cache, healed_element, validated):
-    warm_cache.put(validated, healed_element)
-    assert warm_cache.get("testbench", "claim_number", spec_version=1).anchor == healed_element.anchor
 
-def test_a_quarantined_heal_does_not_update_the_cache(warm_cache, quarantined_heal):
-    """R11/C2. The single most dangerous ordering bug available in this design: a rejected
-    heal that poisons the cache becomes a rung-1 hit tomorrow, records no heal, and never
-    engages the strict path again."""
-    before = warm_cache.get("testbench", "claim_number", spec_version=1)
-    run_pipeline(quarantined_heal)
-    assert warm_cache.get("testbench", "claim_number", spec_version=1) == before
+@pytest.mark.unit
+def test_cache_hit_requires_exactly_one_match(bench: BenchPage) -> None:
+    """A selector matching two elements after a change is a failure, not a first match."""
+    cache = DictCache(
+        {
+            ("testbench", "claim_number", 2): CachedSelector(
+                "tbody td:nth-of-type(1)", AnchorEvidence(accessible_name="Claim Number"), 2
+            )
+        }
+    )
+    got = rung(cache).attempt(bench.source(), CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "ambiguous"
 
-def test_put_cannot_be_called_with_anything_but_a_validated_extraction(warm_cache, candidate):
-    with pytest.raises(TypeError):
-        warm_cache.put(candidate, ELEMENT)  # type: ignore[arg-type]
 
-def test_a_cache_entry_for_another_spec_version_is_not_a_hit(bench_page, warm_cache):
+@pytest.mark.unit
+def test_column_reorder_fails_rung_one_even_though_the_selector_still_matches(
+    bench: BenchPage, warm_cache: DictCache
+) -> None:
+    """Spec 5.2. The selector still matches exactly one element -- but the anchor has moved,
+    so rung 1 MUST fail, so a heal is recorded, so the strict path in Task 20 engages.
+    Without this, the adjacent-column failure is silent and permanent."""
+    reordered = bench.mutated("ColumnReorder")
+    page = reordered.source()
+    moved = [
+        f
+        for f in (CLAIM_NUMBER, AMOUNT, RESERVE)
+        if reordered.truth(f.name)[0] != bench.truth(f.name)[0]
+    ]
+    assert moved, "the reorder moved none of the three cached columns"
+    for field in moved:
+        cached = warm_cache.get("testbench", field.name, 2)
+        assert cached is not None and len(page.query(cached.selector)) == 1
+        got = rung(warm_cache).attempt(page, field)
+        assert isinstance(got, Miss) and got.outcome == "anchor_mismatch", field.name
+
+
+@pytest.mark.unit
+def test_swapping_two_same_format_columns_is_caught_by_the_anchor_alone(
+    bench: BenchPage, warm_cache: DictCache
+) -> None:
+    """The purest form of 5.2: Amount and Reserve trade places, the cached selector matches
+    one element and its value passes the amount format -- only the anchor can object."""
+    swapped = (
+        bench.html.replace(">Amount</th>", ">@A</th>")
+        .replace(">Reserve</th>", ">Amount</th>")
+        .replace(">@A</th>", ">Reserve</th>")
+    )
+    page = StaticPageSource(swapped)
+    cached = warm_cache.get("testbench", "amount", 2)
+    assert cached is not None
+    [el] = page.query(cached.selector)
+    assert matches(AMOUNT, " ".join(el.text_content().split()))
+    got = rung(warm_cache).attempt(page, AMOUNT)
+    assert isinstance(got, Miss) and got.outcome == "anchor_mismatch"
+
+
+@pytest.mark.unit
+def test_a_duplicated_label_breaks_the_anchor(bench: BenchPage, warm_cache: DictCache) -> None:
+    """Task 11A DuplicateLabel: the anchor must still identify ONE column."""
+    got = rung(warm_cache).attempt(bench.mutated("DuplicateLabel").source(), CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "anchor_mismatch"
+
+
+@pytest.mark.unit
+def test_a_header_text_anchor_is_reverified_too(bench: BenchPage) -> None:
+    reworded = bench.mutated("LabelReword")
+    cache = warm(reworded.html, "claim_number")  # rungs 2-3 fail on a reword; rung 4 healed it
+    cached = cache.get("testbench", "claim_number", 2)
+    assert cached is not None and cached.set_by_rung == 4
+    header = cached.anchor.header_text
+    assert header is not None and header != "Claim Number"
+    assert rung(cache).resolve(reworded.source(), CLAIM_NUMBER) is not None
+    again = StaticPageSource(reworded.html.replace(f">{header}</th>", ">Case Ref.</th>"))
+    got = rung(cache).attempt(again, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "anchor_mismatch"
+
+
+@pytest.mark.unit
+def test_a_cache_entry_for_another_spec_version_is_not_a_hit(
+    bench: BenchPage, warm_cache: DictCache
+) -> None:
     """M14. A spec edit changes what the field MEANS."""
-    assert CacheRung(warm_cache, spec_version=2).resolve(bench_page, CLAIM_NUMBER) is None
+    got = rung(warm_cache, spec_version=3).attempt(bench.source(), CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "no_match"
+
+
+@pytest.mark.unit
+def test_a_hidden_match_is_not_a_hit(bench: BenchPage, warm_cache: DictCache) -> None:
+    page = StaticPageSource(
+        bench.html.replace('<table class="results"', '<table style="display:none" class="results"')
+    )
+    got = rung(warm_cache).attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "not_visible"
+
+
+@pytest.mark.unit
+def test_a_value_that_fails_the_format_is_not_a_hit(
+    bench: BenchPage, warm_cache: DictCache
+) -> None:
+    """M23: spec.matches(), from spec/ -- resolve/ may not import validate/."""
+    first = bench.truth("claim_number")[0]
+    page = StaticPageSource(bench.html)
+    [cell] = page.query(first)
+    for child in list(cell):
+        cell.remove(child)
+    cell.text = "pending"
+    page = StaticPageSource(lxml.html.tostring(page.root(), encoding="unicode"))
+    got = rung(warm_cache).attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "no_match" and "format" in got.detail
+
+
+@pytest.mark.unit
+def test_an_entry_with_no_anchor_evidence_never_hits(bench: BenchPage) -> None:
+    [el] = bench.source().query(bench.truth("claim_number")[0])
+    cache = DictCache(
+        {("testbench", "claim_number", 2): CachedSelector(css_path(el), AnchorEvidence(), 4)}
+    )
+    got = rung(cache).attempt(bench.source(), CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "anchor_mismatch"
+
+
+@pytest.mark.unit
+def test_a_hit_returns_the_cached_selector_and_anchor_unchanged(
+    bench: BenchPage, warm_cache: DictCache
+) -> None:
+    cached = warm_cache.get("testbench", "claim_number", 2)
+    got = rung(warm_cache).attempt(bench.source(), CLAIM_NUMBER)
+    assert cached is not None and isinstance(got, ResolvedElement)
+    assert (got.selector, got.anchor) == (cached.selector, cached.anchor)
+
+
+@pytest.mark.unit
+def test_the_cascade_binds_rung_one_to_the_runs_cache_and_version(
+    bench: BenchPage, warm_cache: DictCache
+) -> None:
+    calls: list[tuple[str, str, int | None]] = []
+
+    class Spy(DictCache):
+        def get(
+            self, target: str, field: str, spec_version: int | None = None
+        ) -> CachedSelector | None:
+            calls.append((target, field, spec_version))
+            return super().get(target, field, spec_version)
+
+    spy = Spy(warm_cache.entries)
+    _, trace = resolve_cascade(
+        bench.source(), CLAIM_NUMBER, spy, record=False, run_key="testbench:2:2026-10-01"
+    )
+    assert calls == [("testbench", "claim_number", 2)] and trace.winner == 1
 ```
+
+```python
+# tests/resolve/test_selector_cache.py
+"""The read side against the real table. Postgres, so integration."""
+
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Iterator
+
+import pytest
+from sqlalchemy import delete
+
+from selector_drift.db.models import SelectorCacheEntry
+from selector_drift.db.session import Session
+from selector_drift.resolve.cache import CachedSelector, SelectorCache
+from selector_drift.resolve.trace import AnchorEvidence
+
+PORTAL = "cache-test"  # never a real target, so the fixture cannot touch live rows
+
+
+@pytest.fixture
+def seed() -> Iterator[None]:
+    def clear() -> None:
+        with Session() as s:
+            s.execute(delete(SelectorCacheEntry).where(SelectorCacheEntry.target == PORTAL))
+            s.commit()
+
+    clear()
+    with Session() as s:
+        for version, header in ((2, "Claim Number"), (3, "Claim No.")):
+            s.add(
+                SelectorCacheEntry(
+                    target=PORTAL,
+                    field="claim_number",
+                    spec_version=version,
+                    selector=f"html > body:nth-of-type({version})",
+                    anchor=AnchorEvidence(header_text=header).model_dump(mode="json"),
+                    node_id="/html/body",
+                    set_by_rung=4,
+                    set_at=dt.datetime.now(dt.UTC),
+                    set_by_run_key=f"{PORTAL}:{version}:2026-10-01",
+                )
+            )
+        s.commit()
+    yield
+    clear()
+
+
+@pytest.mark.integration
+def test_get_reads_back_the_anchor_that_justified_the_selector(seed: None) -> None:
+    assert SelectorCache().get(PORTAL, "claim_number", 2) == CachedSelector(
+        selector="html > body:nth-of-type(2)",
+        anchor=AnchorEvidence(header_text="Claim Number"),
+        set_by_rung=4,
+    )
+
+
+@pytest.mark.integration
+def test_get_is_keyed_by_spec_version(seed: None) -> None:
+    """M14. A spec edit changes what the field means; the old entry is not this version's."""
+    assert SelectorCache().get(PORTAL, "claim_number", 4) is None
+
+
+@pytest.mark.integration
+def test_no_spec_version_reads_the_newest(seed: None) -> None:
+    got = SelectorCache().get(PORTAL, "claim_number")
+    assert got is not None and got.anchor.header_text == "Claim No."
+
+
+@pytest.mark.integration
+def test_an_unknown_field_is_a_miss_not_an_error(seed: None) -> None:
+    assert SelectorCache().get(PORTAL, "amount", 2) is None
+```
+
+```python
+# tests/test_cache_write_site.py
+"""C2, structurally: a cache row is constructed in exactly one module."""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+ALLOWED = {Path("selector_drift/orchestrate/cache_writer.py"), Path("selector_drift/db/models.py")}
+
+
+def _constructs_cache_row(path: Path) -> bool:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return any(
+        isinstance(n, ast.Call)
+        and (
+            (isinstance(n.func, ast.Name) and n.func.id == "SelectorCacheEntry")
+            or (isinstance(n.func, ast.Attribute) and n.func.attr == "SelectorCacheEntry")
+        )
+        for n in ast.walk(tree)
+    )
+
+
+@pytest.mark.unit
+def test_only_the_cache_writer_constructs_a_cache_row() -> None:
+    """A second write site is a second way to spell 'write the cache' without first spelling
+    'the gate passed' -- the one ordering C2 exists to make unspellable."""
+    offenders = sorted(
+        str(p)
+        for p in Path("selector_drift").rglob("*.py")
+        if p not in ALLOWED and _constructs_cache_row(p)
+    )
+    assert offenders == []
+```
+
+**Changes from the first draft's seven tests.** `test_column_reorder_fails_rung_one_even_though_the_selector_still_matches`
+is kept word for word in intent, and now asserts the *reason* (`anchor_mismatch`) as well as the
+refusal. `test_cache_hit_requires_exactly_one_match` called `bench_page.with_duplicate_matching_element()`,
+which nothing defined; it now caches a selector that matches every row's cell. `test_unchanged_page_is_a_cache_hit`
+and `test_a_cache_entry_for_another_spec_version_is_not_a_hit` are kept (the latter needed a cache that
+honours `spec_version`; the old `warm_cache` fixture was undefined, so `DictCache` is keyed exactly as
+`selector_cache` is). The three `put` tests moved to `tests/orchestrate/test_cache_writer.py`
+(Step 8) — and `test_a_quarantined_heal_does_not_update_the_cache` called a `run_pipeline()` that no
+task defined; it now drives the real gate to a `QuarantinedRun` and proves the cache is unchanged.
+Added: the same-format column swap (the purest form of §5.2 — the format passes, only the anchor can
+object), `DuplicateLabel`, header-text re-verification, hidden matches, a failing format, and the
+runner binding rung 1 to the run's portal and spec version. The old expected count ("4 new tests")
+was wrong for seven tests; it is 13 unit and 4 integration here.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/resolve/test_r1_cache.py -v`
-Expected: FAIL — `ModuleNotFoundError: selector_drift.resolve.cache`.
+Run: `uv run pytest tests/resolve/test_r1_cache.py tests/test_cache_write_site.py -m unit -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.resolve.rungs.r1_cache'` (the write-site test passes already; it guards a property that holds today).
 
-- [ ] **Step 3: Implement the cache and the rung**
+- [ ] **Step 3: Implement rung 1**
 
-`CacheRung.resolve()` returns `None` unless **all four** hold: the selector matches exactly one
-element; that element is `visible()` (H9); the stored `AnchorEvidence` still holds against it
-(whichever of accessible name / label text / header text was recorded); and the element satisfies the
-target's format assertions via **`spec.matches()`, not `validate.FormatAssertion`** — Task 1's
-`judged-cannot-call-judge` contract forbids `resolve` → `validate`, so the matcher lives in `spec/`
-and both packages import it from there (M23). Register in `REGISTERED_RUNGS` at position 0.
+```python
+# selector_drift/resolve/rungs/r1_cache.py
+"""Rung 1: the cached selector -- and the anchor that justified it, re-verified (design 5.2)."""
 
-- [ ] **Step 4: Run the tests and make sure they pass**
+from __future__ import annotations
 
-Run: `uv run pytest tests/resolve -v`
-Expected: PASS, 4 new tests, all rung tests green.
+from lxml.html import HtmlElement
 
-- [ ] **Step 5: Commit**
+from selector_drift.resolve.cache import NO_CACHE, CachedSelector, CacheReader
+from selector_drift.resolve.page import PageSource
+from selector_drift.resolve.rungs.base import Family, Miss, ResolvedElement, RungBase, text_of
+from selector_drift.resolve.rungs.r2_axtree import locate_by_name
+from selector_drift.resolve.rungs.r3_anchors import locate_by_label
+from selector_drift.resolve.rungs.r4_heuristics import header_holds
+from selector_drift.spec.schema import FieldTarget, matches
 
-```bash
-git add selector_drift/resolve/rungs/r1_cache.py selector_drift/resolve/cache.py tests/resolve/test_r1_cache.py
-git commit -m "feat(resolve): rung 1 verifies anchor provenance, not just the selector"
+
+def anchor_holds(
+    page: PageSource, el: HtmlElement, cached: CachedSelector, target: FieldTarget
+) -> str | None:
+    """None if every recorded piece of anchor evidence still points at `el`; else why not.
+    Each check re-runs the recording rung's own locate step, so 'holds' means 'the same
+    evidence, read today, lands on this node and on no other'."""
+    anchor = cached.anchor
+    if anchor.is_empty():
+        return "no anchor evidence was recorded, so there is nothing to re-verify"
+    if anchor.accessible_name is not None:
+        got = locate_by_name(page, anchor.accessible_name)
+        if isinstance(got, Miss) or got[0] is not el:
+            return f"accessible name {anchor.accessible_name!r} no longer labels this element"
+    if anchor.label_text is not None:
+        got = locate_by_label(page, anchor.label_text, target.relation)
+        if isinstance(got, Miss) or got[0] is not el:
+            return f"label {anchor.label_text!r} no longer anchors this element"
+    if anchor.header_text is not None and not header_holds(page, el, anchor.header_text):
+        return f"header {anchor.header_text!r} no longer heads this element's column, uniquely"
+    return None
+
+
+class CacheRung(RungBase):
+    """Returns an element only if ALL hold: the selector matches exactly one visible element
+    (H9); the stored anchor still verifies against it; its value passes spec.matches (M23)."""
+
+    rung_id: int = 1
+    family: Family = Family.NONE
+
+    def __init__(
+        self, cache: CacheReader = NO_CACHE, *, portal: str = "", spec_version: int | None = None
+    ) -> None:
+        self.cache, self.portal, self.spec_version = cache, portal, spec_version
+
+    def bind(self, cache: CacheReader, *, portal: str, spec_version: int | None) -> CacheRung:
+        return CacheRung(cache, portal=portal, spec_version=spec_version)
+
+    def attempt(self, page: PageSource, target: FieldTarget) -> ResolvedElement | Miss:
+        cached = self.cache.get(self.portal, target.name, self.spec_version)
+        if cached is None:
+            return Miss("no_match", "no cache entry for this target, field and spec version")
+        matched = page.query(cached.selector)
+        if not matched:
+            return Miss("no_match", "the cached selector matches nothing")
+        shown = [el for el in matched if page.visible(el)]
+        if not shown:
+            return Miss("not_visible", "the cached selector matches only hidden elements")
+        if len(shown) > 1:
+            return Miss("ambiguous", f"the cached selector matches {len(shown)} visible elements")
+        el = shown[0]
+        broken = anchor_holds(page, el, cached, target)
+        if broken is not None:
+            return Miss("anchor_mismatch", broken)
+        if not matches(target, text_of(el)):
+            return Miss("no_match", "the element's value fails the spec's format assertion")
+        return ResolvedElement(
+            selector=cached.selector,
+            node_id=page.node_id(el),
+            anchor=cached.anchor,
+            rung_id=self.rung_id,
+        )
 ```
 
-**Amended 2026-09-26: the write-back moves out of `resolve/` — the old signature broke an import
-contract.** `SelectorCache.put(validated: ValidatedExtraction, element)` makes `resolve/cache.py`
-import `validate/`, which the `judged-cannot-call-judge` contract (Task 1) forbids. R11/C2 and the
-independence contract could not both hold as written.
+- [ ] **Step 4: Add the read side of the cache**
 
-The fix keeps C2's guarantee exactly — *there is no way to spell the cache write without first
-spelling "the gate passed"* — and moves the spelling into the one package allowed to import both:
+`selector_drift/resolve/cache.py` becomes (Task 13's three names unchanged, `SelectorCache` added):
 
-- `resolve/cache.py` keeps **read only**: `CachedSelector`, the `CacheReader` protocol (Task 19),
-  `SelectorCache.get(target, field, spec_version=None)`.
-- **New: `selector_drift/orchestrate/cache_writer.py`**:
+```python
+# selector_drift/resolve/cache.py
+"""The selector cache, READ side only. The write-back is orchestrate/cache_writer.py (C2)."""
 
-  ```python
-  # selector_drift/orchestrate/cache_writer.py
-  """The self-healing write-back. The whole of it. Callable only with the gate's output."""
-  from __future__ import annotations
+from __future__ import annotations
 
-  import datetime as dt
-  from collections.abc import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Protocol
 
-  from sqlalchemy.orm import Session as OrmSession
+from sqlalchemy import select
+from sqlalchemy.orm import Session as OrmSession
 
-  from selector_drift.db.models import SelectorCacheEntry
-  from selector_drift.db.session import Session
-  from selector_drift.resolve.trace import ResolvedElement
-  from selector_drift.validate.gate import ValidatedExtraction
+from selector_drift.db.models import SelectorCacheEntry
+from selector_drift.db.session import Session
+from selector_drift.resolve.trace import AnchorEvidence
 
 
-  class CacheWriter:
-      """Bound to one (target, spec_version): the cache's key minus the field (M14)."""
+@dataclass(frozen=True)
+class CachedSelector:
+    selector: str
+    anchor: AnchorEvidence  # the evidence that justified the selector (design 5.2)
+    set_by_rung: int
 
-      def __init__(self, *, target: str, spec_version: int,
-                   session_factory: Callable[[], OrmSession] = Session) -> None:
-          self.target, self.spec_version, self._sessions = target, spec_version, session_factory
 
-      @classmethod
-      def for_run_key(cls, run_key: str) -> CacheWriter:
-          target, spec_version, _window = run_key.split(":")      # Task 6's run_key() format
-          return cls(target=target, spec_version=int(spec_version))
+class CacheReader(Protocol):
+    """What rung 1 reads. SelectorCache satisfies it; so does replay's HealTimeCache."""
 
-      def put(self, validated: ValidatedExtraction, element: ResolvedElement, *,
-              field: str) -> None:
-          if not isinstance(validated, ValidatedExtraction):      # mypy is the first line
-              raise TypeError("the cache is written only from a ValidatedExtraction (C2)")
-          with self._sessions() as s:
-              s.merge(SelectorCacheEntry(
-                  target=self.target, field=field, spec_version=self.spec_version,
-                  selector=element.selector, anchor=element.anchor.model_dump(mode="json"),
-                  node_id=element.node_id, set_by_rung=element.rung_id,
-                  set_at=dt.datetime.now(dt.UTC), set_by_run_key=validated.run_key))
-              s.commit()
-  ```
+    def get(
+        self, target: str, field: str, spec_version: int | None = None
+    ) -> CachedSelector | None: ...
 
-- Task 17's tests `test_put_stores_the_anchor_from_the_healing_rung`,
-  `test_a_quarantined_heal_does_not_update_the_cache` and
-  `test_put_cannot_be_called_with_anything_but_a_validated_extraction` move to
-  `tests/orchestrate/test_cache_writer.py` and call `CacheWriter(target=..., spec_version=...).put(
-  validated, element, field=...)`; they run with Task 26A. Task 26A's `accept()` takes a `CacheWriter`
-  and calls `cache.put(validated, element, field=name)` for each field.
-- Add to `.importlinter`, so the move cannot silently regress:
 
-  ```ini
-  [importlinter:contract:only-orchestrate-writes-the-cache]
-  name = The selector cache is written only by orchestrate.cache_writer
-  type = forbidden
-  source_modules =
-      selector_drift.resolve
-      selector_drift.validate
-      selector_drift.api
-      selector_drift.heallog
-  forbidden_modules =
-      selector_drift.orchestrate.cache_writer
-  ```
+class _NoCache:
+    def get(
+        self, target: str, field: str, spec_version: int | None = None
+    ) -> CachedSelector | None:
+        return None
+
+
+NO_CACHE: CacheReader = _NoCache()
+
+
+class SelectorCache:
+    """Postgres-backed. spec_version=None reads the highest version held -- replay and tests
+    only; the cascade always passes the run's version (M14)."""
+
+    def __init__(self, session_factory: Callable[[], OrmSession] = Session) -> None:
+        self._sessions = session_factory
+
+    def get(
+        self, target: str, field: str, spec_version: int | None = None
+    ) -> CachedSelector | None:
+        query = select(SelectorCacheEntry).where(
+            SelectorCacheEntry.target == target, SelectorCacheEntry.field == field
+        )
+        if spec_version is not None:
+            query = query.where(SelectorCacheEntry.spec_version == spec_version)
+        query = query.order_by(SelectorCacheEntry.spec_version.desc()).limit(1)
+        with self._sessions() as s:
+            row = s.scalars(query).first()
+            if row is None:
+                return None
+            return CachedSelector(
+                selector=row.selector,
+                anchor=AnchorEvidence.model_validate(row.anchor),
+                set_by_rung=row.set_by_rung,
+            )
+```
+
+- [ ] **Step 5: Register rung 1 first**
+
+```python
+from selector_drift.resolve.rungs.r1_cache import CacheRung
+
+REGISTERED_RUNGS: list[Rung] = [CacheRung(), AxTreeRung(), AnchorRung(), HeuristicRung()]
+```
+
+`CacheRung()` in the list holds `NO_CACHE`; the runner rebuilds it per call with `.bind(cache,
+portal=..., spec_version=...)` from the caller's cache and the run key, so a module-level list never
+holds a client's cache.
+
+- [ ] **Step 6: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/resolve tests/test_cache_write_site.py -m unit -v`
+Expected: PASS, 116 tests (102 before, 13 in `test_r1_cache.py`, 1 write-site).
+
+Run: `docker compose up -d postgres && uv run pytest tests/resolve -m integration -v`
+Expected: PASS, 6 tests (2 from Task 13, 4 in `test_selector_cache.py`).
+
+Run: *the fast check*. Expected: clean.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add selector_drift/resolve/rungs/r1_cache.py selector_drift/resolve/cache.py \
+        selector_drift/resolve/cascade.py tests/resolve/test_r1_cache.py \
+        tests/resolve/test_selector_cache.py tests/test_cache_write_site.py
+git commit -m "feat(resolve): rung 1 re-verifies anchor provenance, not just the selector"
+```
+
+- [ ] **Step 8 (executed with Task 26A, before its Step 3): land the write-back**
+
+```python
+# selector_drift/orchestrate/cache_writer.py
+"""The self-healing write-back. The whole of it. Callable only with the gate's output (C2).
+
+It lives in orchestrate/ because it must import validate/ (for the type) and resolve/ (for
+the element), and the judged-cannot-call-judge contract forbids resolve -> validate.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Callable
+
+from sqlalchemy.orm import Session as OrmSession
+
+from selector_drift.db.models import SelectorCacheEntry
+from selector_drift.db.session import Session
+from selector_drift.resolve.trace import ResolvedElement
+from selector_drift.validate.gate import ValidatedExtraction
+
+
+class CacheWriter:
+    """Bound to one (target, spec_version): the cache's key minus the field (M14)."""
+
+    def __init__(
+        self, *, target: str, spec_version: int, session_factory: Callable[[], OrmSession] = Session
+    ) -> None:
+        self.target, self.spec_version, self._sessions = target, spec_version, session_factory
+
+    @classmethod
+    def for_run_key(cls, run_key: str) -> CacheWriter:
+        target, spec_version, _window = run_key.split(":")  # Task 6's run_key() format
+        return cls(target=target, spec_version=int(spec_version))
+
+    def put(self, validated: ValidatedExtraction, element: ResolvedElement, *, field: str) -> None:
+        if not isinstance(validated, ValidatedExtraction):  # mypy is the first line
+            raise TypeError("the cache is written only from a ValidatedExtraction (C2)")
+        with self._sessions() as s:
+            s.merge(
+                SelectorCacheEntry(
+                    target=self.target,
+                    field=field,
+                    spec_version=self.spec_version,
+                    selector=element.selector,
+                    anchor=element.anchor.model_dump(mode="json"),
+                    node_id=element.node_id,
+                    set_by_rung=element.rung_id,
+                    set_at=dt.datetime.now(dt.UTC),
+                    set_by_run_key=validated.run_key,
+                )
+            )
+            s.commit()
+```
+
+```python
+# tests/orchestrate/test_cache_writer.py
+"""The write-back, against Postgres. Written in Task 17; lands and runs with Task 26A,
+because ValidatedExtraction (Task 20) and CandidateExtraction (Task 27) must exist first."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+import pytest
+from sqlalchemy import delete
+
+from selector_drift.db.models import SelectorCacheEntry
+from selector_drift.db.session import Session
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.orchestrate.cache_writer import CacheWriter
+from selector_drift.resolve.cache import SelectorCache
+from selector_drift.resolve.trace import AnchorEvidence, ResolvedElement
+from selector_drift.spec.schema import FieldTarget
+from selector_drift.validate.gate import HealContext, ValidatedExtraction, gate
+from selector_drift.validate.history import History
+from selector_drift.validate.quarantine import QuarantinedRun
+from selector_drift.validate.verdict import Outcome, Verdict
+
+PORTAL = "cache-writer-test"  # never a real target
+RUN_KEY = f"{PORTAL}:2:2026-10-01"
+TARGET = FieldTarget(name="claim_number", description="the claim number cell", assertions=[])
+BEFORE = ResolvedElement(
+    selector="html > body:nth-of-type(1) > table:nth-of-type(1)",
+    node_id="/html/body/table",
+    anchor=AnchorEvidence(accessible_name="Claim Number"),
+    rung_id=2,
+)
+HEALED = ResolvedElement(
+    selector="html > body:nth-of-type(1) > div:nth-of-type(1)",
+    node_id="/html/body/div",
+    anchor=AnchorEvidence(header_text="Claim No."),
+    rung_id=4,
+)
+
+
+class Always:
+    def __init__(self, outcome: Outcome) -> None:
+        self.name = f"Always{outcome.value}"
+        self._outcome = outcome
+
+    def check(
+        self, candidate: CandidateExtraction, history: History | None, ctx: HealContext
+    ) -> Verdict:
+        return Verdict(
+            check=self.name, outcome=self._outcome, threshold=None, observed=None, reason="fixture"
+        )
+
+
+def judge(outcome: Outcome) -> ValidatedExtraction | QuarantinedRun:
+    candidate = CandidateExtraction(rows=[], trace={}, spec_version=2, run_key=RUN_KEY)
+    ctx = HealContext(healed=True, winning_rung=4, page=None, target=TARGET, cache=None)
+    return gate(candidate, None, ctx, [Always(outcome)])
+
+
+@pytest.fixture
+def writer() -> Iterator[CacheWriter]:
+    def clear() -> None:
+        with Session() as s:
+            s.execute(delete(SelectorCacheEntry).where(SelectorCacheEntry.target == PORTAL))
+            s.commit()
+
+    clear()
+    yield CacheWriter.for_run_key(RUN_KEY)
+    clear()
+
+
+@pytest.mark.integration
+def test_put_stores_the_anchor_from_the_healing_rung(writer: CacheWriter) -> None:
+    validated = judge(Outcome.PASS)
+    assert isinstance(validated, ValidatedExtraction)
+    writer.put(validated, HEALED, field="claim_number")
+    got = SelectorCache().get(PORTAL, "claim_number", spec_version=2)
+    assert got is not None
+    assert (got.selector, got.anchor, got.set_by_rung) == (HEALED.selector, HEALED.anchor, 4)
+
+
+@pytest.mark.integration
+def test_a_quarantined_heal_does_not_update_the_cache(writer: CacheWriter) -> None:
+    """R11/C2. The single most dangerous ordering bug available in this design: a rejected
+    heal that poisons the cache becomes a rung-1 hit tomorrow, records no heal, and never
+    engages the strict path again."""
+    accepted = judge(Outcome.PASS)
+    assert isinstance(accepted, ValidatedExtraction)
+    writer.put(accepted, BEFORE, field="claim_number")
+    before = SelectorCache().get(PORTAL, "claim_number", spec_version=2)
+    refused = judge(Outcome.FAIL)
+    assert isinstance(refused, QuarantinedRun)
+    with pytest.raises(TypeError):
+        writer.put(refused, HEALED, field="claim_number")  # type: ignore[arg-type]
+    assert SelectorCache().get(PORTAL, "claim_number", spec_version=2) == before
+
+
+@pytest.mark.integration
+def test_put_cannot_be_called_with_anything_but_a_validated_extraction(
+    writer: CacheWriter,
+) -> None:
+    candidate = CandidateExtraction(rows=[], trace={}, spec_version=2, run_key=RUN_KEY)
+    with pytest.raises(TypeError):
+        writer.put(candidate, HEALED, field="claim_number")  # type: ignore[arg-type]
+    assert SelectorCache().get(PORTAL, "claim_number", spec_version=2) is None
+```
+
+Add to `.importlinter` in the same commit — never before the module exists, so the contract cannot
+name something absent:
+
+```ini
+[importlinter:contract:only-orchestrate-writes-the-cache]
+name = The selector cache is written only by orchestrate.cache_writer
+type = forbidden
+source_modules =
+    selector_drift.resolve
+    selector_drift.validate
+    selector_drift.api
+    selector_drift.heallog
+forbidden_modules =
+    selector_drift.orchestrate.cache_writer
+```
+
+Run: `docker compose up -d postgres && uv run pytest tests/orchestrate/test_cache_writer.py -m integration -v && uv run lint-imports`
+Expected: PASS, 3 tests; `only-orchestrate-writes-the-cache` kept.
+
+Task 26A's `accept()` takes a `CacheWriter` and calls `cache.put(validated, element, field=name)` for
+each field, after `land.write()` and before the last-accepted replacement; Task 26A's
+`accept_promoted()` uses `CacheWriter.for_run_key(run_key)`.
+
+```bash
+git add selector_drift/orchestrate/cache_writer.py tests/orchestrate/test_cache_writer.py .importlinter
+git commit -m "feat(orchestrate): the cache write-back, callable only with the gate's output"
+```
 
 ---
 
 ### Task 18: Rung 5 — escalation, and the corpus it builds
 
 **Files:**
-- Create: `selector_drift/resolve/rungs/r5_visual.py`, `selector_drift/resolve/escalation.py`
+- Create: `selector_drift/resolve/rungs/r5_visual.py`
+- Modify: `selector_drift/resolve/cascade.py` — register `VisualRung()` last
+- Modify: `.env.example` — `SD_ESCALATION_CORPUS`
 - Test: `tests/resolve/test_r5_escalation.py`
 
 **Interfaces:**
-- Consumes: `Rung`, `Family` (Task 13).
-- Produces: `VisualRung(corpus: Path)`, `rung_id = 5`, `family = Family.NONE`; `EscalateToHuman(Exception)`. Records the case with full evidence into `corpus/` and raises. **Makes no model call and imports nothing from `bok_core.gateway`.**
+- Consumes: `EscalateToHuman` (`resolve/escalation.py`, Task 13 — the runner already raises it when no rung wins); `RungBase`, `Family`, `RungAttempt`, `Miss` (Task 13); the runner's `Escalator` hook (Task 13).
+- Produces: `VisualRung(corpus: Path | None = None)`, `rung_id = 5`, `family = Family.NONE`; `.corpus` (the constructor's path, else `$SD_ESCALATION_CORPUS`, else `corpus/escalations`); `.escalate(page, target, *, run_key=None, attempts=()) -> ResolvedElement` (never returns — records the case and raises `EscalateToHuman(case=...)`); `.record_case(...) -> Path`; `CORPUS_ENV`, `DEFAULT_CORPUS`. **Makes no model call and imports nothing outside the standard library and `selector_drift`.**
+
+**Rung 5 is an escalation in v1 (design §5.3).** On every target that pays, a portal screenshot is
+`CLIENT_CONFIDENTIAL` and can never reach a free-tier model; *"0.0% of resolutions required a model
+call"* is the published claim (B11); and a rung 5 that "works" becomes the excuse for a weak rung 3.
+So it records the case and raises. The runner (Task 13) catches the raise, records the attempt as
+`escalated`, writes the `resolutions` row with `winning_rung` null, and re-raises with the trace and
+the case path attached — the pipeline quarantines.
+
+**The corpus case is metadata, never the page (Never #6).** Every DOM snapshot is redacted before
+storage and never leaves the client's boundary. The case therefore holds the field, its description
+and relation, the attempts rungs 1–4 made (the runner hands them over through `Escalator`), the run
+key and a SHA-256 of the DOM — enough to find the redacted page in the run's evidence bundle (Task 33),
+nothing a reader could lift a claimant's name from. That makes each case a labelled example of what
+rungs 1–4 could not do: the eval set design §5.3 says Ground Truth needs, built from day one. One case
+per (page, field): the file name is derived from the DOM hash, so a retried run overwrites rather than
+duplicates.
+
+**Replay never reaches it.** `resolve_cascade(record=False)` excludes rung 5 (Task 13), so a failed
+replay raises `EscalateToHuman` from the runner itself and writes no case — replay reproduces heals;
+it does not manufacture escalations.
+
+**The corpus directory must be a mounted volume in production.** The worker container runs with a
+read-only root filesystem (Global Constraints); the default relative `corpus/escalations` is for
+development. Set `SD_ESCALATION_CORPUS` to a path on a named volume in `docker-compose.yml` (Task 33's
+`Settings` should absorb it alongside `evidence_root`).
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/resolve/test_r5_escalation.py
-import subprocess, pytest
-from selector_drift.resolve.rungs.r5_visual import VisualRung
+from __future__ import annotations
+
+import ast
+import json
+from pathlib import Path
+
+import pytest
+
+from selector_drift.resolve import cascade
+from selector_drift.resolve.cache import NO_CACHE
+from selector_drift.resolve.cascade import REGISTERED_RUNGS, resolve_cascade
 from selector_drift.resolve.escalation import EscalateToHuman
+from selector_drift.resolve.page import StaticPageSource
+from selector_drift.resolve.rungs import r5_visual
+from selector_drift.resolve.rungs.r5_visual import CORPUS_ENV, VisualRung
+from selector_drift.resolve.trace import CascadeTrace, Family, RungAttempt
+from selector_drift.spec.schema import FieldTarget
+from tests.resolve.conftest import CLAIM_NUMBER, RUN_KEY
 
-def test_rung_five_escalates_and_never_returns_an_element(unresolvable_page, tmp_path):
+UNRESOLVABLE = "<html><body><p>nothing here but Test Person One and ZZ99999999</p></body></html>"
+
+
+@pytest.fixture
+def unresolvable_page() -> StaticPageSource:
+    return StaticPageSource(UNRESOLVABLE)
+
+
+@pytest.mark.unit
+def test_rung_five_is_last_and_has_no_family() -> None:
+    assert (VisualRung.rung_id, VisualRung.family) == (5, Family.NONE)
+
+
+@pytest.mark.unit
+def test_all_five_rungs_are_registered_in_order() -> None:
+    """Task 41 asserts the same."""
+    assert [r.rung_id for r in REGISTERED_RUNGS] == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.unit
+def test_rung_five_escalates_and_never_returns_an_element(unresolvable_page, tmp_path) -> None:
     with pytest.raises(EscalateToHuman):
         VisualRung(corpus=tmp_path).resolve(unresolvable_page, CLAIM_NUMBER)
 
-def test_rung_five_records_a_corpus_case(unresolvable_page, tmp_path):
+
+@pytest.mark.unit
+def test_rung_five_records_a_corpus_case(unresolvable_page, tmp_path) -> None:
+    with pytest.raises(EscalateToHuman) as caught:
+        VisualRung(corpus=tmp_path).resolve(unresolvable_page, CLAIM_NUMBER)
+    [case] = list(tmp_path.glob("*.json"))
+    assert caught.value.case == case
+    data = json.loads(case.read_text(encoding="utf-8"))
+    assert data["field"] == "claim_number" and data["model_calls"] == 0
+    assert len(data["dom_sha256"]) == 64
+
+
+@pytest.mark.unit
+def test_the_corpus_case_never_contains_the_page(unresolvable_page, tmp_path) -> None:
+    """Never #6: a DOM is redacted before storage and never leaves the client's boundary.
+    The corpus holds a hash and a pointer; the redacted page lives in the evidence bundle."""
     with pytest.raises(EscalateToHuman):
         VisualRung(corpus=tmp_path).resolve(unresolvable_page, CLAIM_NUMBER)
-    assert list(tmp_path.glob("*.json"))
+    text = next(tmp_path.glob("*.json")).read_text(encoding="utf-8")
+    assert "Test Person One" not in text and "ZZ99999999" not in text and "<p>" not in text
 
-def test_no_module_imports_the_gateway():
-    assert subprocess.run(["uv", "run", "lint-imports"]).returncode == 0
+
+@pytest.mark.unit
+def test_a_scheduled_escalation_carries_the_cascade_and_the_run_key(
+    unresolvable_page, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        cascade, "REGISTERED_RUNGS", [*cascade.REGISTERED_RUNGS[:-1], VisualRung(corpus=tmp_path)]
+    )
+    rows: list[CascadeTrace] = []
+
+    def recorder(
+        *,
+        run_key: str,
+        portal: str,
+        target: FieldTarget,
+        trace: CascadeTrace,
+        node_id: str | None,
+        ms: int,
+    ) -> int:
+        rows.append(trace)
+        return 7
+
+    with pytest.raises(EscalateToHuman) as caught:
+        resolve_cascade(
+            unresolvable_page, CLAIM_NUMBER, NO_CACHE, run_key=RUN_KEY, recorder=recorder
+        )
+    data = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
+    assert data["run_key"] == RUN_KEY
+    assert [a["rung"] for a in data["attempts"]] == [1, 2, 3, 4]
+    trace = caught.value.trace
+    assert trace is not None and trace.winner is None and trace.resolution_id == 7
+    assert [a.outcome for a in trace.attempts][-1] == "escalated" and len(rows) == 1
+
+
+@pytest.mark.unit
+def test_replay_never_reaches_rung_five(unresolvable_page, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(CORPUS_ENV, str(tmp_path))
+    with pytest.raises(EscalateToHuman):
+        resolve_cascade(unresolvable_page, CLAIM_NUMBER, NO_CACHE, record=False)
+    assert list(tmp_path.glob("*.json")) == []
+
+
+@pytest.mark.unit
+def test_the_corpus_location_comes_from_the_environment(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv(CORPUS_ENV, str(tmp_path / "c"))
+    assert VisualRung().corpus == tmp_path / "c"
+
+
+@pytest.mark.unit
+def test_the_same_page_and_field_is_one_case_not_many(unresolvable_page, tmp_path) -> None:
+    for _ in range(3):
+        with pytest.raises(EscalateToHuman):
+            VisualRung(corpus=tmp_path).resolve(unresolvable_page, CLAIM_NUMBER)
+    assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+@pytest.mark.unit
+def test_rung_five_makes_no_model_call_and_opens_no_socket() -> None:
+    """Zero model calls in v1 (Global Constraints). Task 1's allow-list test covers bok_core;
+    this covers every other way out of the process."""
+    tree = ast.parse(Path(r5_visual.__file__).read_text(encoding="utf-8"))
+    imported = {
+        a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names
+    }
+    imported |= {
+        n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module
+    }
+    assert imported <= {
+        "__future__",
+        "datetime",
+        "hashlib",
+        "json",
+        "os",
+        "collections",
+        "pathlib",
+        "selector_drift",
+    }
+
+
+@pytest.mark.unit
+def test_an_attempt_list_is_recorded_as_given(unresolvable_page, tmp_path) -> None:
+    tried = (RungAttempt(2, Family.TEXT_SEMANTIC, "no_match", 1),)
+    with pytest.raises(EscalateToHuman):
+        VisualRung(corpus=tmp_path).escalate(
+            unresolvable_page, CLAIM_NUMBER, run_key=None, attempts=tried
+        )
+    data = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
+    assert data["attempts"] == [tried[0].as_json()]
 ```
+
+**Changes from the first draft's three tests.** The two escalation tests are kept and now check what
+the case holds. `test_no_module_imports_the_gateway` ran `uv run lint-imports` in a subprocess — but
+the gateway stanza was removed from `.importlinter` (Task 1, *"Replaced 2026-09-26"*: import-linter
+cannot express a forbidden external submodule), so a green `lint-imports` proves nothing about models,
+and a subprocess does not belong in the `unit` tier. Task 1's AST allow-list already rejects every
+`bok_core` import outside `ALLOWED`; the replacement here is an AST check that `r5_visual.py` imports
+nothing that could open a socket. Added: the corpus never contains the page, replay writes no case,
+the scheduled path carries the run key and attempts, one case per page and field, and the final
+`REGISTERED_RUNGS` order Task 41 also asserts.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/resolve/test_r5_escalation.py -v`
-Expected: FAIL.
+Run: `uv run pytest tests/resolve/test_r5_escalation.py -m unit -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.resolve.rungs.r5_visual'`.
 
-- [ ] **Step 3: Implement escalation and corpus recording.** Register in `REGISTERED_RUNGS` last.
+- [ ] **Step 3: Implement escalation and corpus recording**
 
-- [ ] **Step 4: Run them and make sure they pass**
+```python
+# selector_drift/resolve/rungs/r5_visual.py
+"""Rung 5 in v1: record the case, raise EscalateToHuman. Zero model calls (design 5.3).
 
-Run: `uv run pytest tests/resolve -v && uv run lint-imports`
-Expected: PASS, 3 new tests. `test_selector_drift_imports_only_allow_listed_bok_core_modules` still passes (Task 1).
+The corpus case is metadata only -- field, description, the cascade's attempts, a hash of
+the DOM. The page itself is never written here: every DOM snapshot is redacted before
+storage and never leaves the client's boundary (Never #6), and the redacted copy already
+lives in the run's evidence bundle (Task 33), findable by run_key and dom_sha256.
+"""
 
-- [ ] **Step 5: Commit**
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import os
+from collections.abc import Sequence
+from pathlib import Path
+
+from selector_drift.resolve.escalation import EscalateToHuman
+from selector_drift.resolve.page import PageSource
+from selector_drift.resolve.rungs.base import Family, ResolvedElement, RungBase
+from selector_drift.resolve.trace import Miss, RungAttempt
+from selector_drift.spec.schema import FieldTarget
+
+CORPUS_ENV = "SD_ESCALATION_CORPUS"
+DEFAULT_CORPUS = Path("corpus/escalations")
+
+
+class VisualRung(RungBase):
+    rung_id: int = 5
+    family: Family = Family.NONE
+
+    def __init__(self, corpus: Path | None = None) -> None:
+        self._corpus = corpus
+
+    @property
+    def corpus(self) -> Path:
+        return self._corpus or Path(os.environ.get(CORPUS_ENV, str(DEFAULT_CORPUS)))
+
+    def attempt(self, page: PageSource, target: FieldTarget) -> ResolvedElement | Miss:
+        self.escalate(page, target)
+        raise AssertionError("unreachable: escalate() always raises")  # pragma: no cover
+
+    def escalate(
+        self,
+        page: PageSource,
+        target: FieldTarget,
+        *,
+        run_key: str | None = None,
+        attempts: Sequence[RungAttempt] = (),
+    ) -> ResolvedElement:
+        case = self.record_case(page, target, run_key=run_key, attempts=attempts)
+        raise EscalateToHuman(
+            f"rungs 1-4 could not resolve {target.name!r}; "
+            f"escalated to human review (case {case.name})",
+            case=case,
+        )
+
+    def record_case(
+        self,
+        page: PageSource,
+        target: FieldTarget,
+        *,
+        run_key: str | None,
+        attempts: Sequence[RungAttempt],
+    ) -> Path:
+        dom_sha256 = hashlib.sha256(page.dom().encode("utf-8")).hexdigest()
+        case = {
+            "version": 1,
+            "recorded_at": dt.datetime.now(dt.UTC).isoformat(),
+            "run_key": run_key,
+            "field": target.name,
+            "description": target.description,
+            "relation": target.relation.value if target.relation else None,
+            "attempts": [a.as_json() for a in attempts],
+            "dom_sha256": dom_sha256,
+            "evidence": "redacted, in the run's evidence bundle; never copied here",
+            "model_calls": 0,
+        }
+        self.corpus.mkdir(parents=True, exist_ok=True)
+        path = self.corpus / f"{dom_sha256[:16]}-{target.name}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(case, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)  # one case per (page, field): a rerun overwrites
+        return path
+```
+
+- [ ] **Step 4: Register it last, and name the corpus location**
+
+`selector_drift/resolve/cascade.py`, final form of the registration:
+
+```python
+from selector_drift.resolve.rungs.r1_cache import CacheRung
+from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
+from selector_drift.resolve.rungs.r3_anchors import AnchorRung
+from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
+from selector_drift.resolve.rungs.r5_visual import VisualRung
+
+REGISTERED_RUNGS: list[Rung] = [
+    CacheRung(),
+    AxTreeRung(),
+    AnchorRung(),
+    HeuristicRung(),
+    VisualRung(),
+]
+```
+
+`.env.example` gains:
 
 ```bash
-git add selector_drift/resolve/rungs/r5_visual.py selector_drift/resolve/escalation.py tests/resolve/test_r5_escalation.py
-git commit -m "feat(resolve): rung 5 escalates to human review, builds eval corpus"
+# Rung 5's escalation corpus (metadata only, never page content). A mounted volume in production:
+# the worker's root filesystem is read-only.
+SD_ESCALATION_CORPUS=corpus/escalations
+```
+
+- [ ] **Step 5: Run them and make sure they pass**
+
+Run: `uv run pytest tests/resolve tests/test_cache_write_site.py -m unit -v`
+Expected: PASS, 127 tests (116 before, 11 new).
+
+Run: `uv run lint-imports && uv run pytest tests/test_bok_core_allowlist.py -v`
+Expected: every contract kept; `test_selector_drift_imports_only_allow_listed_bok_core_modules` still passes (Task 1).
+
+Run: *the full check* — this closes the resolver. Expected: PASS, coverage ≥ 75%.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add selector_drift/resolve/rungs/r5_visual.py selector_drift/resolve/cascade.py .env.example \
+        tests/resolve/test_r5_escalation.py
+git commit -m "feat(resolve): rung 5 escalates to human review and builds the eval corpus"
 ```
 
 ---
@@ -5897,90 +14297,456 @@ git commit -m "feat(heallog): capture with live boxes, bundle manifest, replay t
 
 ---
 
-### Task 20: `Verdict`, the `Assertion` protocol, and the asymmetry
+### Task 20: `Verdict`, `History`, the `Assertion` protocol, and the gate's asymmetry
 
 **Files:**
-- Create: `selector_drift/validate/verdict.py`, `selector_drift/validate/assertions/base.py`, `selector_drift/validate/gate.py`
-- Test: `tests/validate/test_gate_asymmetry.py`
+- Create: `selector_drift/extract/__init__.py` (empty, if absent), `selector_drift/extract/models.py` — **moved here from Task 27**, see below
+- Create: `selector_drift/validate/__init__.py` (empty, if absent), `selector_drift/validate/verdict.py`, `selector_drift/validate/history.py`, `selector_drift/validate/gate.py`
+- Create: `selector_drift/validate/assertions/__init__.py` (empty), `selector_drift/validate/assertions/base.py`
+- Test: `tests/validate/__init__.py` (empty), `tests/validate/helpers.py`, `tests/validate/test_gate_asymmetry.py`, `tests/validate/test_verdict.py`, `tests/validate/test_history.py`
 
 **Interfaces:**
-- Consumes: `CascadeTrace` (Task 13).
+- Consumes: `Family` (`resolve/trace.py`, Task 13), `PageSource` (`resolve/page.py`, Task 13), `CacheReader` and `CachedSelector` (`resolve/cache.py`, Tasks 17/19), `CascadeTrace` (Task 13), `FieldTarget` (Task 5), `bok_core.provenance` `Claim`, `DomSource` (P-1).
 - Produces:
-  - `Outcome` — `StrEnum` `PASS`, `FAIL`, `INSUFFICIENT`
-  - `Verdict(check: str, outcome: Outcome, threshold: str | None, observed: str | None, reason: str)` — **never a bare boolean**; the UI has nothing else it could render, which is how spec §8 screen 5's "no bare red badges" becomes structural
-  - `Assertion` protocol — `name: str`, `check(candidate, history, ctx) -> Verdict`
-  - `HealContext(healed: bool, winning_rung: int, page, target, cache, human_confirmed: bool = False)`
-  - `gate(candidate: CandidateExtraction, history, ctx: HealContext, checks: list[Assertion]) -> ValidatedExtraction | QuarantinedRun`
-  - `ValidatedExtraction(rows, run_key)` — **frozen, constructor requires a module-private `_ValidateToken`, minted only inside `gate.py`**
+  - `extract/models.py`: `Row = dict[str, Claim]`, `CandidateExtraction(rows: list[Row], trace: dict[str, CascadeTrace], spec_version: int, run_key: str)` — frozen dataclass, exactly Task 27's
+  - `validate/verdict.py`: `Outcome` — `StrEnum` `PASS`, `FAIL`, `INSUFFICIENT` (values are the names); `Confirmation(rung: int | None, family: Family)`; `Verdict(check, outcome, threshold, observed, reason, field=None, confirmed_by=None)` — both frozen Pydantic
+  - `validate/history.py`: `AcceptedRun`, `History` (the 2026-09-26 amendment's code, folded in)
+  - `validate/assertions/base.py`: `Assertion` protocol (`name: str`, `check(candidate, history, ctx) -> Verdict`); `Cell`, `cells()`, `column()`, `preview()`
+  - `validate/gate.py`: `HealContext(healed, winning_rung, page, target, cache, human_confirmed=False)`; `ValidatedExtraction(rows, run_key, verdicts)` token-gated; `QuarantinedRun(run_key, reason, verdicts, data_uri="")`; `gate_run(candidate, history, contexts, checks)`; `gate(candidate, history, ctx, checks)` — the one-field `gate_run`; `_effective(verdict, strict)`
 
-- [ ] **Step 1: Write the failing tests — the asymmetry is the whole point**
+**`CandidateExtraction` moves into this task, because every check in Tasks 20–25 takes one and
+Task 27 — which used to create it — runs after Task 25.** The class and its module are exactly
+Task 27's; Task 27's *Files* line changes from "Create `extract/models.py`" to "`extract/models.py`
+exists (Task 20)". One addition: the `Row` alias, so the one `# type: ignore[type-arg]` the bare
+`Claim` needs (contract §2.1) is written once instead of in every module that names a row.
+
+**`Verdict` is never a bare boolean (design §5.5).** It carries the threshold, the observed value and a
+reason in words, so the UI has nothing else it *could* render — "no bare red badges" becomes
+structural. Two guards make that true rather than conventional: `reason` may not be empty, and
+**only a `PASS` may name a confirmer** — `heal_events.confirmer_rung`/`confirmer_family` are written
+from `confirmed_by` (Task 26A `record_heals`), and a `FAIL` that named one would publish a
+confirmation that never happened.
+
+**`History` is what we trusted, not what we saw.** Every check takes `history: History | None`;
+`None` means no accepted run yet, and every history-dependent check returns `INSUFFICIENT` for it.
+`AcceptedRun.shift_alerts` holds the fields whose PSI *breached* on that run (Task 23 counts
+consecutive breaches from it); `marked_expected` holds the fields a client marked "expected" (B7).
+The production builder is `orchestrate.history.history_for` (Task 26A) — the judge never reads storage.
+
+**The asymmetry is the gate's only policy (design §5.7).** A verdict's *effective* outcome is its
+outcome, except that `INSUFFICIENT` becomes `FAIL` on the strict path. The strict path is **healed
+and not yet confirmed by a human**:
+
+| Context | `INSUFFICIENT` | `FAIL` |
+|---|---|---|
+| cache hit (rung 1) | tolerated | quarantines |
+| healed (rung 2–4) | **quarantines** | quarantines |
+| healed, `human_confirmed` (promotion, Task 25) | tolerated | **still quarantines** |
+| escalated (rung 5, or no winner) | — | an `Escalation` `FAIL` is added: always quarantines |
+
+**Why a human's confirmation relaxes `INSUFFICIENT` and nothing else.** Design §5.9 says promotion
+*"supplies the missing evidence; it does not skip a check"*. `INSUFFICIENT` **is** missing evidence —
+no history yet, no confirmer resolved. `FAIL` is evidence *against* the heal: a cross-family
+disagreement, a format violation, a shifted distribution. If a confirmation could not relax
+`INSUFFICIENT`, no heal during a client target's 30-run warm-up could ever be promoted — every one of
+them would be discard-only, and the first month of data would be lost by design (M18's cost, paid
+twice). If it could relax `FAIL`, a human could wave the decoy column through. The table is the line.
+
+**Three fail-closed rules the first draft left open.** A run with no fields, or a field with no
+checks, raises `ValueError` — a field judged by nothing is the green tick `00` §7 calls a lie. A check
+that *raises* becomes a `FAIL` verdict naming the exception: the run quarantines with its data kept
+instead of crashing and losing it. And a field whose `winning_rung` is not 1–4 gets an `Escalation`
+`FAIL`: rung 5 escalates, it never heals (design §5.3, §5.7) — the pipeline passes
+`trace.winner or 5` (Task 26A), so a field no rung resolved can never reach the lake.
+
+**Why `QuarantinedRun` is defined in `gate.py` and re-exported by `quarantine.py`.** `gate_run` builds
+one and `promote()` calls `gate_run`; defining it in `quarantine.py` would make the two modules import
+each other at load time. `from selector_drift.validate.quarantine import QuarantinedRun` keeps working
+through `quarantine.py`'s `__all__` (Task 25).
+
+- [ ] **Step 1: Write the test helpers**
+
+```python
+# tests/validate/helpers.py
+"""Plain builders for the gate's tests -- data, not fixtures, so every test reads as its inputs.
+Tasks 22 and 23 append to this module."""
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Mapping, Sequence
+
+from bok_core.provenance import Claim, DomSource, Method
+
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.resolve.cache import CachedSelector
+from selector_drift.resolve.page import PageSource, StaticPageSource
+from selector_drift.spec.schema import FieldTarget
+from selector_drift.validate.gate import HealContext
+from selector_drift.validate.history import History
+from selector_drift.validate.verdict import Outcome, Verdict
+
+AT = dt.datetime(2026, 10, 1, 4, 12, tzinfo=dt.UTC)       # fixed: never the wall clock (M20)
+RUN_KEY = "testbench:2:2026-10-01"
+PAGE = StaticPageSource("<html><body><p>fixture</p></body></html>")
+
+
+def field_target(name: str, *, assertions: Sequence[Mapping[str, object]] = (),
+                 distributional: bool = False) -> FieldTarget:
+    return FieldTarget.model_validate({"name": name, "description": f"the {name} cell",
+                                       "relation": None, "assertions": list(assertions),
+                                       "distributional": distributional})
+
+
+CLAIM_NUMBER = field_target("claim_number",
+                            assertions=[{"type": "format", "pattern": r"^[A-Z]{2}\d{8}$"}])
+AMOUNT = field_target("amount", distributional=True)
+RESERVE = field_target("reserve", distributional=True)
+STATUS = field_target("status", distributional=True)
+
+
+def claim(value: str, *, selector: str = "#healed", rung: int = 4,
+          at: dt.datetime = AT) -> Claim:  # type: ignore[type-arg]
+    return Claim(value=value, method=Method.DETERMINISTIC, confidence=None, observed_at=at,
+                 source=DomSource(snapshot_id="0" * 64, selector=selector, rung=rung))
+
+
+def candidate(rows: Sequence[Mapping[str, str]], *, run_key: str = RUN_KEY,
+              selector: str = "#healed", at: dt.datetime = AT) -> CandidateExtraction:
+    return CandidateExtraction(
+        rows=[{k: claim(v, selector=selector, at=at) for k, v in r.items()} for r in rows],
+        trace={}, spec_version=2, run_key=run_key)
+
+
+def column(field: str, values: Sequence[str], **kw: object) -> CandidateExtraction:
+    return candidate([{field: v} for v in values], **kw)  # type: ignore[arg-type]
+
+
+class EmptyCache:
+    def get(self, target: str, field: str,
+            spec_version: int | None = None) -> CachedSelector | None:
+        return None
+
+
+class DictCache:
+    """A read-only cache keyed by field, satisfying CacheReader (Task 19)."""
+
+    def __init__(self, entries: Mapping[str, CachedSelector]) -> None:
+        self.entries = dict(entries)
+
+    def get(self, target: str, field: str,
+            spec_version: int | None = None) -> CachedSelector | None:
+        return self.entries.get(field)
+
+
+def ctx(target: FieldTarget = CLAIM_NUMBER, *, healed: bool = True, rung: int = 3,
+        page: PageSource | None = PAGE, cache: object | None = None,
+        confirmed: bool = False) -> HealContext:
+    return HealContext(healed=healed, winning_rung=rung, page=page, target=target,
+                       cache=cache if cache is not None else EmptyCache(),  # type: ignore[arg-type]
+                       human_confirmed=confirmed)
+
+
+class _Fixed:
+    outcome: Outcome
+
+    def __init__(self, name: str | None = None) -> None:
+        self.name = name or type(self).__name__
+
+    def check(self, candidate: CandidateExtraction, history: History | None,
+              ctx: HealContext) -> Verdict:
+        return Verdict(check=self.name, outcome=self.outcome, threshold="fixed",
+                       observed=self.outcome.value,
+                       reason=f"test double that always returns {self.outcome.value}")
+
+
+class AlwaysPass(_Fixed):
+    outcome = Outcome.PASS
+
+
+class AlwaysFail(_Fixed):
+    outcome = Outcome.FAIL
+
+
+class AlwaysInsufficient(_Fixed):
+    outcome = Outcome.INSUFFICIENT
+
+
+class Raises:
+    name = "Raises"
+
+    def check(self, candidate: CandidateExtraction, history: History | None,
+              ctx: HealContext) -> Verdict:
+        raise RuntimeError("boom")
+```
+
+- [ ] **Step 2: Write the failing tests — the asymmetry is the whole point**
 
 ```python
 # tests/validate/test_gate_asymmetry.py
 import pytest
-from selector_drift.validate.gate import gate, HealContext, ValidatedExtraction
+
+from selector_drift.validate.gate import (HealContext, ValidatedExtraction, _TOKEN, gate,
+                                          gate_run)
 from selector_drift.validate.quarantine import QuarantinedRun
+from selector_drift.validate.verdict import Outcome
+from tests.validate.helpers import (AMOUNT, CLAIM_NUMBER, AlwaysFail, AlwaysInsufficient,
+                                    AlwaysPass, Raises, candidate, ctx)
 
+CANDIDATE = candidate([{"claim_number": "AB12345678", "amount": "1,200.00"}])
+
+
+@pytest.mark.unit
 def test_insufficient_is_tolerated_on_a_cache_hit():
-    ctx = HealContext(healed=False, winning_rung=1, page=P, target=T, cache=C)
-    assert isinstance(gate(CANDIDATE, HISTORY, ctx, [AlwaysInsufficient()]), ValidatedExtraction)
+    c = ctx(healed=False, rung=1)
+    assert isinstance(gate(CANDIDATE, None, c, [AlwaysInsufficient()]), ValidatedExtraction)
 
+
+@pytest.mark.unit
 def test_insufficient_is_a_failure_on_a_heal():
-    """Spec 5.7. When the selector changed we demand full evidence; when nothing
+    """Design 5.7. When the selector changed we demand full evidence; when nothing
     changed we do not. This is what stops the distributional check crying wolf."""
-    ctx = HealContext(healed=True, winning_rung=3, page=P, target=T, cache=C)
-    assert isinstance(gate(CANDIDATE, HISTORY, ctx, [AlwaysInsufficient()]), QuarantinedRun)
+    assert isinstance(gate(CANDIDATE, None, ctx(rung=3), [AlwaysInsufficient()]), QuarantinedRun)
 
-@pytest.mark.parametrize("healed,rung", [(False, 1), (True, 3)])
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("healed", "rung"), [(False, 1), (True, 3)])
 def test_any_fail_quarantines_regardless_of_heal(healed, rung):
-    ctx = HealContext(healed=healed, winning_rung=rung, page=P, target=T, cache=C)
-    assert isinstance(gate(CANDIDATE, HISTORY, ctx, [AlwaysFail()]), QuarantinedRun)
+    assert isinstance(gate(CANDIDATE, None, ctx(healed=healed, rung=rung), [AlwaysFail()]),
+                      QuarantinedRun)
 
+
+@pytest.mark.unit
 def test_validated_extraction_cannot_be_built_outside_validate():
     with pytest.raises(TypeError):
-        ValidatedExtraction(rows=[], run_key="x")  # type: ignore[call-arg]
+        ValidatedExtraction(rows=(), run_key="x", verdicts=())  # type: ignore[call-arg]
 
-def test_a_quarantined_run_carries_every_verdict():
-    ctx = HealContext(healed=True, winning_rung=3, page=P, target=T, cache=C)
-    q = gate(CANDIDATE, HISTORY, ctx, [AlwaysFail(), AlwaysPass()])
-    assert len(q.verdicts) == 2
+
+@pytest.mark.unit
+def test_a_forged_token_is_rejected_by_identity_not_by_type():
+    # M29's lesson from the scope gate: an isinstance check is satisfied by a second instance.
+    forged = type(_TOKEN)()
+    with pytest.raises(TypeError, match="minted only by validate.gate"):
+        ValidatedExtraction(rows=(), run_key="x", verdicts=(), _token=forged)
+
+
+@pytest.mark.unit
+def test_a_quarantined_run_carries_every_verdict_stamped_with_its_field():
+    q = gate(CANDIDATE, None, ctx(rung=3), [AlwaysFail(), AlwaysPass()])
+    assert isinstance(q, QuarantinedRun)
+    assert len(q.verdicts) == 2 and {v.field for v in q.verdicts} == {"claim_number"}
+    assert q.reason == "gate failed: claim_number:AlwaysFail" and q.data_uri == ""
+
+
+@pytest.mark.unit
+def test_one_failing_field_quarantines_the_whole_run():
+    ok = ctx(CLAIM_NUMBER, healed=False, rung=1)
+    bad = ctx(AMOUNT, healed=True, rung=3)
+    r = gate_run(CANDIDATE, None, {"claim_number": ok, "amount": bad},
+                 {"claim_number": [AlwaysPass()], "amount": [AlwaysInsufficient()]})
+    assert isinstance(r, QuarantinedRun)
+    assert {v.field for v in r.verdicts} == {"claim_number", "amount"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("rung", [5, 0])
+def test_an_escalated_field_never_writes(rung):
+    # Design 5.3/5.7: rung 5 escalates, it does not heal. Task 26A passes `trace.winner or 5`.
+    r = gate(CANDIDATE, None, ctx(rung=rung, confirmed=True), [AlwaysPass()])
+    assert isinstance(r, QuarantinedRun)
+    assert any(v.check == "Escalation" and v.outcome is Outcome.FAIL for v in r.verdicts)
+
+
+@pytest.mark.unit
+def test_a_check_that_raises_is_a_failure_not_a_crash():
+    # A crash would lose the run's data; a FAIL keeps it in quarantine with the reason.
+    r = gate(CANDIDATE, None, ctx(healed=False, rung=1), [Raises()])
+    assert isinstance(r, QuarantinedRun)
+    (v,) = r.verdicts
+    assert v.check == "Raises" and v.outcome is Outcome.FAIL and v.observed == "RuntimeError"
+
+
+@pytest.mark.unit
+def test_a_field_with_no_checks_is_refused_not_waved_through():
+    with pytest.raises(ValueError, match="judged by nothing"):
+        gate_run(CANDIDATE, None, {"claim_number": ctx()}, {"claim_number": []})
+    with pytest.raises(ValueError, match="nothing to judge"):
+        gate_run(CANDIDATE, None, {}, {})
+
+
+@pytest.mark.unit
+def test_a_validated_extraction_carries_the_verdicts_it_was_judged_by():
+    # Task 26B's confirmer_of() and Task 26A's record_heals read these.
+    v = gate(CANDIDATE, None, ctx(rung=3), [AlwaysPass("A"), AlwaysPass("B")])
+    assert isinstance(v, ValidatedExtraction)
+    assert [x.check for x in v.verdicts] == ["A", "B"] and v.run_key == CANDIDATE.run_key
+    assert v.rows == tuple(CANDIDATE.rows)
+
+
+@pytest.mark.unit
+def test_human_confirmation_supplies_missing_evidence_but_never_overrides_a_failure():
+    # Design 5.9: promotion supplies the missing evidence; it does not skip a check.
+    confirmed = ctx(rung=3, confirmed=True)
+    assert isinstance(gate(CANDIDATE, None, confirmed, [AlwaysInsufficient()]),
+                      ValidatedExtraction)
+    assert isinstance(gate(CANDIDATE, None, confirmed, [AlwaysFail()]), QuarantinedRun)
+
+
+@pytest.mark.unit
+def test_gate_is_the_one_field_case_of_gate_run():
+    c = ctx(rung=3)
+    one = gate(CANDIDATE, None, c, [AlwaysFail()])
+    run = gate_run(CANDIDATE, None, {"claim_number": c}, {"claim_number": [AlwaysFail()]})
+    assert one == run
 ```
-
-- [ ] **Step 2: Run them and watch them fail**
-
-Run: `uv run pytest tests/validate/test_gate_asymmetry.py -v`
-Expected: FAIL — `ModuleNotFoundError: selector_drift.validate.verdict`.
-
-- [ ] **Step 3: Implement `Verdict`, the protocol, the token-gated `ValidatedExtraction`, and `gate()`**
 
 ```python
-def _effective(v: Verdict, healed: bool) -> Outcome:
-    if v.outcome is Outcome.INSUFFICIENT and healed:
-        return Outcome.FAIL
-    return v.outcome
+# tests/validate/test_verdict.py
+import pytest
+from pydantic import TypeAdapter, ValidationError
+
+from selector_drift.resolve.trace import Family
+from selector_drift.validate.verdict import Confirmation, Outcome, Verdict
+
+
+@pytest.mark.unit
+def test_a_verdict_must_give_a_reason():
+    # Design 5.5: no bare red badges. An empty reason is a bare badge with extra steps.
+    with pytest.raises(ValidationError):
+        Verdict(check="X", outcome=Outcome.FAIL, threshold=None, observed=None, reason="")
+
+
+@pytest.mark.unit
+def test_only_a_pass_can_name_a_confirmer():
+    # heal_events.confirmer_* is written from confirmed_by (Task 26A). A FAIL naming a
+    # confirmer would publish a confirmation that never happened.
+    with pytest.raises(ValidationError, match="only a PASS"):
+        Verdict(check="X", outcome=Outcome.FAIL, threshold=None, observed=None, reason="r",
+                confirmed_by=Confirmation(rung=4, family=Family.STRUCTURAL))
+
+
+@pytest.mark.unit
+def test_verdicts_round_trip_through_json_as_heal_events_store_them():
+    v = Verdict(check="RowKeyContinuity", outcome=Outcome.PASS, threshold=">= 0.95",
+                observed="1.0000", reason="agrees", field="amount",
+                confirmed_by=Confirmation(rung=None, family=Family.VALUE))
+    dumped = TypeAdapter(list[Verdict]).dump_python([v], mode="json")
+    assert dumped[0]["outcome"] == "PASS" and dumped[0]["confirmed_by"]["family"] == "VALUE"
+    assert TypeAdapter(list[Verdict]).validate_python(dumped) == [v]
 ```
 
-- [ ] **Step 4: Run the tests and make sure they pass**
+```python
+# tests/validate/test_history.py
+import datetime as dt
 
-Run: `uv run pytest tests/validate -v && uv run mypy --strict selector_drift/validate`
-Expected: PASS, 6 tests. mypy clean.
+import pytest
 
-- [ ] **Step 5: Commit**
+from selector_drift.validate.history import AcceptedRun, History
 
-```bash
-git add selector_drift/validate tests/validate
-git commit -m "feat(validate): Verdict, gate, and the heal asymmetry"
+
+def _run(day: int, rows: list[dict[str, str]]) -> AcceptedRun:
+    return AcceptedRun(run_key=f"testbench:2:2026-09-{day:02d}", window=dt.date(2026, 9, day),
+                       rows=tuple(rows), natural_key=("claim_number",))
+
+
+H = History(runs=(_run(1, [{"claim_number": "AB00000001", "amount": "1.00"}]),
+                  _run(2, [{"claim_number": "AB00000001", "amount": "2.00"},
+                           {"claim_number": "AB00000002", "amount": "3.00"}])))
+
+
+@pytest.mark.unit
+def test_previous_is_the_newest_accepted_run():
+    assert H.previous() is H.runs[-1] and History().previous() is None and len(H) == 2
+
+
+@pytest.mark.unit
+def test_values_flattens_every_run_oldest_first():
+    assert H.values("amount") == ["1.00", "2.00", "3.00"] and H.values("nope") == []
+
+
+@pytest.mark.unit
+def test_by_key_joins_on_the_natural_key_and_skips_keyless_rows():
+    run = _run(3, [{"claim_number": "AB00000009", "amount": "9.00"}, {"amount": "orphan"}])
+    assert run.by_key() == {("AB00000009",): {"claim_number": "AB00000009", "amount": "9.00"}}
 ```
 
-**Amended 2026-09-26 — three shapes the first draft left undefined.**
+- [ ] **Step 3: Run them and watch them fail**
 
-**1. `History`.** Every check takes `history` and no task said what it is; Tasks 22, 23 and 26 each
-assumed a different shape. `gate()`, `gate_run()` and every `Assertion.check()` take
-`history: History | None` — `None` means no accepted run yet, and every history-dependent check
-returns `INSUFFICIENT` for it.
+Run: `uv run pytest tests/validate -v`
+Expected: FAIL — collection errors, `ModuleNotFoundError: No module named 'selector_drift.extract.models'` (from `tests/validate/helpers.py`) and `No module named 'selector_drift.validate.verdict'`.
+
+- [ ] **Step 4: Implement the models, the protocol and the gate**
+
+```python
+# selector_drift/extract/models.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TypeAlias
+
+from bok_core.provenance import Claim
+
+from selector_drift.resolve.trace import CascadeTrace
+
+Row: TypeAlias = dict[str, Claim]  # type: ignore[type-arg]  -- bare Claim, contract §2.1
+
+
+@dataclass(frozen=True)
+class CandidateExtraction:
+    rows: list[Row]
+    trace: dict[str, CascadeTrace]
+    spec_version: int
+    run_key: str
+```
+
+```python
+# selector_drift/validate/verdict.py
+"""A check's answer. Never a bare boolean: the UI has nothing else it could render (design 5.5)."""
+from __future__ import annotations
+
+from enum import StrEnum
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from selector_drift.resolve.trace import Family
+
+
+class Outcome(StrEnum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    INSUFFICIENT = "INSUFFICIENT"
+
+
+class Confirmation(BaseModel):
+    """Which independent signal confirmed a heal. `rung` is None for the VALUE family."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rung: int | None
+    family: Family
+
+
+class Verdict(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    check: str = Field(min_length=1)
+    outcome: Outcome
+    threshold: str | None
+    observed: str | None
+    reason: str = Field(min_length=1)
+    field: str | None = None                   # stamped by gate_run
+    confirmed_by: Confirmation | None = None   # set ONLY by IndependentRungAgreement and
+                                               # RowKeyContinuity, and only on PASS
+
+    @model_validator(mode="after")
+    def _only_a_pass_names_a_confirmer(self) -> Verdict:
+        if self.confirmed_by is not None and self.outcome is not Outcome.PASS:
+            raise ValueError("only a PASS can name a confirmer")
+        return self
+```
 
 ```python
 # selector_drift/validate/history.py
+"""What we trusted, not what we saw. Built by orchestrate.history.history_for (Task 26A)."""
 from __future__ import annotations
 
 import datetime as dt
@@ -5991,16 +14757,18 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class AcceptedRun:
     """A run whose rows were WRITTEN (gate passed, or a human promoted it). Quarantined and
-    discarded runs never appear: history is what we trusted, not what we saw."""
+    discarded runs never appear."""
+
     run_key: str
     window: dt.date
     rows: tuple[Mapping[str, str], ...]              # field -> raw extracted string
     natural_key: tuple[str, ...]
-    shift_alerts: frozenset[str] = frozenset()       # fields whose distribution alert fired
+    shift_alerts: frozenset[str] = frozenset()       # fields whose PSI breached on this run
     marked_expected: frozenset[str] = frozenset()    # fields a client marked "expected" (B7)
 
     def by_key(self) -> dict[tuple[str, ...], Mapping[str, str]]:
-        return {tuple(r[k] for k in self.natural_key): r for r in self.rows}
+        return {tuple(r[k] for k in self.natural_key): r
+                for r in self.rows if all(k in r for k in self.natural_key)}
 
 
 @dataclass(frozen=True)
@@ -6013,78 +14781,184 @@ class History:
     def values(self, field_name: str) -> list[str]:
         return [r[field_name] for run in self.runs for r in run.rows if field_name in r]
 
+    def trailing(self, n: int) -> History:
+        return History(runs=self.runs[-n:]) if n > 0 else History()
+
     def __len__(self) -> int:
         return len(self.runs)
 ```
 
-`RowKeyContinuity` (Task 22) reads `history.previous().by_key()`; `DistributionalAssertion` (Task 23)
-reads `history.values(field)`, `len(history)` for warm-up, and the trailing runs' `shift_alerts` and
-`marked_expected` for persistence. Tasks 22–23's `history(n=..., consecutive_shifts=...,
-marked_expected=..., shifted_tail=...)` helper builds `History` in `tests/validate/conftest.py`. The
-production builder is `orchestrate.history.history_for(session, target, spec_version, limit=90)`
-(Task 26A), in `orchestrate/`, so the judge never reads storage itself.
+```python
+# selector_drift/validate/assertions/base.py
+"""The Assertion protocol, and the one way every check reads a field out of a candidate."""
+from __future__ import annotations
 
-**2. `Verdict.field: str | None = None` and `Verdict.confirmed_by: Confirmation | None = None`.**
-A run has several fields; `heal_events.verdicts` is per heal, i.e. per field, and the heal screen shows
-one field's verdicts — `gate_run` stamps the field. And `heal_events.confirmer_rung` /
-`confirmer_family` existed from day one with **nothing that produced them**: the confirming checks
-reported their confirmer only in prose. The two confirmer checks now say it in structure:
+import datetime as dt
+from typing import TYPE_CHECKING, NamedTuple, Protocol
+
+from bok_core.provenance import DomSource
+
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.validate.history import History
+from selector_drift.validate.verdict import Verdict
+
+if TYPE_CHECKING:
+    from selector_drift.validate.gate import HealContext
+
+
+class Assertion(Protocol):
+    name: str
+
+    def check(self, candidate: CandidateExtraction, history: History | None,
+              ctx: HealContext) -> Verdict: ...
+
+
+class Cell(NamedTuple):
+    value: str
+    observed_at: dt.datetime | None
+    selector: str | None
+
+
+def cells(candidate: CandidateExtraction, field: str) -> list[Cell]:
+    out: list[Cell] = []
+    for row in candidate.rows:
+        claim = row.get(field)
+        if claim is None:
+            continue
+        at = claim.observed_at
+        source = claim.source
+        out.append(Cell(value=str(claim.value),
+                        observed_at=at if isinstance(at, dt.datetime) else None,
+                        selector=source.selector if isinstance(source, DomSource) else None))
+    return out
+
+
+def column(candidate: CandidateExtraction, field: str) -> list[str]:
+    return [c.value for c in cells(candidate, field)]
+
+
+def preview(values: list[str], limit: int = 3, width: int = 40) -> str:
+    """At most `limit` values, each at most `width` characters: a verdict names the offending
+    value without copying a page into the heal log."""
+    shown = ", ".join(repr(v if len(v) <= width else v[:width] + "...") for v in values[:limit])
+    more = len(values) - limit
+    return shown + (f" (+{more} more)" if more > 0 else "")
+```
 
 ```python
-# selector_drift/validate/verdict.py  (addition)
-class Confirmation(BaseModel, frozen=True):
-    rung: int | None          # None for the VALUE family, which is not a rung
-    family: Family
+# selector_drift/validate/gate.py
+"""The gate. The only place a ValidatedExtraction is minted (design 3.2)."""
+from __future__ import annotations
 
-class Verdict(BaseModel, frozen=True):
-    check: str
-    outcome: Outcome
-    threshold: str | None
-    observed: str | None
+import dataclasses
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Final
+
+from selector_drift.extract.models import CandidateExtraction, Row
+from selector_drift.resolve.cache import CacheReader
+from selector_drift.resolve.page import PageSource
+from selector_drift.spec.schema import FieldTarget
+from selector_drift.validate.assertions.base import Assertion
+from selector_drift.validate.history import History
+from selector_drift.validate.verdict import Outcome, Verdict
+
+RESOLVING_RUNGS: Final = frozenset({1, 2, 3, 4})
+
+
+@dataclass(frozen=True)
+class HealContext:
+    """Everything a check may know about ONE field's resolution."""
+
+    healed: bool
+    winning_rung: int
+    page: PageSource | None
+    target: FieldTarget
+    cache: CacheReader
+    human_confirmed: bool = False
+
+
+class _ValidateToken:
+    __slots__ = ()
+
+
+_TOKEN: Final = _ValidateToken()          # the only instance ValidatedExtraction accepts
+
+
+@dataclass(frozen=True)
+class ValidatedExtraction:
+    rows: tuple[Row, ...]
+    run_key: str
+    verdicts: tuple[Verdict, ...]
+    _token: _ValidateToken = dataclasses.field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._token is not _TOKEN:                  # identity, not isinstance (M29)
+            raise TypeError("a ValidatedExtraction is minted only by validate.gate (C2)")
+
+
+@dataclass(frozen=True)
+class QuarantinedRun:
+    """Re-exported by validate.quarantine (Task 25). data_uri is set when orchestrate holds
+    the candidate's rows (Task 26A `hold`)."""
+
+    run_key: str
     reason: str
-    field: str | None = None
-    confirmed_by: Confirmation | None = None   # set ONLY by IndependentRungAgreement (a DOM
-                                               # confirmer resolved the same node) and by
-                                               # RowKeyContinuity (VALUE), and only on PASS
-```
+    verdicts: tuple[Verdict, ...]
+    data_uri: str = ""
 
-`record_heals` (Task 26A) takes the field's `PASS` verdict with a `confirmed_by`, preferring a DOM
-confirmer over `VALUE`, and writes it to `confirmer_rung` / `confirmer_family`; none → both null, which
-the heal screen renders as "no cross-family confirmer resolved". Task 22 adds:
 
-```python
-@pytest.mark.unit
-def test_a_passing_confirmation_names_its_confirmer_in_structure(history):
-    v = IndependentRungAgreement([AxTreeRung(), HeuristicRung()]).check(REORDERED, history, ctx(2))
-    assert v.outcome is Outcome.PASS and v.confirmed_by == Confirmation(rung=4, family=Family.STRUCTURAL)
+def _effective(v: Verdict, strict: bool) -> Outcome:
+    """Design 5.7. `strict` is healed-and-not-yet-human-confirmed."""
+    if v.outcome is Outcome.INSUFFICIENT and strict:
+        return Outcome.FAIL
+    return v.outcome
 
-@pytest.mark.unit
-def test_a_value_confirmation_has_no_rung(history):
-    v = RowKeyContinuity().check(reworded_candidate(), history, ctx(4))
-    assert v.confirmed_by == Confirmation(rung=None, family=Family.VALUE)
-```
 
-**3. `gate_run()` — the gate for a whole run.** `HealContext` is per field (one `winning_rung`, one
-`target`) and `gate()` judges one context. A run is judged once, over all its fields, and minted once:
+def _escalated(rung: int) -> Verdict:
+    return Verdict(check="Escalation", outcome=Outcome.FAIL, threshold="resolved by rungs 1-4",
+                   observed=f"rung {rung}",
+                   reason="no deterministic rung resolved this field; rung 5 escalates to a "
+                          "human and an escalated field never writes (design 5.3, 5.7)")
 
-```python
-# selector_drift/validate/gate.py  (addition; gate() becomes the one-field case of it)
+
+def _judge(check: Assertion, candidate: CandidateExtraction, history: History | None,
+           ctx: HealContext) -> Verdict:
+    try:
+        return check.check(candidate, history, ctx)
+    except Exception as exc:          # a crash would lose the run; a FAIL keeps it quarantined
+        return Verdict(check=check.name, outcome=Outcome.FAIL,
+                       threshold="the check returns a verdict", observed=type(exc).__name__,
+                       reason=f"the check raised instead of judging: {exc!r}")
+
+
 def gate_run(candidate: CandidateExtraction, history: History | None,
              contexts: Mapping[str, HealContext],
              checks: Mapping[str, Sequence[Assertion]]) -> ValidatedExtraction | QuarantinedRun:
+    """Judge a whole run, once, over every field; mint once or quarantine once."""
+    if not contexts:
+        raise ValueError("a run with no fields has nothing to judge")
     verdicts: list[Verdict] = []
     failing: list[Verdict] = []
     for field_name, ctx in contexts.items():
-        for check in checks[field_name]:
-            v = check.check(candidate, history, ctx).model_copy(update={"field": field_name})
-            verdicts.append(v)
-            if _effective(v, ctx.healed) is not Outcome.PASS:
-                failing.append(v)
+        field_checks = checks.get(field_name)
+        if not field_checks:
+            raise ValueError(f"field {field_name!r} has no checks: a field judged by nothing "
+                             "is not judged")
+        strict = ctx.healed and not ctx.human_confirmed
+        judged = [_judge(c, candidate, history, ctx) for c in field_checks]
+        if ctx.winning_rung not in RESOLVING_RUNGS:
+            judged.append(_escalated(ctx.winning_rung))
+        for v in judged:
+            stamped = v.model_copy(update={"field": field_name})
+            verdicts.append(stamped)
+            if _effective(stamped, strict) is not Outcome.PASS:
+                failing.append(stamped)
     if failing:
         names = ", ".join(sorted({f"{v.field}:{v.check}" for v in failing}))
         return QuarantinedRun(run_key=candidate.run_key, reason=f"gate failed: {names}",
-                              verdicts=verdicts, data_uri="")
-    return ValidatedExtraction(rows=candidate.rows, run_key=candidate.run_key,
+                              verdicts=tuple(verdicts))
+    return ValidatedExtraction(rows=tuple(candidate.rows), run_key=candidate.run_key,
                                verdicts=tuple(verdicts), _token=_TOKEN)   # the one mint site
 
 
@@ -6093,17 +14967,28 @@ def gate(candidate: CandidateExtraction, history: History | None, ctx: HealConte
     return gate_run(candidate, history, {ctx.target.name: ctx}, {ctx.target.name: checks})
 ```
 
-Add to `tests/validate/test_gate_asymmetry.py`:
+`tests/validate/test_gate_asymmetry.py` imports `QuarantinedRun` from `validate.quarantine`, which
+Task 25 writes in full. So Step 5 can run now, create the re-exporting stub it will replace:
 
 ```python
-@pytest.mark.unit
-def test_one_failing_field_quarantines_the_whole_run():
-    ok = HealContext(healed=False, winning_rung=1, page=P, target=T, cache=C)
-    bad = HealContext(healed=True, winning_rung=3, page=P, target=T2, cache=C)
-    r = gate_run(CANDIDATE, HISTORY, {"a": ok, "b": bad},
-                 {"a": [AlwaysPass()], "b": [AlwaysInsufficient()]})
-    assert isinstance(r, QuarantinedRun)
-    assert {v.field for v in r.verdicts} == {"a", "b"}
+# selector_drift/validate/quarantine.py  (stub -- Task 25 replaces this file)
+from selector_drift.validate.gate import QuarantinedRun
+
+__all__ = ["QuarantinedRun"]
+```
+
+- [ ] **Step 5: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/validate -v -m unit && uv run mypy --strict selector_drift/validate selector_drift/extract/models.py && uv run lint-imports`
+Expected: PASS — 21 passed (15 in `test_gate_asymmetry.py` counting parametrisations, 3 in
+`test_verdict.py`, 3 in `test_history.py`). mypy clean.
+`judge-reaches-rungs-only-by-protocol` and `judged-cannot-call-judge` kept.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add selector_drift/extract/__init__.py selector_drift/extract/models.py selector_drift/validate tests/validate
+git commit -m "feat(validate): Verdict, History, token-gated gate_run and the heal asymmetry"
 ```
 
 ---
@@ -6111,356 +14996,1669 @@ def test_one_failing_field_quarantines_the_whole_run():
 ### Task 21: Format, domain and cross-field assertions
 
 **Files:**
-- Create: `selector_drift/validate/assertions/format.py`, `domain.py`, `cross_field.py`
-- Test: `tests/validate/test_basic_assertions.py`
+- Modify: `pyproject.toml` (via `uv add regex` and `uv add --dev types-regex`)
+- Modify: `selector_drift/spec/schema.py` — `MAX_MATCH_LEN`, `MATCH_TIMEOUT_S`, `MatchResult`, `compile_pattern()`, `match_value()`; `matches()` re-implemented on top of them
+- Create: `selector_drift/validate/assertions/_numbers.py`, `format.py`, `domain.py`, `cross_field.py`
+- Test: `tests/spec/test_matcher.py`, `tests/validate/test_basic_assertions.py`
 
 **Interfaces:**
-- Consumes: `Assertion`, `Verdict`, `Outcome` (Task 20), `AssertionSpec` (Task 5).
-- Produces: `FormatAssertion(pattern: str)`, `DomainAssertion(rule: DomainRule)`, `CrossFieldAssertion(expression: str)`, `safe_eval(expression, row)`. All three assertions work on run one with no history.
+- Consumes: `Assertion`, `Verdict`, `Outcome`, `cells`, `column`, `preview` (Task 20); `FieldTarget`, `SpecError`, `matches` (Task 5).
+- Produces:
+  - `spec.schema.match_value(pattern, value) -> Literal["match", "no_match", "too_long", "timeout"]`, `compile_pattern(pattern) -> regex.Pattern[str]` (raises `SpecError`)
+  - `FormatAssertion(pattern: str)`, `DomainAssertion(rule: DomainRule)` with `DomainRule = Mapping[str, object]` and keys `min`, `max`, `enum`, `date_after`, `date_before`, `currency`, `CrossFieldAssertion(expression: str)` with `.names: frozenset[str]`
+  - `safe_eval(expression: str, row: Mapping[str, Decimal]) -> Decimal | bool`, `UnsafeExpression(SpecError)`, `parse_number(text) -> Decimal | None`
+  - All three assertions work on run one with no history. Each judges the field in `ctx.target.name`; `CrossFieldAssertion` reads the fields its expression names.
 
-**`CrossFieldAssertion` must not use `eval` (R13/H5).** The first draft gave it `expression: str` —
-`"net + tax == gross"` — and did not say how it is evaluated. The default reading is `eval`, and today
-that is only *"our own config"*: design §10 explicitly roadmaps screen 2 to *"an editor for
-non-engineers ... which is also the trigger to build it"*, at which point a YAML file becomes remote
-code execution inside the container that holds client session cookies. `safe_eval` walks the parsed
-AST and permits only `Name` (bound to row fields), numeric literals, arithmetic, comparison and
-boolean operators — no attribute access, no calls, no subscripts, no imports. Twenty lines, or
-`asteval`/`simpleeval` if a dependency is cheaper than a review.
+**One matcher, in `spec/`, bounded twice (M23, H5).** Rung 1 must check format assertions and
+`judged-cannot-call-judge` forbids `resolve → validate`, so the matcher lives in `spec/`. The first
+draft then gave `FormatAssertion` its own `re.fullmatch` — two matchers, one of them unguarded, on
+the same untrusted pair: a pattern from a spec meeting a value from a page. Both now call
+`spec.match_value()`, which applies two guards:
 
-`FormatAssertion` also **caps input length before matching**: a pattern from a spec applied to a value
-from a page is untrusted-input-meets-untrusted-pattern, and catastrophic backtracking hangs a run.
+| Guard | Bounds | Why it alone is not enough |
+|---|---|---|
+| **Length cap, 256 characters** | polynomial backtracking; the cost of a verdict that echoes a page | `^(a+)+$` against `"a" * 30 + "b"` is already ~10⁹ steps — exponential blow-up needs no long input |
+| **`regex` module, `timeout=0.05` s per match** | exponential backtracking, whatever the pattern | the timeout is checked inside the matching loop — no thread, no signal, works in a Prefect worker |
 
-- [ ] **Step 1: Write the failing tests**
+**Chosen: the `regex` module's timeout, plus the cap.** A length cap is the only option in stdlib
+`re`, and the table's first row is why it is insufficient on its own. `regex` is Apache-2.0, pure
+dependency cost, API-compatible with `re` for every pattern in `specs/`, and its timeout raises
+`TimeoutError`, which `match_value` turns into `"timeout"` — a `FAIL` naming the cause, never a hung
+04:12 run. 256 is three times the longest bounded field in `specs/testbench.yaml` (`claimant`,
+`^\S.{0,79}$`). A malformed pattern is a `SpecError` at construction, so a broken spec refuses to
+load instead of failing every night.
+
+**`CrossFieldAssertion` must not use `eval` (R13/H5).** `"net + tax == gross"` is config, and design
+§10 roadmaps a spec editor for non-engineers — at which point `eval` is remote code execution inside
+the container holding client session cookies. `safe_eval` parses with `ast.parse(mode="eval")` (which
+compiles nothing and runs nothing) and walks the tree against a whitelist: names bound to row fields,
+int/float literals (never `bool`), `+ - * /`, unary `- + not`, comparisons, `and`/`or`. No attribute,
+call, subscript, lambda, comprehension or `**` — `9 ** 9 ** 9` is a denial of service without a single
+import. Names beginning `_` are refused, expressions over 500 characters are refused, and the top
+level must be a comparison or boolean, so an expression that computes a number instead of a verdict is
+a spec error. **The expression is validated at construction** — a hostile spec fails to load, instead
+of failing when the first row arrives. `UnsafeExpression` subclasses `SpecError` for the same reason.
+Values are parsed to `Decimal`, so `100 + 20 == 120` is exact rather than float-approximate.
+
+**One number parser, strict on purpose.** `parse_number` accepts `1,234.56`, `1234.56`, `-12` and
+nothing else. `LocaleFlip`'s `1.234,56` is therefore *not a number* to `DomainAssertion` — a `FAIL`,
+which is exactly the refusal Task 26's adversarial table names (Task 11A: *"DomainAssertion range
+check, and the currency-sanity rule"*).
+
+**Date plausibility needs no clock (M20).** A date after the day the page was observed is refused
+using the claim's own `observed_at` — the suite stays deterministic and the check still catches a
+`filed` column that is really a due date.
+
+- [ ] **Step 1: Add the dependency**
+
+```bash
+uv add regex
+uv add --dev types-regex
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```python
+# tests/spec/test_matcher.py
+import pytest
+
+from selector_drift.spec.schema import (MAX_MATCH_LEN, FieldTarget, SpecError, compile_pattern,
+                                        match_value, matches)
+
+CLAIM = r"^[A-Z]{2}\d{8}$"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("value", "expected"), [("AB12345678", "match"),
+                                                 ("12345678", "no_match"),
+                                                 ("A" * (MAX_MATCH_LEN + 1), "too_long")])
+def test_match_value_classifies_every_outcome(value, expected):
+    assert match_value(CLAIM, value) == expected
+
+
+@pytest.mark.unit
+def test_rung_one_and_the_gate_share_one_bounded_matcher():
+    # M23: spec.matches() is what rung 1 calls; it must carry the same cap as the gate.
+    target = FieldTarget.model_validate({"name": "claim_number", "description": "d",
+                                         "relation": None,
+                                         "assertions": [{"type": "format", "pattern": CLAIM}]})
+    assert matches(target, "AB12345678")
+    assert not matches(target, "AB" + "1" * MAX_MATCH_LEN)
+
+
+@pytest.mark.unit
+def test_a_broken_pattern_is_a_spec_error_not_a_nightly_crash():
+    with pytest.raises(SpecError, match="invalid format pattern"):
+        compile_pattern("(unclosed")
+```
 
 ```python
 # tests/validate/test_basic_assertions.py
-from selector_drift.validate.assertions.format import FormatAssertion
+import datetime as dt
+import time
+from decimal import Decimal
+
+import pytest
+
+from selector_drift.spec.schema import SpecError
+from selector_drift.validate.assertions import format as format_mod
+from selector_drift.validate.assertions.cross_field import (CrossFieldAssertion,
+                                                            UnsafeExpression, safe_eval)
 from selector_drift.validate.assertions.domain import DomainAssertion
-from selector_drift.validate.assertions.cross_field import CrossFieldAssertion
+from selector_drift.validate.assertions.format import FormatAssertion
 from selector_drift.validate.verdict import Outcome
+from tests.validate.helpers import AMOUNT, CLAIM_NUMBER, candidate, column, ctx, field_target
 
+CLAIM = r"^[A-Z]{2}\d{8}$"
+FILED = field_target("filed")
+STATUS = field_target("status")
+
+
+# ---- format -------------------------------------------------------------------------------
+
+@pytest.mark.unit
 def test_format_assertion_reports_its_threshold_in_the_verdict():
-    v = FormatAssertion(r"^[A-Z]{2}\d{8}$").check(rows(["AB12345678"]), None, CTX)
-    assert v.outcome is Outcome.PASS and v.threshold == r"^[A-Z]{2}\d{8}$"
+    v = FormatAssertion(CLAIM).check(column("claim_number", ["AB12345678"]), None, ctx())
+    assert v.outcome is Outcome.PASS and v.threshold == CLAIM
 
+
+@pytest.mark.unit
 def test_format_assertion_fails_and_names_the_offending_value():
-    v = FormatAssertion(r"^[A-Z]{2}\d{8}$").check(rows(["12345678"]), None, CTX)
-    assert v.outcome is Outcome.FAIL and "12345678" in v.observed
+    v = FormatAssertion(CLAIM).check(column("claim_number", ["AB12345678", "12345678"]), None,
+                                     ctx())
+    assert v.outcome is Outcome.FAIL and "12345678" in v.observed and "1 of 2" in v.reason
 
-def test_domain_assertion_catches_an_out_of_range_amount():
-    v = DomainAssertion({"min": 0, "max": 1_000_000}).check(rows([2_000_000]), None, CTX)
-    assert v.outcome is Outcome.FAIL
 
-def test_domain_assertion_catches_an_implausible_date():
-    v = DomainAssertion({"date_after": "2000-01-01"}).check(rows(["1899-01-01"]), None, CTX)
-    assert v.outcome is Outcome.FAIL
-
-def test_cross_field_catches_a_row_that_no_longer_foots():
-    v = CrossFieldAssertion("net + tax == gross").check(
-        rows([{"net": 100, "tax": 20, "gross": 200}]), None, CTX)
-    assert v.outcome is Outcome.FAIL and "foot" in v.reason.lower()
-
-def test_cross_field_passes_on_a_row_that_foots():
-    v = CrossFieldAssertion("net + tax == gross").check(
-        rows([{"net": 100, "tax": 20, "gross": 120}]), None, CTX)
-    assert v.outcome is Outcome.PASS
-
-def test_a_spec_expression_cannot_reach_the_interpreter():
-    """R13/H5. A task spec is config. Config must never be code -- least of all in the
-    container holding client session cookies."""
-    for hostile in ["__import__('os').system('id')",
-                    "().__class__.__bases__[0].__subclasses__()",
-                    "open('/etc/passwd').read()"]:
-        with pytest.raises(UnsafeExpression):
-            CrossFieldAssertion(hostile).check(rows([{}]), None, CTX)
-
+@pytest.mark.unit
 def test_format_assertion_bounds_its_input():
     """A crafted page value against a backtracking pattern hangs the run."""
-    v = FormatAssertion(r"^(a+)+$").check(rows(["a" * 10_000 + "b"]), None, CTX)
+    v = FormatAssertion(r"^(a+)+$").check(column("claim_number", ["a" * 10_000 + "b"]), None,
+                                          ctx())
     assert v.outcome is Outcome.FAIL and "length" in v.reason.lower()
+    assert v.observed == "length 10001"              # never the page text itself
+
+
+@pytest.mark.unit
+def test_a_timed_out_match_is_a_failure_that_says_so(monkeypatch):
+    # Patched where it is USED (M31's lesson): format.py binds match_value at import.
+    monkeypatch.setattr(format_mod, "match_value", lambda pattern, value: "timeout")
+    v = FormatAssertion(CLAIM).check(column("claim_number", ["AB12345678"]), None, ctx())
+    assert v.outcome is Outcome.FAIL and "timed out" in v.reason
+
+
+@pytest.mark.unit
+def test_a_backtracking_pattern_cannot_hang_the_run():
+    # Under the cap, so only the regex timeout stands between this and a hung 04:12 run.
+    started = time.monotonic()
+    v = FormatAssertion(r"^(a+)+$").check(column("claim_number", ["a" * 200 + "b"] * 3), None,
+                                          ctx())
+    assert v.outcome is Outcome.FAIL and time.monotonic() - started < 2.0
+
+
+@pytest.mark.unit
+def test_a_broken_pattern_is_refused_when_the_spec_loads():
+    with pytest.raises(SpecError):
+        FormatAssertion("[unclosed")
+
+
+@pytest.mark.unit
+def test_no_values_is_insufficient_never_pass():
+    v = FormatAssertion(CLAIM).check(column("claim_number", []), None, ctx())
+    assert v.outcome is Outcome.INSUFFICIENT
+
+
+# ---- domain -------------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_domain_assertion_catches_an_out_of_range_amount():
+    v = DomainAssertion({"min": 100.00, "max": 250_000.00}).check(
+        column("amount", ["1,200.00", "2,000,000.00"]), None, ctx(AMOUNT))
+    assert v.outcome is Outcome.FAIL and "2,000,000.00" in v.observed
+
+
+@pytest.mark.unit
+def test_domain_assertion_reads_thousands_separators():
+    v = DomainAssertion({"min": 100.00, "max": 250_000.00}).check(
+        column("amount", ["1,200.00", "90,500.50"]), None, ctx(AMOUNT))
+    assert v.outcome is Outcome.PASS and v.threshold == "100.0 <= x <= 250000.0"
+
+
+@pytest.mark.unit
+def test_a_locale_flipped_amount_is_not_a_number():
+    # Task 11A: LocaleFlip must be refused by DomainAssertion (Task 26's table names it).
+    v = DomainAssertion({"min": 100.00, "max": 250_000.00}).check(
+        column("amount", ["1.234,56"]), None, ctx(AMOUNT))
+    assert v.outcome is Outcome.FAIL and "not a number" in v.reason
+
+
+@pytest.mark.unit
+def test_domain_assertion_catches_an_implausible_date():
+    v = DomainAssertion({"date_after": "2000-01-01"}).check(
+        column("filed", ["1899-01-01"]), None, ctx(FILED))
+    assert v.outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+def test_a_date_after_the_page_was_observed_is_refused_without_a_clock():
+    v = DomainAssertion({"date_after": dt.date(2023, 1, 1)}).check(
+        column("filed", ["2026-10-02"]), None, ctx(FILED))      # observed 2026-10-01
+    assert v.outcome is Outcome.FAIL and "observed" in v.reason
+
+
+@pytest.mark.unit
+def test_domain_assertion_checks_enum_membership():
+    rule = {"enum": ["Open", "Pending", "Paid", "Closed"]}
+    assert DomainAssertion(rule).check(column("status", ["Open", "Paid"]), None,
+                                       ctx(STATUS)).outcome is Outcome.PASS
+    assert DomainAssertion(rule).check(column("status", ["Reopened"]), None,
+                                       ctx(STATUS)).outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+def test_currency_sanity_refuses_more_decimals_than_the_currency_has():
+    rule = {"currency": "USD"}
+    assert DomainAssertion(rule).check(column("amount", ["1,200.50"]), None,
+                                       ctx(AMOUNT)).outcome is Outcome.PASS
+    assert DomainAssertion(rule).check(column("amount", ["1,200.505"]), None,
+                                       ctx(AMOUNT)).outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("rule", [{}, {"minimum": 1}, {"min": 10, "max": 1},
+                                  {"currency": "XXX"}, {"enum": "Open"}, {"min": True}])
+def test_a_malformed_domain_rule_is_refused_when_the_spec_loads(rule):
+    with pytest.raises(SpecError):
+        DomainAssertion(rule)
+
+
+# ---- cross-field --------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_cross_field_catches_a_row_that_no_longer_foots():
+    v = CrossFieldAssertion("net + tax == gross").check(
+        candidate([{"net": "100", "tax": "20", "gross": "200"}]), None, ctx())
+    assert v.outcome is Outcome.FAIL and "foot" in v.reason.lower()
+
+
+@pytest.mark.unit
+def test_cross_field_passes_on_a_row_that_foots():
+    v = CrossFieldAssertion("net + tax == gross").check(
+        candidate([{"net": "1,000.10", "tax": "20.05", "gross": "1,020.15"}]), None, ctx())
+    assert v.outcome is Outcome.PASS
+
+
+@pytest.mark.unit
+def test_a_row_missing_a_named_field_is_a_failure_that_names_it():
+    v = CrossFieldAssertion("net + tax == gross").check(
+        candidate([{"net": "100", "gross": "120"}]), None, ctx())
+    assert v.outcome is Outcome.FAIL and "tax" in v.reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("hostile", [
+    "__import__('os').system('id')",
+    "().__class__.__bases__[0].__subclasses__()",
+    "open('/etc/passwd').read()",
+    "net ** 9 ** 9 ** 9 == 1",
+    "_secret + 1 == 2",
+    "(lambda: 1)() == 1",
+    "net == " + "1 + " * 200 + "1",
+])
+def test_a_spec_expression_cannot_reach_the_interpreter(hostile):
+    """R13/H5. A task spec is config. Config must never be code -- least of all in the
+    container holding client session cookies. Refused when the spec loads."""
+    with pytest.raises(UnsafeExpression):
+        CrossFieldAssertion(hostile)
+
+
+@pytest.mark.unit
+def test_an_expression_that_computes_a_number_is_not_a_check():
+    with pytest.raises(UnsafeExpression, match="comparison"):
+        CrossFieldAssertion("net + tax")
+
+
+@pytest.mark.unit
+def test_safe_eval_is_exact_decimal_arithmetic():
+    row = {"net": Decimal("0.1"), "tax": Decimal("0.2"), "gross": Decimal("0.3")}
+    assert safe_eval("net + tax == gross", row) is True        # float would say False
+    assert safe_eval("net * 2 < gross and not gross < 0", row) is True
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [ ] **Step 3: Run them and watch them fail**
 
-Run: `uv run pytest tests/validate/test_basic_assertions.py -v`
-Expected: FAIL.
+Run: `uv run pytest tests/spec/test_matcher.py tests/validate/test_basic_assertions.py -v`
+Expected: FAIL — `ImportError: cannot import name 'MAX_MATCH_LEN' from 'selector_drift.spec.schema'`
+and `ModuleNotFoundError: No module named 'selector_drift.validate.assertions.cross_field'`.
 
-- [ ] **Step 3: Implement the three assertions,** each populating `threshold`, `observed` and `reason` on every verdict it returns.
+- [ ] **Step 4: Implement the matcher and the three assertions**
 
-- [ ] **Step 4: Run them and make sure they pass**
+In `selector_drift/spec/schema.py`, add these (with `import regex`, `from typing import Final,
+Literal` at the top) and **replace Task 5's body of `matches`** with the one below, so rung 1 and
+the gate run the same bounded matcher:
 
-Run: `uv run pytest tests/validate -v`
-Expected: PASS, 6 new tests.
+```python
+# selector_drift/spec/schema.py  (additions)
+MAX_MATCH_LEN: Final = 256          # 3x the longest bounded field in specs/ (claimant, 80)
+MATCH_TIMEOUT_S: Final = 0.05       # per value; checked inside the regex engine's loop
+MatchResult = Literal["match", "no_match", "too_long", "timeout"]
 
-- [ ] **Step 5: Commit**
+
+def compile_pattern(pattern: str) -> regex.Pattern[str]:
+    try:
+        return regex.compile(pattern)            # the module caches compiled patterns
+    except regex.error as exc:
+        raise SpecError(f"invalid format pattern {pattern!r}: {exc}") from exc
+
+
+def match_value(pattern: str, value: str) -> MatchResult:
+    """Untrusted pattern (spec) meets untrusted value (page). Bounded twice (H5)."""
+    if len(value) > MAX_MATCH_LEN:
+        return "too_long"
+    try:
+        hit = compile_pattern(pattern).fullmatch(value, timeout=MATCH_TIMEOUT_S)
+    except TimeoutError:
+        return "timeout"
+    return "no_match" if hit is None else "match"
+
+
+def matches(target: FieldTarget, value: str) -> bool:
+    """Rung 1's format check (Task 17, M23): every declared format pattern matches."""
+    return all(match_value(a.pattern, value) == "match" for a in target.assertions
+               if a.type == "format" and a.pattern is not None)
+```
+
+```python
+# selector_drift/validate/assertions/_numbers.py
+"""One strict number parser for every check that reads an amount."""
+from __future__ import annotations
+
+import re
+from decimal import Decimal
+from typing import Final
+
+# 1,234.56 or 1234.56 or -12. Linear-time: no nested quantifier can backtrack.
+_NUMBER: Final = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+
+
+def parse_number(text: str) -> Decimal | None:
+    s = text.strip()
+    if len(s) > 64 or not _NUMBER.fullmatch(s):
+        return None                      # "1.234,56" (LocaleFlip) is deliberately not a number
+    return Decimal(s.replace(",", ""))
+```
+
+```python
+# selector_drift/validate/assertions/format.py
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.spec.schema import MAX_MATCH_LEN, MATCH_TIMEOUT_S, compile_pattern, match_value
+from selector_drift.validate.assertions.base import column, preview
+from selector_drift.validate.history import History
+from selector_drift.validate.verdict import Outcome, Verdict
+
+if TYPE_CHECKING:
+    from selector_drift.validate.gate import HealContext
+
+
+class FormatAssertion:
+    name = "FormatAssertion"
+
+    def __init__(self, pattern: str) -> None:
+        compile_pattern(pattern)               # a broken pattern refuses the spec (SpecError)
+        self.pattern = pattern
+
+    def _v(self, outcome: Outcome, observed: str | None, reason: str) -> Verdict:
+        return Verdict(check=self.name, outcome=outcome, threshold=self.pattern,
+                       observed=observed, reason=reason)
+
+    def check(self, candidate: CandidateExtraction, history: History | None,
+              ctx: HealContext) -> Verdict:
+        values = column(candidate, ctx.target.name)
+        if not values:
+            return self._v(Outcome.INSUFFICIENT, None,
+                           f"no values were extracted for {ctx.target.name}")
+        results = [(v, match_value(self.pattern, v)) for v in values]
+        too_long = [v for v, r in results if r == "too_long"]
+        if too_long:
+            return self._v(Outcome.FAIL, f"length {max(len(v) for v in too_long)}",
+                           f"{len(too_long)} value(s) exceed the {MAX_MATCH_LEN}-character "
+                           f"length cap: a value that long is not a {ctx.target.name}, and "
+                           "matching it would expose the run to catastrophic backtracking")
+        timed_out = [v for v, r in results if r == "timeout"]
+        if timed_out:
+            return self._v(Outcome.FAIL, preview(timed_out),
+                           f"the pattern timed out after {MATCH_TIMEOUT_S * 1000:.0f} ms on "
+                           f"{len(timed_out)} value(s); a pattern that backtracks is refused, "
+                           "not waited for")
+        bad = [v for v, r in results if r == "no_match"]
+        if bad:
+            return self._v(Outcome.FAIL, preview(bad),
+                           f"{len(bad)} of {len(values)} values do not match the spec's format")
+        return self._v(Outcome.PASS, f"{len(values)} of {len(values)} values match",
+                       "every value matches the spec's format")
+```
+
+```python
+# selector_drift/validate/assertions/domain.py
+from __future__ import annotations
+
+import datetime as dt
+from collections.abc import Mapping
+from decimal import Decimal
+from typing import TYPE_CHECKING, Final, TypeAlias
+
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.spec.schema import SpecError
+from selector_drift.validate.assertions._numbers import parse_number
+from selector_drift.validate.assertions.base import cells, preview
+from selector_drift.validate.history import History
+from selector_drift.validate.verdict import Outcome, Verdict
+
+if TYPE_CHECKING:
+    from selector_drift.validate.gate import HealContext
+
+DomainRule: TypeAlias = Mapping[str, object]
+_KEYS: Final = frozenset({"min", "max", "enum", "date_after", "date_before", "currency"})
+_MINOR_UNITS: Final = {"USD": 2, "EUR": 2, "GBP": 2, "CAD": 2, "AUD": 2, "CHF": 2,
+                       "JPY": 0, "KWD": 3, "BHD": 3}
+
+
+def _bound(raw: object, key: str) -> Decimal | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str, Decimal)):
+        raise SpecError(f"domain rule {key!r} must be a number, got {raw!r}")
+    parsed = parse_number(raw) if isinstance(raw, str) else Decimal(str(raw))
+    if parsed is None:
+        raise SpecError(f"domain rule {key!r} must be a number, got {raw!r}")
+    return parsed
+
+
+def _day(raw: object, key: str) -> dt.date | None:
+    if raw is None:
+        return None
+    if isinstance(raw, dt.datetime):
+        return raw.date()
+    if isinstance(raw, dt.date):                     # yaml.safe_load turns 2023-01-01 into one
+        return raw
+    if isinstance(raw, str):
+        try:
+            return dt.date.fromisoformat(raw)
+        except ValueError:
+            pass
+    raise SpecError(f"domain rule {key!r} must be an ISO date, got {raw!r}")
+
+
+class DomainAssertion:
+    name = "DomainAssertion"
+
+    def __init__(self, rule: DomainRule) -> None:
+        if not rule:
+            raise SpecError("an empty domain rule checks nothing")
+        unknown = set(rule) - _KEYS
+        if unknown:
+            raise SpecError(f"unknown domain rule key(s) {sorted(unknown)}")
+        self._min = _bound(rule.get("min"), "min")
+        self._max = _bound(rule.get("max"), "max")
+        if self._min is not None and self._max is not None and self._min > self._max:
+            raise SpecError(f"domain rule min {self._min} exceeds max {self._max}")
+        enum = rule.get("enum")
+        if enum is not None and (not isinstance(enum, (list, tuple))
+                                 or not all(isinstance(e, str) for e in enum)):
+            raise SpecError(f"domain rule 'enum' must be a list of strings, got {enum!r}")
+        self._enum = frozenset(enum) if enum is not None else None
+        self._after = _day(rule.get("date_after"), "date_after")
+        self._before = _day(rule.get("date_before"), "date_before")
+        currency = rule.get("currency")
+        if currency is not None and (not isinstance(currency, str)
+                                     or currency not in _MINOR_UNITS):
+            raise SpecError(f"unknown currency {currency!r}; known: {sorted(_MINOR_UNITS)}")
+        self._currency = currency if isinstance(currency, str) else None
+        self._numeric = (self._min is not None or self._max is not None
+                         or self._currency is not None)
+        self._dated = self._after is not None or self._before is not None
+        self.threshold = self._describe()
+
+    def _describe(self) -> str:
+        parts: list[str] = []
+        if self._min is not None or self._max is not None:
+            lo = f"{self._min} <= " if self._min is not None else ""
+            hi = f" <= {self._max}" if self._max is not None else ""
+            parts.append(f"{lo}x{hi}")
+        if self._currency is not None:
+            parts.append(f"{self._currency}, at most {_MINOR_UNITS[self._currency]} decimals")
+        if self._enum is not None:
+            parts.append("one of {" + ", ".join(sorted(self._enum)) + "}")
+        if self._after is not None:
+            parts.append(f"after {self._after}")
+        if self._before is not None:
+            parts.append(f"before {self._before}")
+        if self._dated:
+            parts.append("not after the day observed")
+        return "; ".join(parts)
+
+    def _problem(self, value: str, observed_on: dt.date | None) -> str | None:
+        if self._numeric:
+            n = parse_number(value)
+            if n is None:
+                return f"{value!r} is not a number in 1,234.56 form"
+            if self._min is not None and n < self._min:
+                return f"{value} is below {self._min}"
+            if self._max is not None and n > self._max:
+                return f"{value} is above {self._max}"
+            if self._currency is not None:
+                exponent = n.as_tuple().exponent
+                if isinstance(exponent, int) and -exponent > _MINOR_UNITS[self._currency]:
+                    return f"{value} has more decimal places than {self._currency} allows"
+        if self._enum is not None and value not in self._enum:
+            return f"{value!r} is not an allowed value"
+        if self._dated:
+            try:
+                day = dt.date.fromisoformat(value)
+            except ValueError:
+                return f"{value!r} is not an ISO date"
+            if self._after is not None and day <= self._after:
+                return f"{value} is not after {self._after}"
+            if self._before is not None and day >= self._before:
+                return f"{value} is not before {self._before}"
+            if observed_on is not None and day > observed_on:
+                return f"{value} is after the day the page was observed ({observed_on})"
+        return None
+
+    def check(self, candidate: CandidateExtraction, history: History | None,
+              ctx: HealContext) -> Verdict:
+        found = cells(candidate, ctx.target.name)
+        if not found:
+            return Verdict(check=self.name, outcome=Outcome.INSUFFICIENT,
+                           threshold=self.threshold, observed=None,
+                           reason=f"no values were extracted for {ctx.target.name}")
+        problems = [(c.value, p) for c in found
+                    if (p := self._problem(c.value, c.observed_at.date()
+                                           if c.observed_at is not None else None)) is not None]
+        if problems:
+            return Verdict(check=self.name, outcome=Outcome.FAIL, threshold=self.threshold,
+                           observed=preview([v for v, _ in problems]),
+                           reason=f"{len(problems)} of {len(found)} values fall outside the "
+                                  f"domain; first: {problems[0][1]}")
+        return Verdict(check=self.name, outcome=Outcome.PASS, threshold=self.threshold,
+                       observed=f"{len(found)} of {len(found)} values in domain",
+                       reason="every value is inside the spec's domain")
+```
+
+```python
+# selector_drift/validate/assertions/cross_field.py
+"""Row footing, evaluated by a whitelist walker. No eval, no exec, no compile (R13/H5)."""
+from __future__ import annotations
+
+import ast
+from collections.abc import Callable, Mapping
+from decimal import Decimal
+from typing import TYPE_CHECKING, Final, TypeAlias
+
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.spec.schema import SpecError
+from selector_drift.validate.assertions._numbers import parse_number
+from selector_drift.validate.history import History
+from selector_drift.validate.verdict import Outcome, Verdict
+
+if TYPE_CHECKING:
+    from selector_drift.validate.gate import HealContext
+
+MAX_EXPRESSION: Final = 500
+Value: TypeAlias = Decimal | bool
+
+_ARITH: Final[dict[type[ast.operator], Callable[[Decimal, Decimal], Decimal]]] = {
+    ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b, ast.Div: lambda a, b: a / b}
+_COMPARE: Final[dict[type[ast.cmpop], Callable[[Decimal, Decimal], bool]]] = {
+    ast.Eq: lambda a, b: a == b, ast.NotEq: lambda a, b: a != b,
+    ast.Lt: lambda a, b: a < b, ast.LtE: lambda a, b: a <= b,
+    ast.Gt: lambda a, b: a > b, ast.GtE: lambda a, b: a >= b}
+_ALLOWED: Final = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.BinOp, ast.UnaryOp,
+                   ast.USub, ast.UAdd, ast.Not, ast.Compare, ast.Name, ast.Load, ast.Constant,
+                   *_ARITH, *_COMPARE)
+
+
+class UnsafeExpression(SpecError):
+    """A spec expression that is not pure arithmetic-and-comparison over row fields."""
+
+
+def parse_expression(expression: str) -> tuple[ast.Expression, frozenset[str]]:
+    if len(expression) > MAX_EXPRESSION:
+        raise UnsafeExpression(f"expression longer than {MAX_EXPRESSION} characters")
+    try:
+        tree = ast.parse(expression, mode="eval")        # parses; compiles and runs nothing
+    except (SyntaxError, ValueError, RecursionError) as exc:
+        raise UnsafeExpression(f"not an expression: {exc}") from exc
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED):
+            raise UnsafeExpression(f"{type(node).__name__} is not allowed in a spec expression")
+        if isinstance(node, ast.Constant) and (isinstance(node.value, bool)
+                                               or not isinstance(node.value, (int, float))):
+            raise UnsafeExpression(f"literal {node.value!r} is not a number")
+        if isinstance(node, ast.Name):
+            if node.id.startswith("_"):
+                raise UnsafeExpression(f"name {node.id!r} is not a field")
+            names.add(node.id)
+    body = tree.body
+    is_not = isinstance(body, ast.UnaryOp) and isinstance(body.op, ast.Not)
+    if not (isinstance(body, (ast.Compare, ast.BoolOp)) or is_not):
+        raise UnsafeExpression("a cross-field check must be a comparison, e.g. net + tax == gross")
+    return tree, frozenset(names)
+
+
+def _num(v: Value) -> Decimal:
+    if isinstance(v, bool):
+        raise UnsafeExpression("a comparison result was used as a number")
+    return v
+
+
+def _eval(node: ast.expr, row: Mapping[str, Decimal]) -> Value:
+    match node:
+        case ast.Constant(value=value):
+            return Decimal(str(value))
+        case ast.Name(id=name):
+            return row[name]
+        case ast.UnaryOp(op=ast.USub(), operand=operand):
+            return -_num(_eval(operand, row))
+        case ast.UnaryOp(op=ast.UAdd(), operand=operand):
+            return _num(_eval(operand, row))
+        case ast.UnaryOp(op=ast.Not(), operand=operand):
+            return not _eval(operand, row)
+        case ast.BinOp(left=left, op=op, right=right):
+            return _ARITH[type(op)](_num(_eval(left, row)), _num(_eval(right, row)))
+        case ast.BoolOp(op=ast.And(), values=values):
+            return all(bool(_eval(v, row)) for v in values)
+        case ast.BoolOp(op=ast.Or(), values=values):
+            return any(bool(_eval(v, row)) for v in values)
+        case ast.Compare(left=left, ops=ops, comparators=comparators):
+            current = _num(_eval(left, row))
+            for op, right in zip(ops, comparators, strict=True):
+                nxt = _num(_eval(right, row))
+                if not _COMPARE[type(op)](current, nxt):
+                    return False
+                current = nxt
+            return True
+    raise UnsafeExpression(f"{type(node).__name__} is not allowed in a spec expression")
+
+
+def safe_eval(expression: str, row: Mapping[str, Decimal]) -> Value:
+    tree, names = parse_expression(expression)
+    missing = names - row.keys()
+    if missing:
+        raise LookupError(f"row has no {', '.join(sorted(missing))}")
+    return _eval(tree.body, row)
+
+
+class CrossFieldAssertion:
+    name = "CrossFieldAssertion"
+
+    def __init__(self, expression: str) -> None:
+        self._tree, self.names = parse_expression(expression)   # hostile spec fails to load
+        self.expression = expression
+
+    def _problem(self, row: Mapping[str, object]) -> str | None:
+        values: dict[str, Decimal] = {}
+        for name in sorted(self.names):
+            claim = row.get(name)
+            if claim is None:
+                return f"the row has no {name}"
+            parsed = parse_number(str(getattr(claim, "value", "")))
+            if parsed is None:
+                return f"{name} is not a number"
+            values[name] = parsed
+        try:
+            holds = _eval(self._tree.body, values)
+        except (ArithmeticError, UnsafeExpression) as exc:
+            return f"the expression could not be evaluated: {exc!r}"
+        if holds is not True:
+            return ", ".join(f"{k}={v}" for k, v in values.items())
+        return None
+
+    def check(self, candidate: CandidateExtraction, history: History | None,
+              ctx: HealContext) -> Verdict:
+        if not candidate.rows:
+            return Verdict(check=self.name, outcome=Outcome.INSUFFICIENT,
+                           threshold=self.expression, observed=None,
+                           reason="no rows were extracted")
+        problems = [(i, p) for i, row in enumerate(candidate.rows)
+                    if (p := self._problem(row)) is not None]
+        if problems:
+            i, first = problems[0]
+            return Verdict(check=self.name, outcome=Outcome.FAIL, threshold=self.expression,
+                           observed=f"{len(problems)} of {len(candidate.rows)} rows",
+                           reason=f"{len(problems)} row(s) do not foot: {self.expression} is "
+                                  f"false; first at row {i}: {first}")
+        return Verdict(check=self.name, outcome=Outcome.PASS, threshold=self.expression,
+                       observed=f"{len(candidate.rows)} of {len(candidate.rows)} rows",
+                       reason=f"every row foots: {self.expression} holds")
+```
+
+- [ ] **Step 5: Run them and make sure they pass**
+
+Run: `uv run pytest tests/spec tests/validate -v -m unit && uv run mypy --strict selector_drift/spec selector_drift/validate && uv run ruff check selector_drift/validate`
+Expected: PASS — 5 new in `tests/spec/test_matcher.py`, 32 new in `test_basic_assertions.py`
+(counting parametrisations), all Task 20 tests still green; Task 17's rung-1 tests still green
+(`uv run pytest tests/resolve -m unit`). mypy clean.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add selector_drift/validate/assertions tests/validate/test_basic_assertions.py
-git commit -m "feat(validate): format, domain and cross-field assertions"
+git add pyproject.toml uv.lock selector_drift/spec/schema.py selector_drift/validate/assertions tests/spec/test_matcher.py tests/validate/test_basic_assertions.py
+git commit -m "feat(validate): bounded format, domain and whitelist cross-field assertions"
 ```
 
 ---
 
-### Task 22: `IndependentRungAgreement` — cross-family confirmation
+### Task 22: `IndependentRungAgreement` and `RowKeyContinuity` — three families, compared on node identity
 
 **Files:**
 - Create: `selector_drift/validate/assertions/independence.py`
+- Modify: `tests/validate/helpers.py` (append the rung doubles and the row fixtures)
 - Test: `tests/validate/test_independence.py`
 
 **Interfaces:**
-- Consumes: the `Rung` protocol and `Family` **only** — never a concrete rung module (Task 1 contract).
-- Produces: `IndependentRungAgreement(rungs: list[Rung])`, `RowKeyContinuity(threshold: float = 0.95)`. Re-resolves the element with a confirmer from a **different `Family`** than the one that healed, and requires the two to point at the **same `node_id`** (R10/C5) — never the same selector string, which is wrong in both directions.
+- Consumes: the `Rung` protocol, `Family`, `ResolvedElement` from **`resolve/trace.py` only** — never
+  a concrete rung module (`judge-reaches-rungs-only-by-protocol`); `History.previous().by_key()`
+  (Task 20); `Confirmation` (Task 20).
+- Produces:
+  - `RowKeyContinuity(threshold: float = 0.95)` — family `VALUE`; `PASS` sets
+    `confirmed_by=Confirmation(rung=None, family=Family.VALUE)`; `.agreement(candidate, previous, field) -> tuple[float, int]`
+  - `IndependentRungAgreement(rungs: Sequence[Rung], value: RowKeyContinuity | None = None)` — re-derives
+    the healed node with the healing rung, re-resolves with every **cross-family** rung, compares
+    **`node_id`**; falls back to the `VALUE` family only when no DOM confirmer resolved. `PASS` sets
+    `confirmed_by` to the confirmer that carried it.
 
-| Healed by | Valid confirmer |
-|---|---|
-| 2 or 3 (`TEXT_SEMANTIC`) | 4 (`STRUCTURAL`), or `VALUE` |
-| 4 (`STRUCTURAL`) | 2 or 3 (`TEXT_SEMANTIC`), or `VALUE` |
-| 1 | n/a — never a valid confirmer; it is what broke |
+| Healed by | Valid DOM confirmer | Fallback |
+|---|---|---|
+| 2 or 3 (`TEXT_SEMANTIC`) | 4 (`STRUCTURAL`) | `VALUE` |
+| 4 (`STRUCTURAL`) | 2 or 3 (`TEXT_SEMANTIC`) | `VALUE` |
+| 1, or a `NONE`-family rung | never a confirmer — rung 1 is what broke | — |
 
-### R14/C3 — the third family, and why the gate needs one
+**Node identity, never selector text (R10/C5).** `#claim` and `td:nth-child(1)` routinely name the
+same node, and the same selector string can be produced against different snapshots. The check
+therefore never reads a selector: it asks the healing rung to resolve again on the same `PageSource`
+(rungs are deterministic, so this is the cascade's node) and compares the `node_id` the `PageSource`
+minted. `HealContext` carries no element, so **the healing rung must be among the injected rungs** —
+the pipeline and the suites always inject rungs 2, 3 and 4 (Task 26A `CONFIRMERS`, Task 26 conftest).
+If it is not, or `ctx.page` is `None`, there is no DOM evidence and the check says so in its reason.
 
-**As originally specified, a plain label rewording quarantines every time, forever.** Trace the
-design's own tables:
+**Any cross-family disagreement is a `FAIL`, even if another confirmer agrees.** Healed by 4, rung 2
+agrees and rung 3 disagrees: two text rungs do not outvote each other, and a split is exactly what a
+decoy produces. A heal that the healing rung itself cannot reproduce on the same snapshot is also a
+`FAIL`.
 
-| Step | Result |
-|---|---|
-| Rung 2 (TEXT_SEMANTIC) | accessible name gone, returns `None` (Task 14 asserts this) |
-| Rung 3 (TEXT_SEMANTIC) | label text gone, returns `None` (Task 15 asserts this) |
-| Rung 4 (STRUCTURAL) | heals via `data-testid` (Task 16 asserts this) |
-| `IndependentRungAgreement` | healed STRUCTURAL, so the confirmer must be TEXT_SEMANTIC, and both just failed, so `INSUFFICIENT` |
-| §5.7 asymmetry | `INSUFFICIENT` on a heal becomes `FAIL`, so **quarantine** |
+### R14/C3 — the third family, and how it enters this check
 
-Label rewording is the most common real UI change there is. On the bench, mutations re-seed daily, so
-it recurs with fresh strings — and `first_heal_policy: auto_promote` does **not** rescue it, because
-that policy satisfies only `FirstHealConfirmation` while `IndependentRungAgreement` still fails.
-Design §14's mitigation for *"log stalls on quarantine backlog"* therefore does not work, and the
-ninety-day log backs up in week 14.
+**As first specified, a plain label rewording quarantined every time, forever.** Rungs 2 and 3 both
+fail on a reword (Tasks 14–15 assert it), rung 4 heals via `data-testid` (Task 16), the confirmer must
+be text-semantic, both just failed — `INSUFFICIENT`, which the §5.7 asymmetry turns into `FAIL`.
+Label rewording is the most common real UI change there is, and on the bench it re-seeds nightly with
+a fresh string, so `first_heal_policy: auto_promote` does not rescue it (that satisfies only
+`FirstHealConfirmation`). The log stalls in week 14.
 
-**The fix is in the brief already.** Brief §5 lists as a check: *"Cross-field consistency — does the
-row still foot? **Do fields co-vary as they did historically?**"* Task 21 implemented only the footing
-half. The historical half is a third, genuinely independent signal:
+**The fix is brief §5's second half:** *"do fields co-vary as they did historically?"* — Task 21
+implemented only the footing half. `RowKeyContinuity` joins this run's rows to the previous accepted
+run's on `natural_key` and requires the healed field to agree at ≥ 0.95. It reads the data, not the
+page, so it is independent of **both** DOM families. Signed off 2026-08-29 (OQ3).
+
+**It enters in two places, and both matter.** As its **own check** (Task 25 adds it to every field) it
+is the only thing that sees `ValueSwap`, where every DOM signal agrees. And as
+`IndependentRungAgreement`'s **fallback** it is what makes the label reword pass: the gate requires
+*every* check to pass on a heal, so if the reword left `IndependentRungAgreement` at `INSUFFICIENT`
+while `RowKeyContinuity` passed alongside it, the run would still quarantine and C3 would be unfixed.
+The first draft's test expressed this by putting `RowKeyContinuity()` into the *rungs* list; that is a
+type error (`RowKeyContinuity` is not a `Rung`), so it is now the `value=` parameter, defaulted.
+
+| Mutation | Text | Structural | `VALUE` | `IndependentRungAgreement` | `RowKeyContinuity` | Run |
+|---|---|---|---|---|---|---|
+| `LabelReword` | fails | heals | agrees | **PASS via VALUE** | PASS | accepted |
+| `ColumnReorder` | heals | fails | agrees | PASS via VALUE | PASS | accepted |
+| `DecoyColumn` | → Amount | → Prior Amount | differs | **FAIL (DOM split)** | FAIL | quarantined |
+| `ValueSwap` | agrees | agrees | differs | PASS (DOM agrees) | **FAIL** | quarantined |
+
+**Steady state: both confirmers return `INSUFFICIENT`, never `FAIL`.** On a cache hit there is
+nothing to confirm, and `RowKeyContinuity` must not block steady-state runs: a claim's `status`
+legitimately changes between days, and a `FAIL` blocks regardless of heal. `INSUFFICIENT` is
+tolerated on a cache hit (§5.7), so neither check can quarantine a steady run.
+
+**When the healed field *is* the natural key,** comparing it to itself on joined rows is trivially
+1.0. `RowKeyContinuity` instead joins on the healed key's values and measures agreement of the
+**other** fields present in both runs: a correct heal of `claim_number` joins and every other field
+co-varies; a heal onto some other column of claim-number-shaped strings joins nothing, which is
+`INSUFFICIENT` — and `FAIL` on a heal.
+
+- [ ] **Step 1: Append the doubles and rows to `tests/validate/helpers.py`**
 
 ```python
-class RowKeyContinuity:               # family = Family.VALUE
-    # Join this run's rows to the previous accepted run's on spec.natural_key.
-    # For keys present in both, require the healed field's values to agree at or
-    # above `threshold`. Deterministic, no model, no distribution, no DOM.
+# tests/validate/helpers.py  (append)
+from selector_drift.resolve.trace import AnchorEvidence, Family, ResolvedElement
+from selector_drift.validate.history import AcceptedRun
+
+
+class FakeRung:
+    """Satisfies the Rung protocol. validate/ is tested against the protocol only; the real
+    rungs against real mutated pages are Task 26's suites."""
+
+    def __init__(self, rung_id: int, family: Family, node_id: str | None, *,
+                 selector: str | None = None) -> None:
+        self.rung_id, self.family, self.node_id = rung_id, family, node_id
+        self.selector = selector or f"#from-rung-{rung_id}"
+
+    def resolve(self, page: object, target: object) -> ResolvedElement | None:
+        if self.node_id is None:
+            return None
+        return ResolvedElement(selector=self.selector, node_id=self.node_id,
+                               anchor=AnchorEvidence(accessible_name=None, label_text=None,
+                                                     header_text=None),
+                               rung_id=self.rung_id)
+
+
+def ax(node: str | None, **kw: str) -> FakeRung:
+    return FakeRung(2, Family.TEXT_SEMANTIC, node, **kw)
+
+
+def anchors(node: str | None, **kw: str) -> FakeRung:
+    return FakeRung(3, Family.TEXT_SEMANTIC, node, **kw)
+
+
+def heuristic(node: str | None, **kw: str) -> FakeRung:
+    return FakeRung(4, Family.STRUCTURAL, node, **kw)
+
+
+AMOUNT_CELL = "/html/body/table/tr[2]/td[3]"
+PRIOR_AMOUNT_CELL = "/html/body/table/tr[2]/td[4]"
+
+BASE_ROWS = [{"claim_number": f"AB{i:08d}", "amount": f"{1000 + 37 * i:,.2f}",
+              "reserve": f"{200 + 11 * i:,.2f}", "prior_amount": f"{900 + 53 * i:,.2f}"}
+             for i in range(1, 21)]
+SPEC_FIELDS = ("claim_number", "amount", "reserve")
+
+
+def _spec_row(r: Mapping[str, str]) -> dict[str, str]:
+    return {k: r[k] for k in SPEC_FIELDS}
+
+
+def previous_history() -> History:
+    return History(runs=(AcceptedRun(run_key="testbench:2:2026-09-30",
+                                     window=dt.date(2026, 9, 30),
+                                     rows=tuple(_spec_row(r) for r in BASE_ROWS),
+                                     natural_key=("claim_number",)),))
+
+
+UNCHANGED = candidate([_spec_row(r) for r in BASE_ROWS])         # reword / reorder: same data
+DECOY = candidate([_spec_row(r) | {"amount": r["prior_amount"]} for r in BASE_ROWS])
+SWAPPED = candidate([_spec_row(r) | {"amount": r["reserve"], "reserve": r["amount"]}
+                     for r in BASE_ROWS])
+FOREIGN_KEYS = candidate([_spec_row(r) | {"claim_number": f"ZZ{i:08d}"}
+                          for i, r in enumerate(BASE_ROWS)])
 ```
 
-| Mutation | Text family | Structural family | `VALUE` family | Outcome |
-|---|---|---|---|---|
-| `LabelReword` | fails | heals | **values unchanged, confirms** | accepted |
-| `ColumnReorder` | heals | fails | values unchanged, confirms | accepted |
-| `DecoyColumn` | points at Amount | points at Prior Amount | **values differ from last run, refuses** | quarantined |
-| `ValueSwap` (Task 11A) | agrees | agrees | **refuses — the only check that sees it** | quarantined |
-
-It is a *stronger* discriminator for the adjacent-column case than DOM agreement, because it looks at
-the data rather than at the page — and `ValueSwap` is a mutation nothing else in the plan catches.
-
-**This amends design §5.6, the design's most carefully argued section. Signed off 2026-08-29 (OQ3) —
-implement it.** The conservative alternative — keep two families and say in the methodology that *"a
-label change costs one human confirmation, once, and never again"* — was considered and rejected: the
-bench re-seeds its mutations daily, so a reword returns with a fresh string and the confirmation is not
-once, it is nightly. `VALUE` is also the only family that catches `ValueSwap` (Task 11A).
-
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 2: Write the failing tests**
 
 ```python
 # tests/validate/test_independence.py
-from selector_drift.validate.assertions.independence import IndependentRungAgreement
-from selector_drift.validate.verdict import Outcome
-from selector_drift.validate.gate import HealContext
-from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
-from selector_drift.resolve.rungs.r3_anchors import AnchorRung
-from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
+import pytest
 
-def ctx(rung): return HealContext(healed=True, winning_rung=rung, page=P, target=T, cache=C)
+from selector_drift.resolve.trace import Family
+from selector_drift.validate.assertions.independence import (IndependentRungAgreement,
+                                                             RowKeyContinuity)
+from selector_drift.validate.verdict import Confirmation, Outcome
+from tests.validate.helpers import (AMOUNT, AMOUNT_CELL, CLAIM_NUMBER, DECOY, FOREIGN_KEYS,
+                                    PRIOR_AMOUNT_CELL, SWAPPED, UNCHANGED, FakeRung, anchors, ax,
+                                    ctx, heuristic, previous_history)
 
+
+def healed(rung: int, **kw):
+    return ctx(AMOUNT, healed=True, rung=rung, **kw)
+
+
+# ---- DOM families --------------------------------------------------------------------------
+
+@pytest.mark.unit
 def test_same_family_confirmer_is_rejected():
     """Rungs 2 and 3 both key off text, so a label reword fools both identically.
     Their agreement proves nothing and must not be accepted as confirmation."""
-    v = IndependentRungAgreement([AxTreeRung(), AnchorRung()]).check(CANDIDATE, None, ctx(3))
+    v = IndependentRungAgreement([ax(AMOUNT_CELL), anchors(AMOUNT_CELL)]).check(
+        UNCHANGED, None, healed(3))
     assert v.outcome is Outcome.INSUFFICIENT and "cross-family" in v.reason
 
+
+@pytest.mark.unit
 def test_cross_family_agreement_passes():
-    v = IndependentRungAgreement([AxTreeRung(), HeuristicRung()]).check(CANDIDATE, None, ctx(3))
+    v = IndependentRungAgreement([ax(None), anchors(AMOUNT_CELL), heuristic(AMOUNT_CELL)]).check(
+        UNCHANGED, None, healed(3))
     assert v.outcome is Outcome.PASS and v.observed == "rung 4"
 
-def test_cross_family_disagreement_fails():
+
+@pytest.mark.unit
+def test_a_passing_confirmation_names_its_confirmer_in_structure():
+    v = IndependentRungAgreement([ax(AMOUNT_CELL), heuristic(AMOUNT_CELL)]).check(
+        UNCHANGED, previous_history(), healed(2))
+    assert v.outcome is Outcome.PASS
+    assert v.confirmed_by == Confirmation(rung=4, family=Family.STRUCTURAL)
+
+
+@pytest.mark.unit
+def test_cross_family_disagreement_fails_on_run_one_with_no_history():
     """The decoy column: rung 4 healed to Prior Amount, rung 2 points at Amount."""
-    v = IndependentRungAgreement([AxTreeRung(), HeuristicRung()]).check(DECOY_CANDIDATE, None, ctx(4))
+    v = IndependentRungAgreement([ax(AMOUNT_CELL), heuristic(PRIOR_AMOUNT_CELL)]).check(
+        DECOY, None, healed(4))
+    assert v.outcome is Outcome.FAIL and v.confirmed_by is None
+    assert "disagreement" in v.reason
+
+
+@pytest.mark.unit
+def test_one_disagreeing_confirmer_outweighs_an_agreeing_one():
+    v = IndependentRungAgreement([ax(AMOUNT_CELL), anchors(PRIOR_AMOUNT_CELL),
+                                  heuristic(AMOUNT_CELL)]).check(UNCHANGED, None, healed(4))
     assert v.outcome is Outcome.FAIL
 
+
+@pytest.mark.unit
 def test_no_confirmer_available_is_insufficient_never_pass():
-    v = IndependentRungAgreement([HeuristicRung()]).check(CANDIDATE, None, ctx(4))
+    v = IndependentRungAgreement([heuristic(AMOUNT_CELL)]).check(UNCHANGED, None, healed(4))
     assert v.outcome is Outcome.INSUFFICIENT
 
-def test_rung_one_is_never_used_as_a_confirmer():
-    v = IndependentRungAgreement([CacheRung(C), HeuristicRung()]).check(CANDIDATE, None, ctx(4))
-    assert v.observed != "rung 1"
 
+@pytest.mark.unit
+def test_rung_one_is_never_used_as_a_confirmer_even_if_mislabelled():
+    cache_rung = FakeRung(1, Family.TEXT_SEMANTIC, PRIOR_AMOUNT_CELL)   # would disagree
+    v = IndependentRungAgreement([cache_rung, heuristic(AMOUNT_CELL)]).check(
+        UNCHANGED, None, healed(4))
+    assert v.outcome is Outcome.INSUFFICIENT and v.observed != "rung 1"
+
+
+@pytest.mark.unit
 def test_agreement_compares_node_identity_not_selector_text():
-    # R10/C5. `#claim` and `td:nth-child(1)` name the same node; two runs against
-    # different snapshots can produce the same string for different nodes.
-    v = IndependentRungAgreement([AxTreeRung(), HeuristicRung()]).check(
-        candidate_where(selectors_differ=True, node_ids_match=True), None, ctx(3))
+    # R10/C5. Different selector strings, same node: agreement.
+    v = IndependentRungAgreement([ax(AMOUNT_CELL, selector="#amount"),
+                                  heuristic(AMOUNT_CELL, selector="td:nth-child(3)")]).check(
+        UNCHANGED, None, healed(2))
     assert v.outcome is Outcome.PASS
 
-def test_a_label_reword_is_confirmed_by_value_continuity_and_is_not_quarantined(history):
+
+@pytest.mark.unit
+def test_the_same_selector_text_naming_different_nodes_is_disagreement():
+    v = IndependentRungAgreement([ax(AMOUNT_CELL, selector="td.value"),
+                                  heuristic(PRIOR_AMOUNT_CELL, selector="td.value")]).check(
+        UNCHANGED, None, healed(2))
+    assert v.outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+def test_a_heal_the_healing_rung_cannot_reproduce_is_a_failure():
+    v = IndependentRungAgreement([ax(AMOUNT_CELL), heuristic(None)]).check(
+        UNCHANGED, None, healed(4))
+    assert v.outcome is Outcome.FAIL and "not reproducible" in v.reason
+
+
+@pytest.mark.unit
+def test_nothing_healed_means_nothing_to_confirm():
+    v = IndependentRungAgreement([ax(AMOUNT_CELL), heuristic(AMOUNT_CELL)]).check(
+        UNCHANGED, previous_history(), ctx(AMOUNT, healed=False, rung=1))
+    assert v.outcome is Outcome.INSUFFICIENT and v.confirmed_by is None
+
+
+# ---- the VALUE family (R14/C3) -------------------------------------------------------------
+
+@pytest.mark.unit
+def test_a_label_reword_is_confirmed_by_value_continuity_and_is_not_quarantined():
     # R14/C3. Both text rungs fail on a reword, so without a VALUE confirmer this
     # quarantines forever -- and it is the most common real UI change there is.
-    v = IndependentRungAgreement([AxTreeRung(), HeuristicRung(), RowKeyContinuity()]).check(
-        reworded_candidate(), history, ctx(4))
+    v = IndependentRungAgreement([ax(None), anchors(None), heuristic(AMOUNT_CELL)]).check(
+        UNCHANGED, previous_history(), healed(4))
     assert v.outcome is Outcome.PASS and v.observed == "row-key continuity"
+    assert v.confirmed_by == Confirmation(rung=None, family=Family.VALUE)
 
-def test_the_decoy_column_is_refused_by_value_continuity_too(history):
-    v = RowKeyContinuity().check(DECOY_CANDIDATE, history, ctx(4))
-    assert v.outcome is Outcome.FAIL and float(v.observed) < 0.95
 
-def test_value_swap_is_caught_by_nothing_else(history):
+@pytest.mark.unit
+def test_with_no_page_the_value_family_is_the_only_confirmer():
+    v = IndependentRungAgreement([ax(AMOUNT_CELL), heuristic(AMOUNT_CELL)]).check(
+        UNCHANGED, previous_history(), healed(4, page=None))
+    assert v.outcome is Outcome.PASS and v.confirmed_by.family is Family.VALUE
+    assert "no page snapshot" in v.reason
+
+
+@pytest.mark.unit
+def test_a_value_confirmation_has_no_rung():
+    v = RowKeyContinuity().check(UNCHANGED, previous_history(), healed(4))
+    assert v.outcome is Outcome.PASS and v.threshold == ">= 0.95"
+    assert v.confirmed_by == Confirmation(rung=None, family=Family.VALUE)
+
+
+@pytest.mark.unit
+def test_the_decoy_column_is_refused_by_value_continuity_too():
+    v = RowKeyContinuity().check(DECOY, previous_history(), healed(4))
+    assert v.outcome is Outcome.FAIL and float(v.observed) < 0.95 and v.confirmed_by is None
+
+
+@pytest.mark.unit
+def test_value_swap_is_caught_by_nothing_else():
     # Task 11A's ValueSwap leaves markup untouched, so every DOM signal agrees.
-    dom = IndependentRungAgreement([AxTreeRung(), HeuristicRung()]).check(SWAPPED, history, ctx(4))
+    dom = IndependentRungAgreement([ax(AMOUNT_CELL), heuristic(AMOUNT_CELL)]).check(
+        SWAPPED, previous_history(), healed(4))
     assert dom.outcome is Outcome.PASS
-    assert RowKeyContinuity().check(SWAPPED, history, ctx(4)).outcome is Outcome.FAIL
+    assert RowKeyContinuity().check(SWAPPED, previous_history(), healed(4)).outcome \
+        is Outcome.FAIL
 
+
+@pytest.mark.unit
 def test_continuity_with_no_history_is_insufficient_never_pass():
-    assert RowKeyContinuity().check(CANDIDATE, None, ctx(4)).outcome is Outcome.INSUFFICIENT
+    assert RowKeyContinuity().check(UNCHANGED, None, healed(4)).outcome is Outcome.INSUFFICIENT
+
+
+@pytest.mark.unit
+def test_continuity_never_blocks_a_steady_state_run():
+    # A status legitimately changes between days; a FAIL would block regardless of heal.
+    v = RowKeyContinuity().check(SWAPPED, previous_history(), ctx(AMOUNT, healed=False, rung=1))
+    assert v.outcome is Outcome.INSUFFICIENT
+
+
+@pytest.mark.unit
+def test_a_healed_key_field_is_judged_by_the_fields_that_co_vary_with_it():
+    v = RowKeyContinuity().check(UNCHANGED, previous_history(), ctx(CLAIM_NUMBER, rung=4))
+    assert v.outcome is Outcome.PASS and v.observed == "1.0000"
+
+
+@pytest.mark.unit
+def test_a_key_heal_onto_foreign_values_joins_nothing_and_is_not_confirmed():
+    v = RowKeyContinuity().check(FOREIGN_KEYS, previous_history(), ctx(CLAIM_NUMBER, rung=4))
+    assert v.outcome is Outcome.INSUFFICIENT and "no natural keys in common" in v.reason
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [ ] **Step 3: Run them and watch them fail**
 
 Run: `uv run pytest tests/validate/test_independence.py -v`
-Expected: FAIL — `ModuleNotFoundError`.
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.validate.assertions.independence'`.
 
-- [ ] **Step 3: Implement cross-family confirmation.** Select candidate confirmers where `family != healed_rung.family and family is not Family.NONE`. If none resolves, return `INSUFFICIENT` — never `PASS`.
+- [ ] **Step 4: Implement both families**
 
-- [ ] **Step 4: Run the tests and confirm the contract holds**
+```python
+# selector_drift/validate/assertions/independence.py
+"""Cross-family confirmation (design 5.6) and the VALUE family (design 5.6a, R14/C3).
+Reaches rungs ONLY through the Rung protocol in resolve.trace."""
+from __future__ import annotations
 
-Run: `uv run pytest tests/validate -v && uv run lint-imports`
-Expected: PASS, 5 new tests. `judged-cannot-call-judge` kept.
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Final
 
-- [ ] **Step 5: Commit**
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.resolve.trace import Family, Rung
+from selector_drift.validate.history import AcceptedRun, History
+from selector_drift.validate.verdict import Confirmation, Outcome, Verdict
+
+if TYPE_CHECKING:
+    from selector_drift.validate.gate import HealContext
+
+_DOM_FAMILIES: Final = frozenset({Family.TEXT_SEMANTIC, Family.STRUCTURAL})
+VALUE_CONFIRMATION: Final = Confirmation(rung=None, family=Family.VALUE)
+
+
+def _norm(value: object) -> str:
+    return " ".join(str(value).split())
+
+
+class RowKeyContinuity:
+    name = "RowKeyContinuity"
+
+    def __init__(self, threshold: float = 0.95) -> None:
+        if not 0.0 < threshold <= 1.0:
+            raise ValueError("threshold must be in (0, 1]")
+        self.threshold = threshold
+
+    @property
+    def threshold_text(self) -> str:
+        return f">= {self.threshold:.2f}"
+
+    def _v(self, outcome: Outcome, observed: str | None, reason: str,
+           confirmed_by: Confirmation | None = None) -> Verdict:
+        return Verdict(check=self.name, outcome=outcome, threshold=self.threshold_text,
+                       observed=observed, reason=reason, confirmed_by=confirmed_by)
+
+    def agreement(self, candidate: CandidateExtraction, previous: AcceptedRun,
+                  field: str) -> tuple[float, int]:
+        """(agreement rate, cells compared). For the key field, the co-varying fields."""
+        key = previous.natural_key
+        before = previous.by_key()
+        agree = compared = 0
+        for row in candidate.rows:
+            if not all(k in row for k in key):
+                continue
+            old = before.get(tuple(_norm(row[k].value) for k in key))
+            if old is None:
+                continue
+            fields = ([f for f in row if f not in key and f in old] if field in key
+                      else [field] if field in row and field in old else [])
+            for f in fields:
+                compared += 1
+                agree += _norm(row[f].value) == _norm(old[f])
+        return (agree / compared if compared else 0.0), compared
+
+    def check(self, candidate: CandidateExtraction, history: History | None,
+              ctx: HealContext) -> Verdict:
+        field = ctx.target.name
+        if not ctx.healed:
+            return self._v(Outcome.INSUFFICIENT, None,
+                           "nothing healed: continuity confirms heals; a steady-state value "
+                           "change is a data-quality finding, not a write gate")
+        previous = history.previous() if history is not None else None
+        if previous is None:
+            return self._v(Outcome.INSUFFICIENT, None, "no accepted run to compare against")
+        rate, compared = self.agreement(candidate, previous, field)
+        joined = "+".join(previous.natural_key)
+        if compared == 0:
+            return self._v(Outcome.INSUFFICIENT, None,
+                           f"no natural keys in common with {previous.run_key} (joined on "
+                           f"{joined}), so continuity has no basis")
+        what = "the fields that co-vary with it" if field in previous.natural_key else field
+        detail = (f"{what} agree with {previous.run_key} on {rate:.1%} of {compared} joined "
+                  f"cells (joined on {joined})")
+        if rate >= self.threshold:
+            return self._v(Outcome.PASS, f"{rate:.4f}", detail, VALUE_CONFIRMATION)
+        return self._v(Outcome.FAIL, f"{rate:.4f}",
+                       f"{detail}: the values moved while the keys did not -- the heal reads a "
+                       "different column")
+
+
+class IndependentRungAgreement:
+    name = "IndependentRungAgreement"
+    threshold = "the same node, re-resolved by a different signal family"
+
+    def __init__(self, rungs: Sequence[Rung], value: RowKeyContinuity | None = None) -> None:
+        self.rungs = tuple(rungs)
+        self.value = value if value is not None else RowKeyContinuity()
+
+    def _v(self, outcome: Outcome, observed: str | None, reason: str,
+           confirmed_by: Confirmation | None = None) -> Verdict:
+        return Verdict(check=self.name, outcome=outcome, threshold=self.threshold,
+                       observed=observed, reason=reason, confirmed_by=confirmed_by)
+
+    def _dom(self, ctx: HealContext) -> Verdict | str:
+        """A decisive DOM verdict, or the reason there is no DOM evidence."""
+        if ctx.page is None:
+            return "no page snapshot to re-resolve against"
+        healer = next((r for r in self.rungs if r.rung_id == ctx.winning_rung), None)
+        if healer is None:
+            return (f"rung {ctx.winning_rung} healed but is not among the injected rungs, so its "
+                    "node cannot be re-derived")
+        confirmers = sorted((r for r in self.rungs
+                             if r.rung_id not in (1, healer.rung_id)
+                             and r.family in _DOM_FAMILIES and r.family is not healer.family),
+                            key=lambda r: r.rung_id)
+        if not confirmers:
+            offered = ", ".join(f"rung {r.rung_id} ({r.family.value})" for r in self.rungs)
+            return (f"no cross-family confirmer available: rung {healer.rung_id} "
+                    f"({healer.family.value}) healed; offered {offered or 'none'}")
+        healed = healer.resolve(ctx.page, ctx.target)
+        if healed is None:
+            return self._v(Outcome.FAIL, f"rung {healer.rung_id} -> nothing",
+                           f"rung {healer.rung_id} healed this field but does not resolve it "
+                           "again on the same snapshot: the heal is not reproducible")
+        resolved = [(c, el) for c in confirmers
+                    if (el := c.resolve(ctx.page, ctx.target)) is not None]
+        against = [(c, el) for c, el in resolved if el.node_id != healed.node_id]
+        if against:
+            c, el = against[0]
+            return self._v(Outcome.FAIL,
+                           f"rung {c.rung_id} -> {el.node_id}; rung {healer.rung_id} -> "
+                           f"{healed.node_id}",
+                           f"cross-family disagreement: rung {c.rung_id} ({c.family.value}) "
+                           f"resolves a different node than the heal by rung {healer.rung_id} "
+                           f"({healer.family.value}) -- the adjacent-column signature")
+        if resolved:
+            c, _ = resolved[0]
+            return self._v(Outcome.PASS, f"rung {c.rung_id}",
+                           f"rung {c.rung_id} ({c.family.value}) resolved the same node "
+                           f"({healed.node_id}) as the heal by rung {healer.rung_id} "
+                           f"({healer.family.value})",
+                           Confirmation(rung=c.rung_id, family=c.family))
+        tried = ", ".join(f"rung {c.rung_id}" for c in confirmers)
+        return f"no cross-family confirmer resolved ({tried} returned nothing)"
+
+    def check(self, candidate: CandidateExtraction, history: History | None,
+              ctx: HealContext) -> Verdict:
+        if not ctx.healed:
+            return self._v(Outcome.INSUFFICIENT, None,
+                           "nothing healed: rung 1 verified the cached selector and its "
+                           "anchor, so there is nothing to confirm")
+        dom = self._dom(ctx)
+        if isinstance(dom, Verdict):
+            return dom
+        value = self.value.check(candidate, history, ctx)
+        if value.outcome is Outcome.PASS:
+            return self._v(Outcome.PASS, "row-key continuity",
+                           f"{dom}; confirmed by the VALUE family instead: {value.reason}",
+                           VALUE_CONFIRMATION)
+        if value.outcome is Outcome.FAIL:
+            return self._v(Outcome.FAIL, value.observed,
+                           f"{dom}; the VALUE family refuses: {value.reason}")
+        return self._v(Outcome.INSUFFICIENT, None,
+                       f"{dom}; the VALUE family has no basis either: {value.reason}")
+```
+
+- [ ] **Step 5: Run the tests and confirm the contract holds**
+
+Run: `uv run pytest tests/validate -v -m unit && uv run mypy --strict selector_drift/validate && uv run lint-imports`
+Expected: PASS — 20 new tests. `judge-reaches-rungs-only-by-protocol` and `judged-cannot-call-judge`
+kept: `independence.py` imports `resolve.trace` and nothing under `resolve.rungs`.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add selector_drift/validate/assertions/independence.py tests/validate/test_independence.py
-git commit -m "feat(validate): cross-family independent rung agreement"
+git add selector_drift/validate/assertions/independence.py tests/validate/helpers.py tests/validate/test_independence.py
+git commit -m "feat(validate): cross-family node-identity agreement with VALUE-family continuity"
 ```
 
 ---
 
-### Task 23: `DistributionalAssertion` — PSI, warm-up, persistence
+### Task 23: `DistributionalAssertion` — PSI, per-target warm-up, persistence for alerting only
 
 **Files:**
 - Create: `selector_drift/validate/assertions/distribution.py`
+- Modify: `tests/validate/helpers.py` (append the history builders), `docs/methodology.md` (the PSI section)
 - Test: `tests/validate/test_distribution.py`
 
 **Interfaces:**
-- Consumes: `Assertion`, `Verdict` (Task 20), run history from Postgres.
-- Produces: `DistributionalAssertion(threshold: float = 0.20, warmup_runs: int = 30, persistence: int = 2, bins: int = 10, epsilon: float = 1e-6)`.
+- Consumes: `Assertion`, `Verdict`, `column` (Task 20), `History`/`AcceptedRun` (Task 20), `AuthorisedTarget.warmup_runs` (Task 2).
+- Produces:
+  - `DistributionalAssertion(threshold: float = 0.20, warmup_runs: int = 30, persistence: int = 2, bins: int = 10, epsilon: float = 1e-6)`
+  - `DistributionalAssertion.for_target(target: AuthorisedTarget)`; `.bin_edges_for(history, field) -> tuple[float, ...]`; `.assess(candidate, history, field) -> Assessment | str` (a `str` is the reason there is no basis)
+  - `Assessment(psi, reference_n, current_n, categorical, breach, prior_breaches, suppressed, alert)` — **Task 29's distribution-shift finding reads `assess()`**, so the gate and the alert cannot compute two different PSIs
+  - `psi(reference, current, epsilon) -> float`; `REFERENCE_RUNS = 30`
 
-**Two corrections to the first draft, and a specification it was missing.**
+**(a) Persistence governs alerting only; on a heal, one breach is `FAIL` (M17).** As first drafted,
+`FAIL` needed PSI over threshold on `persistence` consecutive runs — so a heal into a shifted
+distribution passed on run one, *the only run that matters*: by run two the first day's bad data is
+written. Split:
 
-**(a) Persistence must not apply to the blocking path (M17).** As drafted, `FAIL` required PSI over
-threshold on `persistence` consecutive runs — so a heal whose distribution shifted immediately got
-`PASS` on run one, which is *the only run that matters*. Design §5.7's argument is *"a heal into a
-shifted distribution blocks"*, and the plan's own
-`test_seasonality_does_not_alert_before_persistence_is_met` asserted the opposite. Split it:
-
-| Path | Rule | Why |
+| Path | Verdict | Alert |
 |---|---|---|
-| Not healed (steady state) | persistence `2` before alerting; never blocks | B7 — month-end, seasonality and real business change must not produce an alert the client mutes |
-| **Healed** | **a single-run breach is `FAIL`** | The heal is the event. Waiting for a second run means the first day's bad data is already written |
+| **Healed** | **single-run breach → `FAIL`**; no breach → `PASS` | — |
+| Steady state (cache hit) | always `PASS` — a cache hit's distribution is not a write gate (§5.7) | only when the breach persists `persistence` runs, and the client has not marked it expected |
 
-**(b) Warm-up must be per-target, from the scope record, not a global 30 (M18).** On a daily cron
-`warmup_runs=30` is thirty days during which `DistributionalAssertion` returns `INSUFFICIENT`, which
-on a heal is `FAIL`, which quarantines **every heal for the first month of the ninety-day log**. That
-is correct in principle — there is no basis to trust it yet — but combined with C3 it means the
-treatment arm produces nothing usable until week 17. The bench, being synthetic with a known answer
-key, warms up in `warmup_runs: 5`; client targets keep 30. Like `first_heal_policy`, it lives on the
-scope record so it cannot be quietly lowered for a client.
+The first draft's `test_synthetic_shift_is_detected_after_warmup` expected `FAIL` with no stated
+context — in steady state that `FAIL` would **block** (a `FAIL` quarantines regardless of heal), which
+is the crying-wolf behaviour design §5.7 exists to prevent. It now runs on a heal, where it is right.
 
-**(c) The statistic must be reproducible (M16).** The heal-log line the design is proud of —
-*"distribution unchanged (PSI 0.03, threshold 0.20, n=847)"* — is not checkable by a reader unless all
-of this is written down and published in `docs/methodology.md`:
+**(b) Warm-up is per target, from the scope record (M18).** On a daily cron `warmup_runs=30` is
+thirty days of `INSUFFICIENT`, which on a heal is `FAIL` — every heal quarantined for the first month.
+Correct in principle, but combined with C3 it left the treatment arm empty until week 17. The bench
+(synthetic, known answer key) warms up in 5; client targets keep 30; `for_target` reads
+`AuthorisedTarget.warmup_runs`, so it cannot be quietly lowered for a client.
 
-| Choice | Value | Why this one |
+**(c) The statistic is reproducible (M16).** The heal-log line *"distribution unchanged (PSI 0.03,
+threshold 0.20, n=847)"* is checkable only if every choice is written down — Step 5 publishes this
+table in `docs/methodology.md`:
+
+| Choice | Value | Why |
 |---|---|---|
-| Binning | 10 quantile bins **fixed from the reference window**, not recomputed per run | Recomputing bins per run makes PSI compare a distribution to itself |
-| Reference window | trailing 30 accepted runs for the same target and field | Named, so "n=847" has a defined denominator |
-| Zero-bin handling | add `epsilon` to both proportions | PSI is undefined at `log(0)`; without this it silently returns `inf` |
-| Categorical fields | category proportions, no binning | |
-| Which fields at all | `FieldTarget.distributional` (Task 5), default `False` | PSI over a high-cardinality identifier is noise |
+| Statistic | PSI = Σ (cᵢ − rᵢ) · ln((cᵢ + ε)/(rᵢ + ε)) | symmetric, bounded below by 0, one number to print |
+| Reference window | trailing **30** accepted runs, same target, same spec version, same field | named, so `n=` has a defined denominator |
+| Binning | **10** quantile bins, edges from the reference window only (`np.quantile`, linear) | edges from the current run would measure the run against itself |
+| Unparseable values | an 11th bin that the reference never populates | a column of `n/a` is a shift, not a skipped row |
+| Zero bins | `ε = 1e-6` added to both proportions | `ln(0)` is `-inf`; PSI would silently become `inf` and quarantine everything |
+| Categorical fields | category proportions over the union of categories, no binning | a reference of text values selects this path |
+| Threshold | **0.20** | the conventional "significant shift" line; stated in every verdict |
+| Which fields | `FieldTarget.distributional` (Task 5), default `False` | PSI over an identifier column is noise |
+| Persistence | **2** consecutive breaching runs before alerting (steady state only) | B7 |
 
-- [ ] **Step 1: Write the failing tests**
+**Why `numpy` and not `scipy`:** Task 1 dropped `scipy` (~100 MB of wheels) — PSI is twenty lines.
+
+**What `shift_alerts` must mean for persistence to work at all.** `prior_breaches` counts trailing
+accepted runs whose `shift_alerts` contain the field. If Task 29 wrote a `distribution_shift` finding
+only when an alert *fired*, the first breach would record nothing, the second would see zero prior
+breaches, and persistence 2 could never be met. So `shift_alerts` records **breaches**; Task 29 must
+persist a finding on every breach (`Assessment.breach`) and notify only on `Assessment.alert`.
+
+- [ ] **Step 1: Append the history builders to `tests/validate/helpers.py`**
+
+```python
+# tests/validate/helpers.py  (append)
+from collections.abc import Callable
+
+
+def grid(start: float, step: float, n: int = 100) -> list[str]:
+    return [f"{start + step * j:,.2f}" for j in range(n)]
+
+
+def history_of(field: str, n: int, *, values: Callable[[int], list[str]],
+               prior_breaches: int = 0, marked_expected: bool = False) -> History:
+    runs = []
+    for i in range(n):
+        day = dt.date(2026, 10, 1) - dt.timedelta(days=n - i)
+        rows = tuple({"claim_number": f"AB{j:08d}", field: v} for j, v in enumerate(values(i)))
+        runs.append(AcceptedRun(
+            run_key=f"testbench:2:{day}", window=day, rows=rows, natural_key=("claim_number",),
+            shift_alerts=frozenset({field}) if i >= n - prior_breaches else frozenset(),
+            marked_expected=frozenset({field}) if marked_expected and i == n - 1
+            else frozenset()))
+    return History(runs=tuple(runs))
+
+
+def amount_history(n: int, **kw: object) -> History:
+    """Reference: 100 amounts per run on a 100..1,000 grid, jittered per run."""
+    return history_of("amount", n, values=lambda i: grid(100 + (i % 3), 9), **kw)  # type: ignore[arg-type]
+
+
+SAME = column("amount", grid(101, 9))          # the reference distribution again
+SHIFTED = column("amount", grid(5000, 9))      # every value above the top reference edge
+LOW_BAND = column("amount", grid(100, 0.5))    # nine of ten reference bins left empty
+```
+
+- [ ] **Step 2: Write the failing tests**
 
 ```python
 # tests/validate/test_distribution.py
-from selector_drift.validate.assertions.distribution import DistributionalAssertion
-from selector_drift.validate.verdict import Outcome
+import dataclasses
+import datetime as dt
+import math
 
+import pytest
+
+from selector_drift.scope.gate import authorise
+from selector_drift.scope.record import Basis, ScopeRecord
+from selector_drift.validate.assertions.distribution import (Assessment,
+                                                             DistributionalAssertion)
+from selector_drift.validate.history import History
+from selector_drift.validate.verdict import Outcome
+from tests.validate.helpers import (AMOUNT, LOW_BAND, SAME, SHIFTED, STATUS, amount_history,
+                                    column, ctx, grid, history_of)
+
+HEALED = ctx(AMOUNT, healed=True, rung=3)
+STEADY = ctx(AMOUNT, healed=False, rung=1)
+DA = DistributionalAssertion()
+
+
+def _target(**over):
+    rec = ScopeRecord(target="testbench", basis=Basis.SELF_OWNED, authorising_party="me",
+                      authorised_on=dt.date(2026, 9, 1), expires_on=dt.date(2027, 9, 1),
+                      evidence_uri=None, evidence_sha256=None,
+                      origins=["https://bench.example.invalid"],
+                      rate_limit={"requests": 1, "per_seconds": 30},
+                      user_agent_contact="https://example.invalid/contact",
+                      first_heal_policy="auto_promote", legal_review="self_drafted", **over)
+    return authorise(rec, today=dt.date(2026, 10, 1))
+
+
+@pytest.mark.unit
 def test_warmup_returns_insufficient_not_pass():
-    v = DistributionalAssertion().check(CANDIDATE, history(n=5), CTX)
+    v = DA.check(SAME, amount_history(5), HEALED)
     assert v.outcome is Outcome.INSUFFICIENT and "warm-up" in v.reason
 
-def test_synthetic_shift_is_detected_after_warmup():
-    v = DistributionalAssertion().check(shifted(), history(n=40, consecutive_shifts=2), CTX)
-    assert v.outcome is Outcome.FAIL and float(v.observed) > 0.20
 
-def test_seasonality_does_not_alert_before_persistence_is_met():
-    # B7. One shifted run is month-end. Two in a row is a problem.
-    # NOTE the context: NOT healed. Persistence governs alerting only.
-    v = DistributionalAssertion().check(shifted(), history(n=40, consecutive_shifts=1), CTX_STEADY)
+@pytest.mark.unit
+def test_warmup_length_comes_from_the_scope_record_not_a_global():
+    # M18. 30 daily runs is 30 days of quarantining every heal on the bench.
+    assert DistributionalAssertion.for_target(_target(warmup_runs=5)).warmup_runs == 5
+    assert DistributionalAssertion.for_target(_target()).warmup_runs == 30
+    v = DistributionalAssertion(warmup_runs=5).check(SAME, amount_history(5), HEALED)
     assert v.outcome is Outcome.PASS
 
+
+@pytest.mark.unit
 def test_a_single_run_shift_blocks_when_the_selector_healed():
     # M17. The heal IS the event. Waiting for a second consecutive run means the
     # first day's bad data is already written -- which is what the gate exists to stop.
-    v = DistributionalAssertion().check(shifted(), history(n=40, consecutive_shifts=1), CTX_HEALED)
-    assert v.outcome is Outcome.FAIL
+    v = DA.check(SHIFTED, amount_history(40), HEALED)
+    assert v.outcome is Outcome.FAIL and float(v.observed) > 0.20
 
-def test_warmup_length_comes_from_the_scope_record_not_a_global():
-    # M18. 30 daily runs is 30 days of quarantining every heal on the bench,
-    # which stalls the treatment arm until week 17.
-    assert DistributionalAssertion.for_target(BENCH).warmup_runs == 5
-    assert DistributionalAssertion.for_target(CLIENT).warmup_runs == 30
 
+@pytest.mark.unit
+def test_seasonality_does_not_alert_before_persistence_is_met():
+    # B7. One shifted run is month-end. Two in a row is a problem. Steady state never blocks.
+    h = amount_history(40)
+    assert DA.check(SHIFTED, h, STEADY).outcome is Outcome.PASS
+    a = DA.assess(SHIFTED, h, "amount")
+    assert isinstance(a, Assessment) and a.breach and not a.alert
+
+
+@pytest.mark.unit
+def test_a_persistent_shift_alerts_but_still_does_not_block_a_cache_hit():
+    h = amount_history(40, prior_breaches=1)
+    v = DA.check(SHIFTED, h, STEADY)
+    assert v.outcome is Outcome.PASS and "alert is raised" in v.reason
+    assert DA.assess(SHIFTED, h, "amount").alert
+
+
+@pytest.mark.unit
+def test_client_marked_expected_suppresses_the_alert():
+    a = DA.assess(SHIFTED, amount_history(40, prior_breaches=1, marked_expected=True), "amount")
+    assert a.breach and a.suppressed and not a.alert
+
+
+@pytest.mark.unit
+def test_marking_a_shift_expected_does_not_unblock_a_heal():
+    h = amount_history(40, prior_breaches=1, marked_expected=True)
+    assert DA.check(SHIFTED, h, HEALED).outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
 def test_a_bin_with_no_observations_does_not_return_infinity():
     # M16. PSI is undefined at log(0). Without epsilon this silently returns inf,
     # which compares greater than every threshold and quarantines everything.
-    v = DistributionalAssertion().check(with_empty_bin(), history(n=40), CTX_HEALED)
-    assert float(v.observed) != float("inf")
+    v = DA.check(LOW_BAND, amount_history(40), HEALED)
+    assert math.isfinite(float(v.observed)) and v.outcome is Outcome.FAIL
 
-def test_bins_are_fixed_from_the_reference_window_not_recomputed_per_run():
-    # Recomputing quantile bins per run compares a distribution to itself and
-    # PSI is ~0 no matter what moved.
-    assert DistributionalAssertion().bin_edges_for(history(n=40)) ==            DistributionalAssertion().bin_edges_for(history(n=40, shifted_tail=True))
 
-def test_client_marked_expected_suppresses_the_alert():
-    v = DistributionalAssertion().check(shifted(), history(n=40, marked_expected=True), CTX)
-    assert v.outcome is Outcome.PASS
+@pytest.mark.unit
+def test_the_same_distribution_scores_near_zero_and_passes_a_heal():
+    v = DA.check(SAME, amount_history(40), HEALED)
+    assert v.outcome is Outcome.PASS and float(v.observed) < 0.05
 
+
+@pytest.mark.unit
+def test_bins_come_from_the_reference_window_only():
+    # Runs older than the trailing 30 do not move the edges...
+    base = amount_history(40)
+    noisy = History(runs=tuple(dataclasses.replace(
+        r, rows=tuple(row | {"amount": "999,999.00"} for row in r.rows))
+        for r in base.runs[:10]) + base.runs[10:])
+    assert DA.bin_edges_for(base, "amount") == DA.bin_edges_for(noisy, "amount")
+    # ...and a run inside the window does. The current run is not an argument at all.
+    moved = History(runs=base.runs[:-1] + (dataclasses.replace(
+        base.runs[-1], rows=tuple(row | {"amount": v}
+                                  for row, v in zip(base.runs[-1].rows, grid(5000, 9)))),))
+    assert DA.bin_edges_for(base, "amount") != DA.bin_edges_for(moved, "amount")
+
+
+@pytest.mark.unit
 def test_the_verdict_always_states_the_threshold():
-    v = DistributionalAssertion().check(CANDIDATE, history(n=40), CTX)
-    assert v.threshold == "PSI 0.20"
+    assert DA.check(SAME, amount_history(3), HEALED).threshold == "PSI 0.20"
+    assert DA.check(SAME, amount_history(40), HEALED).threshold == "PSI 0.20"
+
+
+@pytest.mark.unit
+def test_a_categorical_field_is_compared_by_category_proportions():
+    h = history_of("status", 40, values=lambda i: ["Open", "Paid"] * 50)
+    same = DA.check(column("status", ["Open", "Paid"] * 50), h, ctx(STATUS, rung=3))
+    moved = DA.check(column("status", ["Closed"] * 100), h, ctx(STATUS, rung=3))
+    assert same.outcome is Outcome.PASS and moved.outcome is Outcome.FAIL
+    assert "category proportions" in moved.reason
+
+
+@pytest.mark.unit
+def test_unparseable_values_count_as_a_shift_not_as_missing_rows():
+    v = DA.check(column("amount", ["n/a"] * 100), amount_history(40), HEALED)
+    assert v.outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+def test_no_current_values_is_insufficient():
+    v = DA.check(column("amount", []), amount_history(40), HEALED)
+    assert v.outcome is Outcome.INSUFFICIENT
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kw", [{"warmup_runs": 0}, {"bins": 1}, {"threshold": 0.0},
+                                {"persistence": 0}, {"epsilon": 0.0}])
+def test_parameters_that_would_disable_the_check_are_refused(kw):
+    with pytest.raises(ValueError):
+        DistributionalAssertion(**kw)
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [ ] **Step 3: Run them and watch them fail**
 
 Run: `uv run pytest tests/validate/test_distribution.py -v`
-Expected: FAIL.
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.validate.assertions.distribution'`.
 
-- [ ] **Step 3: Implement PSI with the documented threshold, warm-up and persistence rules.**
+- [ ] **Step 4: Implement PSI, warm-up and the persistence split**
 
-- [ ] **Step 4: Run them and make sure they pass**
+```python
+# selector_drift/validate/assertions/distribution.py
+"""PSI with a documented threshold, per-target warm-up, and persistence for ALERTING only
+(design 5.7, M16/M17/M18). The methodology table in docs/methodology.md is this file."""
+from __future__ import annotations
 
-Run: `uv run pytest tests/validate -v`
-Expected: PASS, 5 new tests.
+from collections import Counter
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Final
 
-- [ ] **Step 5: Commit**
+import numpy as np
+import numpy.typing as npt
+
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.scope.record import AuthorisedTarget
+from selector_drift.validate.assertions._numbers import parse_number
+from selector_drift.validate.assertions.base import column
+from selector_drift.validate.history import History
+from selector_drift.validate.verdict import Outcome, Verdict
+
+if TYPE_CHECKING:
+    from selector_drift.validate.gate import HealContext
+
+REFERENCE_RUNS: Final = 30
+Floats = npt.NDArray[np.float64]
+
+
+def psi(reference: Floats, current: Floats, epsilon: float) -> float:
+    return float(np.sum((current - reference) * np.log((current + epsilon)
+                                                       / (reference + epsilon))))
+
+
+def _floats(values: Sequence[str]) -> list[float] | None:
+    """Every value as a number, or None -- which selects the categorical path."""
+    out: list[float] = []
+    for v in values:
+        n = parse_number(v)
+        if n is None:
+            return None
+        out.append(float(n))
+    return out
+
+
+def _binned(values: Sequence[float], edges: tuple[float, ...], unparseable: int) -> Floats:
+    idx = np.searchsorted(np.asarray(edges, dtype=np.float64),
+                          np.asarray(values, dtype=np.float64), side="left")
+    counts = np.bincount(idx, minlength=len(edges) + 1).astype(np.float64)
+    counts = np.append(counts, np.float64(unparseable))        # the 11th, never-referenced bin
+    return np.asarray(counts / counts.sum(), dtype=np.float64)
+
+
+def _categorical(reference: Sequence[str], current: Sequence[str]) -> tuple[Floats, Floats]:
+    r, c = Counter(reference), Counter(current)
+    cats = sorted(set(r) | set(c))
+    rp = np.asarray([r[k] for k in cats], dtype=np.float64)
+    cp = np.asarray([c[k] for k in cats], dtype=np.float64)
+    return (np.asarray(rp / rp.sum(), dtype=np.float64),
+            np.asarray(cp / cp.sum(), dtype=np.float64))
+
+
+@dataclass(frozen=True)
+class Assessment:
+    psi: float
+    reference_n: int
+    current_n: int
+    categorical: bool
+    breach: bool            # PSI over threshold on THIS run -- Task 29 records every breach
+    prior_breaches: int     # consecutive trailing accepted runs that breached
+    suppressed: bool        # the client marked this field's shift expected on the last run
+    alert: bool             # breach, persisted, not suppressed -- Task 29 notifies on this
+
+
+class DistributionalAssertion:
+    name = "DistributionalAssertion"
+
+    def __init__(self, threshold: float = 0.20, warmup_runs: int = 30, persistence: int = 2,
+                 bins: int = 10, epsilon: float = 1e-6) -> None:
+        if threshold <= 0 or warmup_runs < 1 or persistence < 1 or bins < 2 or epsilon <= 0:
+            raise ValueError("these parameters would disable the check, not tune it")
+        self.threshold, self.warmup_runs, self.persistence = threshold, warmup_runs, persistence
+        self.bins, self.epsilon = bins, epsilon
+
+    @classmethod
+    def for_target(cls, target: AuthorisedTarget) -> DistributionalAssertion:
+        return cls(warmup_runs=target.warmup_runs)        # the scope record's value (M18)
+
+    @property
+    def threshold_text(self) -> str:
+        return f"PSI {self.threshold:.2f}"
+
+    def bin_edges_for(self, history: History, field: str) -> tuple[float, ...]:
+        """Quantile edges from the reference window ONLY. The current run is not an input."""
+        ref = _floats(history.trailing(REFERENCE_RUNS).values(field))
+        if not ref:
+            return ()
+        qs = np.quantile(np.asarray(ref, dtype=np.float64),
+                         np.linspace(0.0, 1.0, self.bins + 1)[1:-1])
+        return tuple(float(x) for x in np.unique(qs))
+
+    def assess(self, candidate: CandidateExtraction, history: History | None,
+               field: str) -> Assessment | str:
+        runs = 0 if history is None else len(history)
+        if history is None or runs < self.warmup_runs:
+            return f"warm-up: {runs} of {self.warmup_runs} accepted runs"
+        reference = history.trailing(REFERENCE_RUNS).values(field)
+        current = column(candidate, field)
+        if not reference:
+            return f"the reference window holds no {field} values"
+        if not current:
+            return f"no values were extracted for {field}"
+        ref_num = _floats(reference)
+        if ref_num is not None:
+            edges = self.bin_edges_for(history, field)
+            parsed = [float(n) for v in current if (n := parse_number(v)) is not None]
+            r = _binned(ref_num, edges, 0)
+            c = _binned(parsed, edges, len(current) - len(parsed))
+        else:
+            r, c = _categorical(reference, current)
+        score = psi(r, c, self.epsilon)
+        breach = score > self.threshold
+        prior = 0
+        for run in reversed(history.runs):
+            if field not in run.shift_alerts:
+                break
+            prior += 1
+        previous = history.previous()
+        suppressed = previous is not None and field in previous.marked_expected
+        return Assessment(psi=score, reference_n=len(reference), current_n=len(current),
+                          categorical=ref_num is None, breach=breach, prior_breaches=prior,
+                          suppressed=suppressed,
+                          alert=breach and not suppressed and 1 + prior >= self.persistence)
+
+    def check(self, candidate: CandidateExtraction, history: History | None,
+              ctx: HealContext) -> Verdict:
+        field = ctx.target.name
+        a = self.assess(candidate, history, field)
+        if isinstance(a, str):
+            return Verdict(check=self.name, outcome=Outcome.INSUFFICIENT,
+                           threshold=self.threshold_text, observed=None, reason=a)
+        how = ("category proportions from" if a.categorical
+               else f"{self.bins} quantile bins fixed from")
+        basis = (f"PSI {a.psi:.4f} over {how} the trailing {REFERENCE_RUNS} accepted runs "
+                 f"(n={a.reference_n} reference, {a.current_n} current)")
+        observed = f"{a.psi:.4f}"
+        if ctx.healed:
+            if a.breach:
+                return Verdict(check=self.name, outcome=Outcome.FAIL,
+                               threshold=self.threshold_text, observed=observed,
+                               reason=f"{basis} exceeds the threshold on the run the selector "
+                                      "healed: a heal into a shifted distribution blocks on "
+                                      "one run (M17)")
+            return Verdict(check=self.name, outcome=Outcome.PASS, threshold=self.threshold_text,
+                           observed=observed, reason=f"distribution unchanged: {basis}")
+        if not a.breach:
+            reason = f"distribution unchanged: {basis}"
+        elif a.suppressed:
+            reason = f"{basis}; the client marked this shift expected, so no alert (B7)"
+        elif a.alert:
+            reason = (f"{basis}; breached on {1 + a.prior_breaches} consecutive runs -- a "
+                      "distribution-shift alert is raised; a cache hit does not block the write")
+        else:
+            reason = (f"{basis}; first breach, persistence {self.persistence} not met -- no "
+                      "alert yet (B7)")
+        return Verdict(check=self.name, outcome=Outcome.PASS, threshold=self.threshold_text,
+                       observed=observed, reason=reason)
+```
+
+- [ ] **Step 5: Publish the statistic in `docs/methodology.md`**
+
+Append a section `## The distributional check` containing, verbatim, the M16 table from this task's
+header, followed by:
+
+```markdown
+A heal-log line such as "distribution unchanged (PSI 0.03, threshold 0.20, n=847)" is produced by
+`DistributionalAssertion.check()` in `selector_drift/validate/assertions/distribution.py`; `n` is the
+number of reference values in the trailing 30 accepted runs. Warm-up per target: the bench 5 runs,
+client targets 30 (the scope record's `warmup_runs`). During warm-up the check returns INSUFFICIENT,
+so a heal quarantines until a human confirms it.
+```
+
+- [ ] **Step 6: Run them and make sure they pass**
+
+Run: `uv run pytest tests/validate -v -m unit && uv run mypy --strict selector_drift/validate`
+Expected: PASS — 19 new tests (counting parametrisations). mypy clean.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add selector_drift/validate/assertions/distribution.py tests/validate/test_distribution.py
-git commit -m "feat(validate): distributional assertion with warm-up and persistence"
+git add selector_drift/validate/assertions/distribution.py tests/validate/helpers.py tests/validate/test_distribution.py docs/methodology.md
+git commit -m "feat(validate): PSI with per-target warm-up; persistence gates alerts, never heals"
 ```
 
 ---
@@ -6472,212 +16670,757 @@ git commit -m "feat(validate): distributional assertion with warm-up and persist
 - Test: `tests/validate/test_first_heal.py`
 
 **Interfaces:**
-- Consumes: `AuthorisedTarget.first_heal_policy` (Task 2), `SelectorCache` (Task 17), `HealContext.human_confirmed` (Task 20).
-- Produces: `FirstHealConfirmation()`. `INSUFFICIENT` when a heal targets a selector never seen before, the policy is `REQUIRED`, and `human_confirmed` is `False`; `PASS` when the policy is `AUTO_PROMOTE`, when the selector is already known, or when `human_confirmed` is `True`.
+- Consumes: `FirstHealPolicy` (Task 2), `CacheReader`/`CachedSelector` (Tasks 17, 19) via `ctx.cache`, `HealContext.human_confirmed` (Task 20), `cells` (Task 20).
+- Produces: `FirstHealConfirmation(policy: FirstHealPolicy = FirstHealPolicy.REQUIRED)`.
+
+| Situation | Verdict |
+|---|---|
+| nothing healed | `PASS` — the policy's requirement is vacuously met |
+| `human_confirmed` (promotion, Task 25) | `PASS` |
+| policy `AUTO_PROMOTE` (the bench's scope record only) | `PASS` |
+| healed selector equals the cache's selector for this field | `PASS` — a repeat heal to a confirmed selector runs automatically |
+| otherwise | `INSUFFICIENT` → `FAIL` on the heal → quarantine until a human confirms |
+
+**The policy is a constructor argument, not a context field.** The first draft's tests passed
+`policy=` into the context, but `HealContext.target` is the field's `FieldTarget` — there is no
+`AuthorisedTarget` on it to read `first_heal_policy` from. `checks_for` (Task 25) therefore takes the
+policy from the `AuthorisedTarget` and hands it here, the same route `warmup_runs` takes (M18). **The
+default is `REQUIRED`**, so forgetting to pass it fails closed: heals quarantine, nothing wrong is
+written.
+
+**Which selector "healed" is read from the data, not the context.** `HealContext` carries no element.
+Every `Claim` the heal produced carries its `DomSource.selector` (Task 27), so the check reads the
+healed selector from the candidate's cells and compares it with `ctx.cache.get(target, field,
+spec_version)`, where the target is `run_key`'s first segment (Task 6's `target:version:window`).
+**Known limit, stated in the methodology:** the cache holds one selector per field, so a portal that
+flips between two layouts asks a human once per flip, not once ever.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/validate/test_first_heal.py
+import pytest
+
+from selector_drift.resolve.cache import CachedSelector
+from selector_drift.resolve.trace import AnchorEvidence
+from selector_drift.scope.record import FirstHealPolicy
 from selector_drift.validate.assertions.first_heal import FirstHealConfirmation
+from selector_drift.validate.gate import ValidatedExtraction, gate
+from selector_drift.validate.quarantine import QuarantinedRun
 from selector_drift.validate.verdict import Outcome
+from tests.validate.helpers import DictCache, column, ctx
 
+REQUIRED, AUTO = FirstHealPolicy.REQUIRED, FirstHealPolicy.AUTO_PROMOTE
+HEALED_TO = column("claim_number", ["AB12345678"], selector="td[data-testid=claim]")
+
+
+def cache_holding(selector: str) -> DictCache:
+    anchor = AnchorEvidence(accessible_name=None, label_text=None, header_text="Claim Number")
+    return DictCache({"claim_number": CachedSelector(selector=selector, anchor=anchor,
+                                                     set_by_rung=4)})
+
+
+@pytest.mark.unit
 def test_first_heal_to_a_new_selector_requires_a_human_by_default():
-    v = FirstHealConfirmation().check(CANDIDATE, None, ctx(policy="required", seen=False))
-    assert v.outcome is Outcome.INSUFFICIENT
+    v = FirstHealConfirmation(REQUIRED).check(HEALED_TO, None,
+                                              ctx(rung=4, cache=cache_holding("#old")))
+    assert v.outcome is Outcome.INSUFFICIENT and "td[data-testid=claim]" in v.observed
 
+
+@pytest.mark.unit
 def test_repeat_heal_to_a_known_selector_runs_automatically():
-    v = FirstHealConfirmation().check(CANDIDATE, None, ctx(policy="required", seen=True))
+    v = FirstHealConfirmation(REQUIRED).check(
+        HEALED_TO, None, ctx(rung=4, cache=cache_holding("td[data-testid=claim]")))
     assert v.outcome is Outcome.PASS
 
+
+@pytest.mark.unit
 def test_auto_promote_is_permitted_only_where_the_scope_record_says_so():
-    """Spec 5.8. The bench sets auto_promote because it is synthetic with a
-    known answer key. Putting the policy on the scope record means it cannot be
-    quietly disabled for a client target."""
-    v = FirstHealConfirmation().check(CANDIDATE, None, ctx(policy="auto_promote", seen=False))
+    """Design 5.8. The bench sets auto_promote because it is synthetic with a known answer
+    key. The policy travels from the scope record, so it cannot be quietly set for a client."""
+    v = FirstHealConfirmation(AUTO).check(HEALED_TO, None, ctx(rung=4))
+    assert v.outcome is Outcome.PASS and "auto_promote" in v.reason
+
+
+@pytest.mark.unit
+def test_human_confirmation_satisfies_the_check():
+    v = FirstHealConfirmation(REQUIRED).check(HEALED_TO, None, ctx(rung=4, confirmed=True))
     assert v.outcome is Outcome.PASS
 
-def test_human_confirmation_satisfies_the_check():
-    v = FirstHealConfirmation().check(CANDIDATE, None, ctx(policy="required", seen=False, confirmed=True))
+
+@pytest.mark.unit
+def test_nothing_healed_needs_no_confirmation():
+    v = FirstHealConfirmation(REQUIRED).check(HEALED_TO, None, ctx(healed=False, rung=1))
     assert v.outcome is Outcome.PASS
+
+
+@pytest.mark.unit
+def test_the_default_policy_fails_closed():
+    assert FirstHealConfirmation().policy is REQUIRED
+
+
+@pytest.mark.unit
+def test_a_first_heal_completes_into_quarantine_and_confirmation_releases_it():
+    # Brief: "the first heal to a new selector completes into quarantine; a human confirms".
+    assert isinstance(gate(HEALED_TO, None, ctx(rung=4), [FirstHealConfirmation()]),
+                      QuarantinedRun)
+    assert isinstance(gate(HEALED_TO, None, ctx(rung=4, confirmed=True),
+                           [FirstHealConfirmation()]), ValidatedExtraction)
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `uv run pytest tests/validate/test_first_heal.py -v`
-Expected: FAIL.
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.validate.assertions.first_heal'`.
 
-- [ ] **Step 3: Implement.**
+- [ ] **Step 3: Implement**
+
+```python
+# selector_drift/validate/assertions/first_heal.py
+"""Design 5.8: the first heal to a new selector waits for a human, unless the scope record
+says otherwise. The policy is injected from AuthorisedTarget by checks_for (Task 25)."""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.scope.record import FirstHealPolicy
+from selector_drift.validate.assertions.base import cells
+from selector_drift.validate.history import History
+from selector_drift.validate.verdict import Outcome, Verdict
+
+if TYPE_CHECKING:
+    from selector_drift.validate.gate import HealContext
+
+
+class FirstHealConfirmation:
+    name = "FirstHealConfirmation"
+    threshold = "a human confirms the first heal to a new selector"
+
+    def __init__(self, policy: FirstHealPolicy = FirstHealPolicy.REQUIRED) -> None:
+        self.policy = policy
+
+    def _v(self, outcome: Outcome, observed: str | None, reason: str) -> Verdict:
+        return Verdict(check=self.name, outcome=outcome, threshold=self.threshold,
+                       observed=observed, reason=reason)
+
+    def check(self, candidate: CandidateExtraction, history: History | None,
+              ctx: HealContext) -> Verdict:
+        if not ctx.healed:
+            return self._v(Outcome.PASS, None, "nothing healed: no first-heal confirmation "
+                                               "is needed")
+        if ctx.human_confirmed:
+            return self._v(Outcome.PASS, None, "a human confirmed this heal at promotion")
+        if self.policy is FirstHealPolicy.AUTO_PROMOTE:
+            return self._v(Outcome.PASS, None,
+                           "the scope record sets first_heal_policy: auto_promote (a synthetic "
+                           "target with a known answer key, design 5.8)")
+        field = ctx.target.name
+        selector = next((c.selector for c in cells(candidate, field) if c.selector), None)
+        if selector is None:
+            return self._v(Outcome.INSUFFICIENT, None,
+                           f"no extracted {field} value carries the selector it healed to")
+        target = candidate.run_key.split(":", 1)[0]
+        cached = ctx.cache.get(target, field, candidate.spec_version)
+        if cached is not None and cached.selector == selector:
+            return self._v(Outcome.PASS, selector,
+                           "a heal to a selector already confirmed for this field runs "
+                           "automatically")
+        return self._v(Outcome.INSUFFICIENT, selector,
+                       f"first heal of {field} to a new selector; the scope record's "
+                       "first_heal_policy is required, so a human confirms it before its data "
+                       "is written")
+```
 
 - [ ] **Step 4: Run them and make sure they pass**
 
-Run: `uv run pytest tests/validate -v`
-Expected: PASS, 4 new tests.
+Run: `uv run pytest tests/validate -v -m unit && uv run mypy --strict selector_drift/validate`
+Expected: PASS — 7 new tests. mypy clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add selector_drift/validate/assertions/first_heal.py tests/validate/test_first_heal.py
-git commit -m "feat(validate): first-heal confirmation driven by the scope record"
+git commit -m "feat(validate): first-heal confirmation with the policy injected from the scope record"
 ```
 
 ---
 
-### Task 25: Quarantine, promote, discard — and promotion re-runs the gate
+### Task 25: `checks_for`, quarantine, promote, discard — and promotion re-runs the gate
 
 **Files:**
-- Create: `selector_drift/validate/quarantine.py`
-- Test: `tests/validate/test_quarantine.py`
+- Create: `selector_drift/validate/checks.py`
+- Replace: `selector_drift/validate/quarantine.py` (Task 20's stub)
+- Modify: `.importlinter` (one new contract)
+- Test: `tests/validate/test_checks.py`, `tests/validate/test_quarantine.py`
 
 **Interfaces:**
-- Consumes: `gate` (Task 20), `quarantine` and `audit_log` tables (Task 3).
+- Consumes: every assertion (Tasks 21–24), `gate_run`, `HealContext`, `QuarantinedRun`, `ValidatedExtraction` (Task 20); `TaskSpec`, `FieldTarget`, `SpecError` (Task 5); `Rung` (`resolve/trace.py`); `FirstHealPolicy` (Task 2); `Quarantine`, `AuditLog`, `Run` models and `Session` (Task 3).
 - Produces:
-  - `QuarantinedRun(run_key: str, reason: str, verdicts: list[Verdict], data_uri: str)`
-  - `promote(run_key: str, actor: str, reason: str) -> ValidatedExtraction` — **re-runs `gate()`** with `human_confirmed=True` in the context. It supplies the missing evidence; it does not skip a check.
-  - `discard(run_key: str, actor: str, reason: str) -> None`
-  - `StillInvalid(Exception)` — raised when a re-run gate still fails
-  - Both write an `audit_log` row.
+  - `checks_for(spec, field, confirmers, *, warmup_runs, first_heal_policy) -> list[Assertion]`
+  - `QuarantinedRun` (re-exported), `StillInvalid(verdicts: list[Verdict])` with `.verdicts` and `.failing`, `NotInQuarantine(LookupError)`, `AlreadyResolved(RuntimeError)`
+  - `GateInputs(candidate, history, contexts, checks)`, `Rebuild = Callable[[str], GateInputs]`
+  - `reconfirm(run_key, inputs) -> ValidatedExtraction` — the pure half of promotion
+  - `promote(run_key, *, actor, reason, rebuild, session_factory=Session) -> ValidatedExtraction` — re-runs the gate with `human_confirmed=True`; **does not land**
+  - `discard(run_key, *, actor, reason, session_factory=Session) -> None`
+  - Audit rows: `action` ∈ {`promote`, `promote_refused`, `discard`}, **`subject = run_key`**, `detail.reason`
 
-- [ ] **Step 1: Write the failing tests**
+**`checks_for` turns a field's declared `AssertionSpec`s into the objects the gate runs.** Nothing did;
+Task 26A's first diagram called `gate()` with no checks at all. The confirming rungs are **injected**
+by `orchestrate/`, so `validate/` still sees only the `Rung` protocol and
+`judge-reaches-rungs-only-by-protocol` holds with no exception. Seven checks, in a fixed order:
+declared format/domain/cross-field, then `IndependentRungAgreement`, `RowKeyContinuity`,
+`DistributionalAssertion` (only when `field.distributional`), `FirstHealConfirmation`.
+
+**`checks_for` gains a required `first_heal_policy` keyword.** Task 24 explains why the policy must be
+injected; making it required rather than defaulted means mypy flags every call site that has not been
+updated, instead of the bench silently quarantining every first heal. Both `warmup_runs` and
+`first_heal_policy` come from the `AuthorisedTarget`, never from config (M18, design §5.8).
+
+**Refusals, not skips.** An unknown assertion type, a `format` without a `pattern`, a `domain` without
+a `rule`, a `cross_field` without an `expression`, a cross-field expression naming a field the spec
+does not extract, or a hostile expression (`UnsafeExpression` is a `SpecError`) — each raises
+`SpecError`. A check that silently does not run is the green tick `00` §7 calls a lie.
+
+**Promotion re-runs the gate — and must be tested where it calls it (M31).** The first draft's test
+patched `quarantine_mod.gate`, but promotion judges the *whole run* through `gate_run`, and
+`quarantine.py` binds `gate_run` at import. Patching `gate` observed nothing, so the test failed for
+the wrong reason — or, had the name happened to match, would have passed whether or not promotion
+re-ran the gate, on the check that stops a human waving data through. The fixed test patches
+`quarantine_mod.gate_run` and asserts every context it received carries `human_confirmed=True`.
+
+**`promote()` needs the gate's inputs back, so it takes a `rebuild` callable.** Re-running the gate
+needs the candidate (the quarantined parquet), the history, a `HealContext` per field (a
+`StaticPageSource` over the heal bundle's DOM) and the checks — which need the concrete confirming
+rungs, which `validate/` may not import. `orchestrate/` owns all of that; it passes
+`rebuild=rebuild_gate_inputs` (Task 26A). `validate/` stays free of storage for the *inputs* and of
+`land/` entirely: `promote()` returns the `ValidatedExtraction` and Task 26A's `accept_promoted`
+lands it, writes the cache and moves last-accepted. `actor` and `reason` are keyword-only, validated
+non-empty, and `reason` is capped at 500 characters to match the API body (API spec §4.1).
+
+**What confirmation supplies (design §5.9, Task 20's table).** `reconfirm` replaces every context
+with `human_confirmed=True`: `FirstHealConfirmation` passes, and any other `INSUFFICIENT` (warm-up, no
+confirmer resolved) is tolerated. Any `FAIL` still refuses, and `StillInvalid` carries **every**
+verdict — the API's `409 still-invalid` shows the failing ones (API spec §5). A refused promotion is
+itself audited (`promote_refused`) and leaves the row open.
+
+**Three tests from the first draft are replaced, not kept.**
+- `test_a_quarantined_run_never_reaches_land` called `land.write`, which Task 28 creates *after* this
+  task. It moves to Task 28; here, the type-level half is tested (a `QuarantinedRun` cannot be passed
+  off as a `ValidatedExtraction`).
+- `test_promote_rejects_a_caller_supplied_actor` asserted that Python rejects an unknown `_from_body`
+  keyword — true of every function, so it tested nothing. H3 is that the **API** takes `actor` from
+  the session; Task 34C's route (`actions.promote(run_key, op.username, body.reason)`) and its tests
+  own it.
+- `rows_written_for(...)` in the discard test is a pipeline reading; `discard()` has no path to the
+  lake at all, and the new `validate-cannot-land` contract makes that structural.
+
+- [ ] **Step 1: Add the import contract**
+
+Append to `.importlinter`:
+
+```ini
+[importlinter:contract:validate-cannot-land]
+name = The judge never writes the lake or the cache
+type = forbidden
+source_modules = selector_drift.validate
+forbidden_modules =
+    selector_drift.land
+    selector_drift.orchestrate
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```python
+# tests/validate/test_checks.py
+import pytest
+
+from selector_drift.scope.record import FirstHealPolicy
+from selector_drift.spec.schema import AssertionSpec, FieldTarget, SpecError, TaskSpec
+from selector_drift.validate.assertions.cross_field import UnsafeExpression
+from selector_drift.validate.checks import checks_for
+from tests.validate.helpers import ax, heuristic
+
+SPEC = TaskSpec.model_validate({
+    "version": 2, "scope_ref": "scopes/testbench.yaml", "schedule": "12 4 * * *",
+    "row_scope": "each row", "natural_key": ["claim_number"],
+    "expected_schema": {"claim_number": "string", "amount": "decimal", "net": "decimal"},
+    "navigate": [],
+    "targets": [
+        {"name": "claim_number", "description": "d",
+         "assertions": [{"type": "format", "pattern": r"^[A-Z]{2}\d{8}$"}]},
+        {"name": "amount", "description": "d", "distributional": True,
+         "assertions": [{"type": "domain", "rule": {"min": 100.0, "max": 250000.0}},
+                        {"type": "cross_field", "expression": "amount >= net"}]},
+        {"name": "net", "description": "d", "assertions": []}]})
+CLAIM, AMOUNT, NET = SPEC.targets
+REQUIRED = FirstHealPolicy.REQUIRED
+
+
+def names(field, **kw):
+    return [c.name for c in checks_for(SPEC, field, [ax("n"), heuristic("n")],
+                                       warmup_runs=kw.get("warmup_runs", 5),
+                                       first_heal_policy=kw.get("policy", REQUIRED))]
+
+
+def _field_with(**assertion) -> FieldTarget:
+    spec = AssertionSpec.model_construct(**({"pattern": None, "rule": None,
+                                             "expression": None} | assertion))
+    return FieldTarget.model_construct(name="claim_number", description="d", relation=None,
+                                       assertions=[spec], distributional=False)
+
+
+@pytest.mark.unit
+def test_an_unknown_assertion_type_is_refused_not_skipped():
+    with pytest.raises(SpecError, match="unknown assertion type"):
+        checks_for(SPEC, _field_with(type="vibes"), [], warmup_runs=5,
+                   first_heal_policy=REQUIRED)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["format", "domain", "cross_field"])
+def test_an_assertion_missing_its_argument_is_refused(kind):
+    with pytest.raises(SpecError, match="needs"):
+        checks_for(SPEC, _field_with(type=kind), [], warmup_runs=5, first_heal_policy=REQUIRED)
+
+
+@pytest.mark.unit
+def test_every_field_gets_both_confirmers_and_the_first_heal_check():
+    assert names(CLAIM) == ["FormatAssertion", "IndependentRungAgreement", "RowKeyContinuity",
+                            "FirstHealConfirmation"]
+
+
+@pytest.mark.unit
+def test_a_distributional_field_gets_every_kind_in_a_fixed_order():
+    assert names(AMOUNT) == ["DomainAssertion", "CrossFieldAssertion",
+                             "IndependentRungAgreement", "RowKeyContinuity",
+                             "DistributionalAssertion", "FirstHealConfirmation"]
+
+
+@pytest.mark.unit
+def test_warm_up_and_policy_come_from_the_caller_not_from_defaults():
+    checks = checks_for(SPEC, AMOUNT, [], warmup_runs=5,
+                        first_heal_policy=FirstHealPolicy.AUTO_PROMOTE)
+    by_name = {c.name: c for c in checks}
+    assert by_name["DistributionalAssertion"].warmup_runs == 5
+    assert by_name["FirstHealConfirmation"].policy is FirstHealPolicy.AUTO_PROMOTE
+
+
+@pytest.mark.unit
+def test_the_confirming_rungs_are_injected_not_imported():
+    rungs = [ax("n"), heuristic("n")]
+    ira = next(c for c in checks_for(SPEC, CLAIM, rungs, warmup_runs=5,
+                                     first_heal_policy=REQUIRED)
+               if c.name == "IndependentRungAgreement")
+    assert list(ira.rungs) == rungs
+
+
+@pytest.mark.unit
+def test_a_cross_field_expression_naming_an_unextracted_field_is_refused():
+    field = _field_with(type="cross_field", expression="amount == gross")
+    with pytest.raises(SpecError, match="gross"):
+        checks_for(SPEC, field, [], warmup_runs=5, first_heal_policy=REQUIRED)
+
+
+@pytest.mark.unit
+def test_a_hostile_expression_in_a_spec_is_a_spec_refusal():
+    field = _field_with(type="cross_field", expression="__import__('os') == 1")
+    with pytest.raises(UnsafeExpression):
+        checks_for(SPEC, field, [], warmup_runs=5, first_heal_policy=REQUIRED)
+```
 
 ```python
 # tests/validate/test_quarantine.py
+import datetime as dt
+
 import pytest
-from selector_drift.validate.quarantine import promote, discard, StillInvalid
-from selector_drift import land
+from sqlalchemy import select, text
 
-def test_a_quarantined_run_never_reaches_land(quarantined):
-    with pytest.raises(TypeError):
-        land.write(quarantined)  # type: ignore[arg-type]
+from selector_drift.db.models import AuditLog, Quarantine, Run
+from selector_drift.db.session import Session, engine
+from selector_drift.scope.record import FirstHealPolicy
+from selector_drift.validate import quarantine as quarantine_mod
+from selector_drift.validate.assertions.distribution import DistributionalAssertion
+from selector_drift.validate.assertions.first_heal import FirstHealConfirmation
+from selector_drift.validate.assertions.format import FormatAssertion
+from selector_drift.validate.gate import ValidatedExtraction, gate_run
+from selector_drift.validate.quarantine import (AlreadyResolved, GateInputs, NotInQuarantine,
+                                                QuarantinedRun, StillInvalid, discard, promote,
+                                                reconfirm)
+from selector_drift.validate.verdict import Outcome, Verdict
+from tests.validate.helpers import (AMOUNT, AT, CLAIM_NUMBER, RUN_KEY, SHIFTED, amount_history,
+                                    candidate, column, ctx)
 
-def test_promotion_re_runs_the_gate_rather_than_bypassing_it(quarantined, monkeypatch):
+ACTOR = "operator@example.invalid"
+CLAIM = r"^[A-Z]{2}\d{8}$"
+
+
+def first_heal_inputs(value: str = "AB12345678") -> GateInputs:
+    """A heal that passed everything except FirstHealConfirmation -- the everyday quarantine."""
+    return GateInputs(candidate=candidate([{"claim_number": value}]), history=None,
+                      contexts={"claim_number": ctx(CLAIM_NUMBER, rung=4)},
+                      checks={"claim_number": [FormatAssertion(CLAIM),
+                                               FirstHealConfirmation(FirstHealPolicy.REQUIRED)]})
+
+
+# ---- the pure half: reconfirm ----------------------------------------------------------------
+
+@pytest.mark.unit
+def test_a_quarantined_run_cannot_be_passed_off_as_validated():
+    inputs = first_heal_inputs()
+    q = gate_run(inputs.candidate, None, inputs.contexts, inputs.checks)
+    assert isinstance(q, QuarantinedRun) and not isinstance(q, ValidatedExtraction)
+
+
+@pytest.mark.unit
+def test_promotion_re_runs_the_gate_rather_than_bypassing_it(monkeypatch):
     # M31. Patch the name in the module that CALLS it. quarantine.py does
-    # `from .gate import gate`, which binds at import, so patching
-    # selector_drift.validate.gate.gate is invisible here and this test would pass
-    # whether or not promotion re-runs the gate -- on the check that stops a human
-    # waving data through.
-    calls = []
-    real = quarantine_mod.gate
-    monkeypatch.setattr(quarantine_mod, "gate",
-                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
-    promote(quarantined.run_key, actor=ACTOR, reason="checked the screenshots")
-    assert calls == [1]
+    # `from .gate import gate_run`, which binds at import, so patching
+    # selector_drift.validate.gate.gate_run -- or `gate`, which promotion never calls --
+    # is invisible here, on the check that stops a human waving data through.
+    seen = []
+    real = quarantine_mod.gate_run
 
-def test_promote_rejects_a_caller_supplied_actor(quarantined):
-    # H3. An audit log whose actor is supplied by the party being audited is not
-    # an audit log. The actor comes from the authenticated session (Task 34).
-    with pytest.raises(TypeError):
-        promote(quarantined.run_key, actor="someone-else", reason="x", _from_body=True)
+    def spy(candidate, history, contexts, checks):
+        seen.append(dict(contexts))
+        return real(candidate, history, contexts, checks)
 
-def test_promotion_still_fails_if_a_check_still_fails(quarantined_with_format_failure):
+    monkeypatch.setattr(quarantine_mod, "gate_run", spy)
+    reconfirm(RUN_KEY, first_heal_inputs())
+    assert len(seen) == 1 and all(c.human_confirmed for c in seen[0].values())
+
+
+@pytest.mark.unit
+def test_promotion_supplies_the_missing_evidence():
+    v = reconfirm(RUN_KEY, first_heal_inputs())
+    assert isinstance(v, ValidatedExtraction) and v.run_key == RUN_KEY
+
+
+@pytest.mark.unit
+def test_promotion_still_fails_if_a_check_still_fails():
+    with pytest.raises(StillInvalid) as exc:
+        reconfirm(RUN_KEY, first_heal_inputs("12345678"))
+    assert [v.check for v in exc.value.failing] == ["FormatAssertion"]
+    assert {v.check for v in exc.value.verdicts} == {"FormatAssertion", "FirstHealConfirmation"}
+
+
+@pytest.mark.unit
+def test_confirmation_tolerates_warm_up_but_not_a_shifted_distribution():
+    # Warm-up is missing evidence (INSUFFICIENT); a breach is evidence against (FAIL).
+    checks = {"amount": [DistributionalAssertion(warmup_runs=5)]}
+    contexts = {"amount": ctx(AMOUNT, rung=4)}
+    warm = GateInputs(candidate=column("amount", ["1,200.00"]), history=None,
+                      contexts=contexts, checks=checks)
+    assert isinstance(reconfirm(RUN_KEY, warm), ValidatedExtraction)
+    shifted = GateInputs(candidate=SHIFTED, history=amount_history(40), contexts=contexts,
+                         checks=checks)
     with pytest.raises(StillInvalid):
-        promote(quarantined_with_format_failure.run_key, actor="me", reason="looks fine")
+        reconfirm(RUN_KEY, shifted)
 
-def test_promotion_is_audited(quarantined):
-    promote(quarantined.run_key, actor="me", reason="confirmed")
-    row = latest_audit()
-    assert row.actor == "me" and row.action == "promote" and row.detail["reason"] == "confirmed"
 
-def test_discard_is_audited_and_writes_nothing(quarantined):
-    discard(quarantined.run_key, actor="me", reason="wrong column")
-    assert latest_audit().action == "discard"
-    assert rows_written_for(quarantined.run_key) == 0
+@pytest.mark.unit
+def test_still_invalid_carries_every_verdict():
+    """So the API's 409 can say which checks still fail (API spec 5)."""
+    verdicts = [Verdict(check="A", outcome=Outcome.FAIL, threshold="x", observed="y", reason="r"),
+                Verdict(check="B", outcome=Outcome.PASS, threshold=None, observed=None,
+                        reason="r")]
+    exc = StillInvalid(verdicts)
+    assert exc.verdicts == verdicts and "1 check" in str(exc)
+
+
+@pytest.mark.unit
+def test_inputs_rebuilt_for_another_run_are_refused():
+    with pytest.raises(ValueError, match="another run"):
+        reconfirm("testbench:2:2026-09-01", first_heal_inputs())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("actor", "reason"), [("", "ok"), (ACTOR, ""), (ACTOR, "   "),
+                                               (ACTOR, "x" * 501)])
+def test_a_decision_needs_an_actor_and_a_bounded_reason(actor, reason):
+    with pytest.raises(ValueError):
+        promote(RUN_KEY, actor=actor, reason=reason, rebuild=lambda k: first_heal_inputs())
+
+
+# ---- the audited half: promote and discard ---------------------------------------------------
+
+@pytest.fixture
+def quarantined():
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE runs, quarantine, audit_log RESTART IDENTITY CASCADE"))
+    with Session() as s:
+        s.add(Run(run_key=RUN_KEY, target="testbench", spec_version=2,
+                  window=dt.date(2026, 10, 1), first_started_at=AT, state="quarantined"))
+        s.flush()
+        s.add(Quarantine(run_key=RUN_KEY, reason="gate failed: claim_number:FirstHealConfirmation",
+                         verdicts=[], data_uri="", resolved_as=None, actor=None,
+                         resolved_at=None))
+        s.commit()
+    return RUN_KEY
+
+
+def _audits():
+    with Session() as s:
+        return list(s.scalars(select(AuditLog).order_by(AuditLog.id)))
+
+
+def _row(run_key):
+    with Session() as s:
+        return s.get(Quarantine, run_key)
+
+
+@pytest.mark.integration
+def test_promotion_is_audited_and_resolves_the_row(quarantined):
+    v = promote(quarantined, actor=ACTOR, reason="checked the screenshots",
+                rebuild=lambda k: first_heal_inputs())
+    assert isinstance(v, ValidatedExtraction)
+    (row,) = _audits()
+    assert (row.actor, row.action, row.subject) == (ACTOR, "promote", RUN_KEY)
+    assert row.detail["reason"] == "checked the screenshots"
+    assert _row(quarantined).resolved_as == "promoted" and _row(quarantined).actor == ACTOR
+
+
+@pytest.mark.integration
+def test_a_refused_promotion_is_audited_and_leaves_the_row_open(quarantined):
+    with pytest.raises(StillInvalid):
+        promote(quarantined, actor=ACTOR, reason="looks fine",
+                rebuild=lambda k: first_heal_inputs("12345678"))
+    (row,) = _audits()
+    assert row.action == "promote_refused" and row.subject == RUN_KEY
+    assert [f["check"] for f in row.detail["failing"]] == ["FormatAssertion"]
+    assert _row(quarantined).resolved_as is None
+
+
+@pytest.mark.integration
+def test_discard_is_audited_and_resolves_the_row(quarantined):
+    discard(quarantined, actor=ACTOR, reason="wrong column")
+    (row,) = _audits()
+    assert (row.action, row.subject, row.detail["reason"]) == ("discard", RUN_KEY,
+                                                               "wrong column")
+    assert _row(quarantined).resolved_as == "discarded"
+
+
+@pytest.mark.integration
+def test_a_resolved_run_cannot_be_decided_twice(quarantined):
+    discard(quarantined, actor=ACTOR, reason="wrong column")
+    with pytest.raises(AlreadyResolved):
+        promote(quarantined, actor=ACTOR, reason="changed my mind",
+                rebuild=lambda k: first_heal_inputs())
+    with pytest.raises(AlreadyResolved):
+        discard(quarantined, actor=ACTOR, reason="again")
+
+
+@pytest.mark.integration
+def test_a_run_that_is_not_in_quarantine_is_refused(quarantined):
+    with pytest.raises(NotInQuarantine):
+        discard("testbench:2:1999-01-01", actor=ACTOR, reason="x")
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [ ] **Step 3: Run them and watch them fail**
 
-Run: `uv run pytest tests/validate/test_quarantine.py -v`
-Expected: FAIL.
+Run: `uv run pytest tests/validate/test_checks.py tests/validate/test_quarantine.py -v -m "unit or integration"`
+Expected: FAIL — `ModuleNotFoundError: No module named 'selector_drift.validate.checks'` and
+`ImportError: cannot import name 'AlreadyResolved' from 'selector_drift.validate.quarantine'`.
 
-- [ ] **Step 3: Implement quarantine, promote and discard.**
-
-- [ ] **Step 4: Run them and make sure they pass**
-
-Run: `uv run pytest tests/validate -v`
-Expected: PASS, 5 new tests.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add selector_drift/validate/quarantine.py tests/validate/test_quarantine.py
-git commit -m "feat(validate): quarantine with audited promotion that re-runs the gate"
-```
-
-**Amended 2026-09-26 — four things later tasks rely on.**
-
-1. **`checks_for(spec, field, confirmers, *, warmup_runs) -> list[Assertion]`** in
-   `selector_drift/validate/checks.py`. Nothing turned a field's declared `AssertionSpec`s into the
-   check objects the gate runs; Task 26A's diagram called `gate(candidate, history, ctx)` with no
-   checks at all. The confirming rungs are **injected** by `orchestrate/`, so `validate/` still sees
-   only the `Rung` protocol:
-
-   ```python
-   # selector_drift/validate/checks.py
-   from __future__ import annotations
-
-   from collections.abc import Sequence
-
-   from selector_drift.resolve.trace import Rung                 # the protocol, not a rung
-   from selector_drift.spec.schema import FieldTarget, SpecError, TaskSpec
-   from selector_drift.validate.assertions.base import Assertion
-   from selector_drift.validate.assertions.cross_field import CrossFieldAssertion
-   from selector_drift.validate.assertions.distribution import DistributionalAssertion
-   from selector_drift.validate.assertions.domain import DomainAssertion
-   from selector_drift.validate.assertions.first_heal import FirstHealConfirmation
-   from selector_drift.validate.assertions.format import FormatAssertion
-   from selector_drift.validate.assertions.independence import (IndependentRungAgreement,
-                                                                  RowKeyContinuity)
-
-
-   def checks_for(spec: TaskSpec, field: FieldTarget, confirmers: Sequence[Rung], *,
-                  warmup_runs: int) -> list[Assertion]:
-       out: list[Assertion] = []
-       for a in field.assertions:
-           match a.type:
-               case "format":
-                   out.append(FormatAssertion(a.pattern))
-               case "domain":
-                   out.append(DomainAssertion(a.rule))
-               case "cross_field":
-                   out.append(CrossFieldAssertion(a.expression))
-               case other:
-                   raise SpecError(f"unknown assertion type {other!r} on {field.name}")
-       out.append(IndependentRungAgreement(list(confirmers)))
-       out.append(RowKeyContinuity())
-       if field.distributional:
-           out.append(DistributionalAssertion(warmup_runs=warmup_runs))
-       out.append(FirstHealConfirmation())
-       return out
-   ```
-
-   **Import note:** `Rung` is imported from `resolve.trace` (Task 13 amendment), so the
-   `judge-reaches-rungs-only-by-protocol` contract holds with no exception — the same move Task 22's
-   `independence.py` needs, and the one the contract's name always implied. `warmup_runs` comes from the `AuthorisedTarget` (Task 2), never
-   from config — the same rule as `first_heal_policy`. An unknown assertion type is a refusal, not a
-   skip: a check that silently does not run is the green tick `00` §7 calls a lie.
-2. **`StillInvalid(verdicts: list[Verdict])`** carries the failing verdicts; the API returns them in its
-   `409 still-invalid` (API spec §5).
-3. **`promote()` does not land data.** It re-runs the gate and returns the `ValidatedExtraction`;
-   landing, the cache write and the last-accepted snapshot happen in `orchestrate` (`accept_promoted`,
-   Task 26A), reached from the API through the injected `QuarantineActions` (Task 34). `validate/`
-   stays free of `land/`.
-4. **Audit rows use `subject=run_key`** for `promote` and `discard`; `derive.py` and the quarantine
-   history view join on it.
-
-Add to `tests/validate/test_quarantine.py`:
+- [ ] **Step 4: Implement `checks_for`, quarantine, promote and discard**
 
 ```python
-@pytest.mark.unit
-def test_an_unknown_assertion_type_is_refused_not_skipped():
-    field = FieldTarget(name="x", description="x", relation=None,
-                        assertions=[AssertionSpec(type="vibes")])
-    with pytest.raises(SpecError):
-        checks_for(SPEC, field, [], warmup_runs=5)
+# selector_drift/validate/checks.py
+"""A field's declared assertions -> the check objects the gate runs. Confirming rungs are
+injected by orchestrate/, so validate/ sees only the Rung protocol."""
+from __future__ import annotations
 
-@pytest.mark.unit
-def test_every_field_gets_the_value_family_confirmer():
-    names = [c.name for c in checks_for(SPEC, SPEC.targets[0], [], warmup_runs=5)]
-    assert "RowKeyContinuity" in names and "IndependentRungAgreement" in names
+from collections.abc import Sequence
+
+from selector_drift.resolve.trace import Rung                 # the protocol, not a rung
+from selector_drift.scope.record import FirstHealPolicy
+from selector_drift.spec.schema import FieldTarget, SpecError, TaskSpec
+from selector_drift.validate.assertions.base import Assertion
+from selector_drift.validate.assertions.cross_field import CrossFieldAssertion
+from selector_drift.validate.assertions.distribution import DistributionalAssertion
+from selector_drift.validate.assertions.domain import DomainAssertion
+from selector_drift.validate.assertions.first_heal import FirstHealConfirmation
+from selector_drift.validate.assertions.format import FormatAssertion
+from selector_drift.validate.assertions.independence import (IndependentRungAgreement,
+                                                             RowKeyContinuity)
+
+
+def checks_for(spec: TaskSpec, field: FieldTarget, confirmers: Sequence[Rung], *,
+               warmup_runs: int, first_heal_policy: FirstHealPolicy) -> list[Assertion]:
+    extracted = {t.name for t in spec.targets}
+    out: list[Assertion] = []
+    for a in field.assertions:
+        match a.type:
+            case "format":
+                if a.pattern is None:
+                    raise SpecError(f"format assertion on {field.name} needs a pattern")
+                out.append(FormatAssertion(a.pattern))
+            case "domain":
+                if a.rule is None:
+                    raise SpecError(f"domain assertion on {field.name} needs a rule")
+                out.append(DomainAssertion(a.rule))
+            case "cross_field":
+                if a.expression is None:
+                    raise SpecError(f"cross_field assertion on {field.name} needs an expression")
+                cf = CrossFieldAssertion(a.expression)          # UnsafeExpression is a SpecError
+                unknown = cf.names - extracted
+                if unknown:
+                    raise SpecError(f"cross_field on {field.name} names fields the spec does "
+                                    f"not extract: {sorted(unknown)}")
+                out.append(cf)
+            case other:
+                raise SpecError(f"unknown assertion type {other!r} on {field.name}")
+    out.append(IndependentRungAgreement(list(confirmers)))
+    out.append(RowKeyContinuity())
+    if field.distributional:
+        out.append(DistributionalAssertion(warmup_runs=warmup_runs))
+    out.append(FirstHealConfirmation(first_heal_policy))
+    return out
+```
+
+```python
+# selector_drift/validate/quarantine.py
+"""Quarantine keeps the run; a human promotes or discards it, audited (design 5.9).
+Promotion RE-RUNS the gate with human_confirmed=True: it supplies missing evidence and never
+skips a check. This module never lands data -- orchestrate.accept_promoted does (Task 26A)."""
+from __future__ import annotations
+
+import dataclasses
+import datetime as dt
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Final
+
+from sqlalchemy.orm import Session as OrmSession
+
+from selector_drift.db.models import AuditLog, Quarantine
+from selector_drift.db.session import Session
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.validate.assertions.base import Assertion
+from selector_drift.validate.gate import (HealContext, QuarantinedRun, ValidatedExtraction,
+                                          gate_run)
+from selector_drift.validate.history import History
+from selector_drift.validate.verdict import Outcome, Verdict
+
+__all__ = ["AlreadyResolved", "GateInputs", "NotInQuarantine", "QuarantinedRun", "Rebuild",
+           "StillInvalid", "discard", "promote", "reconfirm"]
+
+REASON_MAX: Final = 500                      # API spec 4.1: DecisionRequest.reason is 1-500
+
+
+class StillInvalid(Exception):
+    """A re-run gate still fails. Carries EVERY verdict so the caller can show which."""
+
+    def __init__(self, verdicts: list[Verdict]) -> None:
+        self.verdicts = verdicts
+        self.failing = [v for v in verdicts if v.outcome is Outcome.FAIL]
+        super().__init__(f"{len(self.failing)} check(s) still fail after human confirmation")
+
+
+class NotInQuarantine(LookupError):
+    pass
+
+
+class AlreadyResolved(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class GateInputs:
+    candidate: CandidateExtraction
+    history: History | None
+    contexts: Mapping[str, HealContext]
+    checks: Mapping[str, Sequence[Assertion]]
+
+
+Rebuild = Callable[[str], GateInputs]            # orchestrate supplies it (Task 26A)
+SessionFactory = Callable[[], OrmSession]
+
+
+def reconfirm(run_key: str, inputs: GateInputs) -> ValidatedExtraction:
+    if inputs.candidate.run_key != run_key:
+        raise ValueError(f"inputs were rebuilt for another run ({inputs.candidate.run_key})")
+    confirmed = {name: dataclasses.replace(c, human_confirmed=True)
+                 for name, c in inputs.contexts.items()}
+    result = gate_run(inputs.candidate, inputs.history, confirmed, inputs.checks)
+    if isinstance(result, QuarantinedRun):
+        raise StillInvalid(list(result.verdicts))
+    return result
+
+
+def _decision(actor: str, reason: str) -> tuple[str, str]:
+    actor, reason = actor.strip(), reason.strip()
+    if not actor:
+        raise ValueError("a decision needs an actor")
+    if not reason or len(reason) > REASON_MAX:
+        raise ValueError(f"a decision needs a reason of 1-{REASON_MAX} characters")
+    return actor, reason
+
+
+def _open(s: OrmSession, run_key: str) -> Quarantine:
+    q = s.get(Quarantine, run_key)
+    if q is None:
+        raise NotInQuarantine(f"{run_key} is not in quarantine")
+    if q.resolved_as is not None:
+        raise AlreadyResolved(f"{run_key} was already {q.resolved_as}")
+    return q
+
+
+def _dump(verdicts: Sequence[Verdict]) -> list[dict[str, object]]:
+    return [v.model_dump(mode="json") for v in verdicts]
+
+
+def promote(run_key: str, *, actor: str, reason: str, rebuild: Rebuild,
+            session_factory: SessionFactory = Session) -> ValidatedExtraction:
+    actor, reason = _decision(actor, reason)
+    with session_factory() as s:
+        _open(s, run_key)                                   # refuse before any work
+    try:
+        validated = reconfirm(run_key, rebuild(run_key))
+    except StillInvalid as exc:
+        with session_factory() as s:
+            s.add(AuditLog(at=dt.datetime.now(dt.UTC), actor=actor, action="promote_refused",
+                           subject=run_key,
+                           detail={"reason": reason, "failing": _dump(exc.failing)}))
+            s.commit()
+        raise
+    now = dt.datetime.now(dt.UTC)
+    with session_factory() as s:
+        q = _open(s, run_key)                               # a concurrent decision wins first
+        q.resolved_as, q.actor, q.resolved_at = "promoted", actor, now
+        s.add(AuditLog(at=now, actor=actor, action="promote", subject=run_key,
+                       detail={"reason": reason, "verdicts": _dump(validated.verdicts)}))
+        s.commit()
+    return validated
+
+
+def discard(run_key: str, *, actor: str, reason: str,
+            session_factory: SessionFactory = Session) -> None:
+    actor, reason = _decision(actor, reason)
+    now = dt.datetime.now(dt.UTC)
+    with session_factory() as s:
+        q = _open(s, run_key)
+        q.resolved_as, q.actor, q.resolved_at = "discarded", actor, now
+        s.add(AuditLog(at=now, actor=actor, action="discard", subject=run_key,
+                       detail={"reason": reason}))
+        s.commit()
+```
+
+- [ ] **Step 5: Run the tests and the contracts**
+
+Run: `uv run pytest tests/validate -v -m "unit or integration" && uv run mypy --strict selector_drift/validate && uv run lint-imports`
+Expected: PASS — 10 new in `test_checks.py`, 16 new in `test_quarantine.py` (counting
+parametrisations: 11 `unit`, 5 `integration`, which need Postgres up). `validate-cannot-land`,
+`judge-reaches-rungs-only-by-protocol` and `judged-cannot-call-judge` kept.
+
+- [ ] **Step 6: Run the fast check** (Global Constraints) — every tier-`unit` test in the repo green,
+coverage ≥ 75%.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add .importlinter selector_drift/validate/checks.py selector_drift/validate/quarantine.py tests/validate/test_checks.py tests/validate/test_quarantine.py
+git commit -m "feat(validate): checks_for, audited promote/discard; promotion re-runs gate_run"
 ```
 
 ---
@@ -7285,91 +18028,865 @@ git commit -m "test: mutation heal suite and adversarial refusal suite"
 ### Task 28: The landing zone, idempotent under replay
 
 **Files:**
-- Create: `selector_drift/land/writer.py`, `selector_drift/land/catalog.py`, `selector_drift/land/compact.py`
-- Test: `tests/land/test_idempotency.py`
+- Create: `selector_drift/config.py` — **moved forward from Task 33 Step 3, verbatim.** This task is its first consumer in execution order (Task 26A Part 1, Task 31's registry and Task 26A's `history.py` all import `get_settings`). Task 33 then skips its Step 3 and its "`ModuleNotFoundError: selector_drift.config`" expectation.
+- Create: `selector_drift/land/layout.py`, `selector_drift/land/writer.py`, `selector_drift/land/catalog.py`, `selector_drift/land/compact.py`
+- Modify: `pyproject.toml` (one dependency, one mypy override), `.env.example`
+- Test: `tests/land/__init__.py` (empty), `tests/land/factory.py`, `tests/land/conftest.py`, `tests/land/test_idempotency.py`, `tests/land/test_compaction.py`
 
 **Interfaces:**
-- Consumes: `ValidatedExtraction` (Task 20), `run_key` (Task 6).
+- Consumes: `ValidatedExtraction`, `gate`, `HealContext` (Task 20); `CandidateExtraction` (Task 27); `Claim`, `DomSource`, `Method` (`bok_core.provenance`); `load_spec`, `TaskSpec.natural_key` (Task 5); `run_key` format (Task 6).
 - Produces:
-  - `write(validated: ValidatedExtraction) -> Path` — **accepts no other type**; one Parquet file per **attempt**, named `{fs_key(run_key)}-{attempt}-{ulid}.parquet` where `fs_key(k) = k.replace(":", "_")` (a `run_key` carries two colons, illegal in Windows file names — found 2026-09-26), into `lake/target=<t>/window=<w>/`. Every row carries `run_key` and `ingested_at` columns
-  - `query(sql: str)` — DuckDB over the partitioned tree, **never a shared file written by parallel flows**. The `lake` view deduplicates on `spec.natural_key`, keeping the row with the greatest `ingested_at`
-  - `compact(target: str) -> None` — writes to a sibling directory and **swaps atomically**; triggered when a partition exceeds `COMPACT_AFTER_FILES` (default 24)
+  - `land.layout`: `fs_key(run_key: str) -> str` (`run_key.replace(":", "_")`), `split_run_key(run_key: str) -> tuple[str, int, str]`, `check_target(target: str) -> str`, `partition_dir(root: Path, target: str, window: str) -> Path`, `parse_file_name(name: str) -> tuple[str, int, str]`, `is_data_column(name: str) -> bool`, and the column names `RUN_KEY_COL = "run_key"`, `INGESTED_AT_COL = "ingested_at"`, `NATURAL_KEY_COL = "_sd_natural_key"`, `WRITE_ID_COL = "_sd_write_id"`, `PROVENANCE_COL = "_sd_provenance"`
+  - `land.writer`: `write(validated: ValidatedExtraction, *, attempt: int | None = None) -> Path` — **accepts no other type**; writes `lake/target=<t>/window=<w>/{fs_key(run_key)}-{attempt}-{ulid}.parquet`, every row carrying `run_key` and `ingested_at`; `fs_key` re-exported (Task 26A's `history.py` imports it from here); `COMPACT_AFTER_FILES = 24`
+  - `land.catalog`: `query(sql: str, params: Sequence[object] = (), *, target: str | None = None) -> QueryResult` over two in-memory views, `lake_raw` (every row ever written) and `lake` (deduplicated on `(target, window, natural key)`, greatest `ingested_at` wins); `QueryResult(columns, rows)` with `fetchone()`, `fetchall()`, `dicts()`; `lake_files(target: str | None = None) -> list[Path]`; `run_columns(run_key: str) -> list[str]`
+  - `land.compact`: `compact(target: str) -> None` — per `(partition, run_key)`, built in the sibling `lake/_staging/<ulid>/`, swapped in with one atomic rename, superseded files renamed aside into `lake/_retired/<ulid>/` and purged after `RETIRED_GRACE`
 
-**The first draft's two idempotency requirements could not both hold (M6).** Design §9.1 says
-*"a closed partition is never mutated in place"*, while Task 28's test writes the same
-`ValidatedExtraction` twice and requires the row count not to change — which, for *"one Parquet file
-per run"*, means overwriting that file, i.e. mutating in place.
+**The first draft's two idempotency requirements could not both hold (M6).** Design §9.1 says *"a
+closed partition is never mutated in place"*, while the first test wrote the same
+`ValidatedExtraction` twice and required the row count not to change — which, for *"one Parquet file
+per run"*, means overwriting that file. **Append-only files plus a dedup view satisfies both**, and it
+is what M13's `run_attempts` needs: a retry writes a *new* file rather than erasing the failed
+attempt's output, and the view hides the superseded rows. `natural_key` comes from the spec (Task 5,
+M5).
 
-**Append-only files plus a dedup view satisfies both**, and it is also what M13's `run_attempts`
-needs: a retry writes a *new* file rather than erasing the failed attempt's output, and the view hides
-the superseded rows. `natural_key` comes from the spec (Task 5, M5) — the phrase *"upsert on the
-natural key"* appeared in the first draft with no field anywhere defining one.
+**The dedup key is `(target, window, natural key)`, not the natural key alone.** A results table is a
+daily snapshot: `AB12345678` appears on 1 October and again on 2 October, and both rows are history.
+Deduplicating on the key alone would erase every day but the last — the distribution check (Task 29)
+and `history_for()` (Task 26A) would have nothing to compare against. Replays and retries collide
+*within* a window, which is exactly where the view deduplicates.
 
-`compact()` previously rewrote files under a live DuckDB glob with no atomicity and no trigger (L7,
-P4), so a concurrent reader could hit a file that had just vanished.
+**Compaction was unsafe and untriggered (L7, P4).** It rewrote files under a live DuckDB glob with no
+atomicity, so a concurrent reader could open a file that had just vanished, and nothing ever called it.
+Design §9.1 now says it *"writes to a sibling directory and swaps atomically"*. A whole-directory swap
+is two renames with an instant where the partition is empty, so this task swaps **per file**: the
+compacted file is built in `_staging/` and renamed into the partition (one atomic rename — the view now
+sees duplicates, which it already hides), then each superseded file is renamed aside into
+`_retired/` (never unlinked under a reader). **The view's row set is identical at every instant**, and
+Step 1 proves that by querying between every rename. A reader holding a listing taken before the swap
+gets `IOException` on a retired path and re-lists; `query()` retries, so the caller never sees it.
+Triggered by `write()` whenever a partition holds more than `COMPACT_AFTER_FILES` files.
+
+**Compaction folds one run's files, never two runs'.** A partition holds one `run_key` per spec
+version; folding across run keys would put two runs' columns in one file and break `history.py`,
+which finds a run's rows by the `{fs_key(run_key)}-*.parquet` prefix. The compacted file keeps that
+prefix, so Task 26A reads it unchanged.
+
+**Two metadata columns beyond the pinned pair, both prefixed `_sd_`.** `_sd_natural_key` (the JSON of
+the key values, materialised at write time so the view needs no spec) and `_sd_provenance` (each
+field's `Claim` minus its value), which is what lets Task 29 rebuild the `DomSource` parents of a
+quality finding from landed rows. `_sd_write_id` (the file's ULID) breaks `ingested_at` ties so the
+view is deterministic. Spec fields may not be named `run_key`, `ingested_at`, `target`, `window` or
+start with `_sd_`; `write()` refuses them.
+
+**A natural key that repeats inside one run is refused, loudly.** Dedup would silently collapse the
+two rows into one. The error names the row index, never the value — the value is client data and
+this message reaches `runs.error` and the logs (brief rule 6).
+
+- [ ] **Step 0: Dependencies, config, and the mypy override**
+
+```bash
+uv add python-ulid
+```
+
+`pyarrow`, `duckdb` and `numpy` are already declared by Task 1 Step 2. `pyarrow` ships no type
+information, so append to `pyproject.toml` (skip if Task 26A already added it):
+
+```toml
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
+```
+
+Create `selector_drift/config.py` with **exactly** the code in Task 33 Step 3 (`ConfigError`,
+`Settings`, `get_settings`), and append to `.env.example`:
+
+```bash
+SD_LAKE_ROOT=/data/lake
+SD_SPEC_DIR=specs
+SD_SCOPE_DIR=scopes
+```
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/land/test_idempotency.py
-import pytest
-from selector_drift.land.writer import write
-from selector_drift.land.catalog import query
+# tests/land/factory.py
+"""Builds real ValidatedExtractions through the real gate -- the lake refuses anything else, and a
+test that minted one by hand would be testing a door nobody else can use."""
+from __future__ import annotations
 
+import datetime as dt
+from pathlib import Path
+
+import pytest
+from bok_core.provenance import Claim, DomSource, Method
+
+from selector_drift.config import get_settings
+from selector_drift.extract.models import CandidateExtraction
+from selector_drift.spec.schema import FieldTarget
+from selector_drift.validate.gate import HealContext, ValidatedExtraction, gate
+from selector_drift.validate.verdict import Outcome, Verdict
+
+RUN_KEY = "testbench:2:2026-09-07"
+AT = dt.datetime(2026, 9, 7, 4, 12, tzinfo=dt.UTC)
+SNAPSHOT = "e5" * 32
+AMOUNTS = [100 + 7.5 * i for i in range(100)]
+
+SPEC_YAML = r"""version: 2
+scope_ref: scopes/testbench.yaml
+schedule: "12 4 * * *"
+row_scope: each row of the results table
+natural_key: [ claim_number ]
+expected_schema:
+  claim_number: string
+  amount: decimal
+navigate: []
+targets:
+  - name: claim_number
+    description: the claim number cell in the results table
+    assertions:
+      - { type: format, pattern: '^[A-Z]{2}\d{8}$' }
+  - name: amount
+    description: the claimed amount in the same row
+    distributional: true
+    assertions:
+      - { type: format, pattern: '^\d{1,3}(,\d{3})*\.\d{2}$' }
+"""
+
+SCOPE_YAML = """target: testbench
+basis: self-owned
+authorising_party: test
+authorised_on: 2026-01-01
+expires_on: 2027-12-31
+evidence_uri: null
+evidence_sha256: null
+origins: [ https://bench.example.invalid ]
+rate_limit: { requests: 1, per_seconds: 30 }
+user_agent_contact: https://example.invalid/contact
+first_heal_policy: auto_promote
+legal_review: self_drafted
+warmup_runs: 5
+"""
+
+
+def configure_lake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    specs, scopes = tmp_path / "specs", tmp_path / "scopes"
+    specs.mkdir(exist_ok=True)
+    scopes.mkdir(exist_ok=True)
+    (specs / "testbench.yaml").write_text(SPEC_YAML, encoding="utf-8")
+    (scopes / "testbench.yaml").write_text(SCOPE_YAML, encoding="utf-8")
+    monkeypatch.setenv("SD_LAKE_ROOT", str(tmp_path / "lake"))
+    monkeypatch.setenv("SD_SPEC_DIR", str(specs))
+    monkeypatch.setenv("SD_SCOPE_DIR", str(scopes))
+    get_settings.cache_clear()
+    return tmp_path / "lake"
+
+
+def rows(n: int = 100, *, scale: float = 1.0, blank_amounts: int = 0,
+         extra: dict[str, str] | None = None) -> list[dict[str, str]]:
+    out = []
+    for i in range(n):
+        r = {"claim_number": f"AB{10_000_000 + i:08d}",
+             "amount": "" if i < blank_amounts else f"{AMOUNTS[i % 100] * scale:,.2f}"}
+        out.append(r | (extra or {}))
+    return out
+
+
+def claim(value: str, field: str) -> Claim:
+    return Claim(value=value, method=Method.DETERMINISTIC, confidence=None, observed_at=AT,
+                 source=DomSource(snapshot_id=SNAPSHOT, selector=f"td.{field}", rung=1))
+
+
+def candidate(plain: list[dict[str, str]], run_key: str = RUN_KEY) -> CandidateExtraction:
+    return CandidateExtraction(rows=[{f: claim(v, f) for f, v in r.items()} for r in plain],
+                               trace={}, spec_version=int(run_key.split(":")[1]), run_key=run_key)
+
+
+class AlwaysPass:
+    name = "AlwaysPass"
+
+    def check(self, candidate: object, history: object, ctx: object) -> Verdict:
+        return Verdict(check=self.name, outcome=Outcome.PASS, threshold=None, observed=None,
+                       reason="test check")
+
+
+FIELD = FieldTarget(name="claim_number", description="the claim number cell", relation=None,
+                    assertions=[])
+
+
+def make_validated(plain: list[dict[str, str]], run_key: str = RUN_KEY) -> ValidatedExtraction:
+    ctx = HealContext(healed=False, winning_rung=1, page=None, target=FIELD, cache=None)
+    result = gate(candidate(plain, run_key), None, ctx, [AlwaysPass()])
+    assert isinstance(result, ValidatedExtraction)
+    return result
+
+
+def parquet_files(lake: Path) -> list[Path]:
+    return sorted(lake.glob("target=*/window=*/*.parquet"))
+```
+
+```python
+# tests/land/conftest.py
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+from selector_drift.config import get_settings
+from selector_drift.extract.models import CandidateExtraction
+from tests.land.factory import candidate as make_candidate
+from tests.land.factory import configure_lake, rows
+
+
+@pytest.fixture
+def lake_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    yield configure_lake(tmp_path, monkeypatch)
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def candidate() -> CandidateExtraction:
+    return make_candidate(rows(3))
+```
+
+```python
+# tests/land/test_idempotency.py
+import re
+import shutil
+
+import pyarrow.parquet as pq
+import pytest
+
+from selector_drift.land.catalog import query
+from selector_drift.land.compact import compact
+from selector_drift.land.writer import fs_key, write
+from tests.land.factory import RUN_KEY, make_validated, parquet_files, rows
+
+
+@pytest.mark.unit
 def test_write_rejects_an_unvalidated_candidate(candidate):
-    with pytest.raises(TypeError):
+    # The gate is the only way into the lake: a CandidateExtraction is refused before any I/O.
+    with pytest.raises(TypeError, match="ValidatedExtraction"):
         write(candidate)  # type: ignore[arg-type]
 
-def test_replaying_a_run_does_not_duplicate_rows(validated):
-    write(validated); write(validated)
-    assert query("select count(*) from lake").fetchone()[0] == len(validated.rows)
 
-def test_a_late_record_does_not_corrupt_a_closed_partition(validated, late_row, lake_dir):
-    write(validated); write(with_row(validated, late_row))
-    n = query("select count(*) from lake where window='2026-09-07'").fetchone()[0]
-    assert n == len(validated.rows) + 1
-    assert len(list(lake_dir.rglob("*.parquet"))) == 2   # appended, not overwritten (M6)
+@pytest.mark.unit
+def test_fs_key_removes_every_colon():
+    # A run_key carries two colons, illegal in Windows file names (found 2026-09-26).
+    assert fs_key("testbench:2:2026-09-07") == "testbench_2_2026-09-07"
 
-def test_a_retry_appends_a_file_and_the_view_hides_the_superseded_rows(validated, lake_dir):
-    write(validated); write(with_corrected_value(validated))
-    assert len(list(lake_dir.rglob("*.parquet"))) == 2
-    assert query("select count(*) from lake").fetchone()[0] == len(validated.rows)
-    assert query("select amount from lake limit 1").fetchone()[0] == CORRECTED
 
-def test_compaction_is_atomic_under_a_concurrent_reader(validated, lake_dir):
-    # L7. A reader must never glob a file that compaction has just unlinked.
-    with concurrent_reader() as r:
-        compact("testbench")
-    assert r.errors == []
+@pytest.mark.integration
+def test_each_write_is_one_named_file_carrying_run_key_and_ingested_at(lake_dir):
+    path = write(make_validated(rows(3)))
+    assert path.parent == lake_dir / "target=testbench" / "window=2026-09-07"
+    assert re.fullmatch(r"testbench_2_2026-09-07-1-[0-9A-HJKMNP-TV-Z]{26}\.parquet", path.name)
+    table = pq.ParquetFile(path).read()
+    assert {"run_key", "ingested_at"} <= set(table.column_names)
+    assert set(table.column("run_key").to_pylist()) == {RUN_KEY}
 
-def test_no_shared_duckdb_file_is_ever_created(lake_dir):
-    assert not list(lake_dir.rglob("*.duckdb"))
 
-def test_compaction_reduces_file_count_without_changing_row_count(validated, lake_dir):
-    for _ in range(5): write(with_new_window(validated))
-    before = query("select count(*) from lake").fetchone()[0]
+@pytest.mark.integration
+def test_a_second_write_of_the_same_run_is_attempt_two(lake_dir):
+    write(make_validated(rows(3)))
+    second = write(make_validated(rows(3)))
+    assert second.name.startswith(f"{fs_key(RUN_KEY)}-2-")
+
+
+@pytest.mark.integration
+def test_replaying_a_run_does_not_duplicate_rows(lake_dir):
+    v = make_validated(rows(3))
+    write(v)
+    write(v)
+    assert query("select count(*) from lake").fetchone()[0] == 3
+    assert query("select count(*) from lake_raw").fetchone()[0] == 6
+    assert len(parquet_files(lake_dir)) == 2              # appended, not overwritten (M6)
+
+
+@pytest.mark.integration
+def test_a_late_record_lands_in_its_partition_without_rewriting_it(lake_dir):
+    first = write(make_validated(rows(3)))
+    before = first.read_bytes()
+    late = {"claim_number": "ZZ99999999", "amount": "42.00"}
+    write(make_validated(rows(3) + [late]))
+    n = query('select count(*) from lake where "window" = ?', ["2026-09-07"]).fetchone()[0]
+    assert n == 4
+    assert first.read_bytes() == before                    # the closed file is untouched
+    assert len(parquet_files(lake_dir)) == 2
+
+
+@pytest.mark.integration
+def test_a_retry_appends_a_file_and_the_view_hides_the_superseded_rows(lake_dir):
+    # Fixed: the first draft read `select amount from lake limit 1`, which returns an arbitrary row.
+    original = rows(3)
+    corrected = [dict(r) for r in original]
+    corrected[0]["amount"] = "999.99"
+    write(make_validated(original))
+    write(make_validated(corrected))
+    assert len(parquet_files(lake_dir)) == 2
+    assert query("select count(*) from lake").fetchone()[0] == 3
+    got = query("select amount from lake where claim_number = ?",
+                [original[0]["claim_number"]]).fetchone()[0]
+    assert got == "999.99"
+
+
+@pytest.mark.integration
+def test_the_same_keys_on_two_days_are_two_days_of_history(lake_dir):
+    write(make_validated(rows(3), "testbench:2:2026-09-07"))
+    write(make_validated(rows(3), "testbench:2:2026-09-08"))
+    assert query("select count(*) from lake").fetchone()[0] == 6
+
+
+@pytest.mark.integration
+def test_a_natural_key_repeated_within_one_run_is_refused(lake_dir):
+    dup = rows(2)
+    dup[1]["claim_number"] = dup[0]["claim_number"]
+    with pytest.raises(ValueError, match="twice") as exc:
+        write(make_validated(dup))
+    assert dup[0]["claim_number"] not in str(exc.value)      # client data never in an error
+    assert parquet_files(lake_dir) == []
+
+
+@pytest.mark.integration
+def test_no_shared_duckdb_file_is_ever_created(lake_dir, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for _ in range(2):
+        write(make_validated(rows(3)))
+    query("select count(*) from lake")
     compact("testbench")
-    assert query("select count(*) from lake").fetchone()[0] == before
-    assert len(list(lake_dir.rglob("*.parquet"))) < 5
+    assert not [p for p in tmp_path.rglob("*") if p.suffix in {".duckdb", ".wal", ".db"}]
+
+
+@pytest.mark.integration
+def test_an_empty_lake_is_queryable(lake_dir):
+    assert query("select count(*) from lake").fetchone()[0] == 0
+
+
+@pytest.mark.integration
+def test_a_target_restricted_query_sees_only_that_target(lake_dir):
+    shutil.copy(lake_dir.parent / "specs" / "testbench.yaml",
+                lake_dir.parent / "specs" / "control-app.yaml")
+    write(make_validated(rows(3)))
+    write(make_validated(rows(2), "control-app:2:2026-09-07"))
+    assert query("select count(*) from lake", target="control-app").fetchone()[0] == 2
+    assert query("select count(*) from lake").fetchone()[0] == 5
+```
+
+```python
+# tests/land/test_compaction.py
+import threading
+
+import pytest
+
+from selector_drift.land import catalog
+from selector_drift.land import compact as compact_mod
+from selector_drift.land import writer
+from selector_drift.land.catalog import query
+from selector_drift.land.compact import compact
+from selector_drift.land.writer import fs_key, write
+from tests.land.factory import RUN_KEY, make_validated, parquet_files, rows
+
+VIEW = "select claim_number, amount, run_key, ingested_at from lake order by claim_number"
+
+
+def _writes(n: int) -> None:
+    for _ in range(n):
+        write(make_validated(rows(3)))
+
+
+@pytest.mark.integration
+def test_compaction_folds_a_runs_files_without_changing_the_view(lake_dir):
+    # Fixed: the first draft wrote five *windows* and expected fewer than five files. Windows are
+    # partitions; compaction cannot fold across them. Five attempts in one window is the real case.
+    _writes(5)
+    before = query(VIEW).fetchall()
+    compact("testbench")
+    assert len(parquet_files(lake_dir)) == 1
+    assert query(VIEW).fetchall() == before
+
+
+@pytest.mark.integration
+def test_every_intermediate_state_of_the_swap_shows_the_same_rows(lake_dir, monkeypatch):
+    # L7. Query between every rename compaction makes: the view never changes.
+    _writes(4)
+    real = compact_mod._move
+    seen: list[int] = []
+
+    def observed(src, dst):
+        real(src, dst)
+        seen.append(query("select count(*) from lake").fetchone()[0])
+
+    monkeypatch.setattr(compact_mod, "_move", observed)
+    compact("testbench")
+    assert len(seen) == 5                                  # one swap-in, four retirements
+    assert set(seen) == {3}
+
+
+@pytest.mark.integration
+def test_a_reader_holding_a_stale_listing_retries_instead_of_failing(lake_dir, monkeypatch):
+    _writes(3)
+    stale = catalog.lake_files()
+    compact("testbench")
+    real = catalog.lake_files
+    calls = {"n": 0}
+
+    def listing(target=None):
+        calls["n"] += 1
+        return stale if calls["n"] == 1 else real(target)
+
+    monkeypatch.setattr(catalog, "lake_files", listing)
+    assert query("select count(*) from lake").fetchone()[0] == 3
+    assert calls["n"] == 2
+
+
+@pytest.mark.integration
+def test_compaction_under_a_concurrent_reader_raises_nothing(lake_dir):
+    _writes(6)
+    errors: list[BaseException] = []
+    counts: set[int] = set()
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            try:
+                counts.add(query("select count(*) from lake").fetchone()[0])
+            except BaseException as exc:          # noqa: BLE001 -- the test records everything
+                errors.append(exc)
+
+    t = threading.Thread(target=reader)
+    t.start()
+    try:
+        compact("testbench")
+    finally:
+        stop.set()
+        t.join()
+    assert errors == []
+    assert counts <= {3}
+
+
+@pytest.mark.integration
+def test_superseded_files_are_renamed_aside_not_unlinked(lake_dir):
+    _writes(3)
+    originals = {p.name for p in parquet_files(lake_dir)}
+    compact("testbench")
+    assert {p.name for p in (lake_dir / "_retired").rglob("*.parquet")} == originals
+
+
+@pytest.mark.integration
+def test_a_partition_over_the_threshold_compacts_itself(lake_dir, monkeypatch):
+    # P4: compaction existed and nothing ever called it.
+    monkeypatch.setattr(writer, "COMPACT_AFTER_FILES", 3)
+    _writes(4)
+    assert len(parquet_files(lake_dir)) == 1
+    assert query("select count(*) from lake").fetchone()[0] == 3
+
+
+@pytest.mark.unit
+def test_the_default_threshold_is_twenty_four():
+    assert writer.COMPACT_AFTER_FILES == 24
+
+
+@pytest.mark.integration
+def test_history_still_finds_a_runs_rows_after_compaction(lake_dir):
+    # Task 26A's history.py globs {fs_key(run_key)}-*.parquet inside the partition.
+    _writes(3)
+    compact("testbench")
+    part = lake_dir / "target=testbench" / "window=2026-09-07"
+    assert len(list(part.glob(f"{fs_key(RUN_KEY)}-*.parquet"))) == 1
+
+
+@pytest.mark.integration
+def test_a_compaction_already_running_is_not_doubled(lake_dir):
+    _writes(3)
+    (lake_dir / ".compact-testbench.lock").write_text("", encoding="utf-8")
+    compact("testbench")
+    assert len(parquet_files(lake_dir)) == 3
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/land -v`
-Expected: FAIL.
+Run: `uv run pytest tests/land -v -m "unit or integration"`
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'selector_drift.land.writer'`
+(or `'selector_drift.config'` if Step 0's move was skipped).
 
-- [ ] **Step 3: Implement the writer, catalog and compaction** with upsert on the natural key.
+- [ ] **Step 3: Implement the layout, the writer, the catalog and compaction**
+
+```python
+# selector_drift/land/layout.py
+"""Names and paths of the lake, in one place (design 9.1)."""
+from __future__ import annotations
+
+import datetime as dt
+import re
+from pathlib import Path
+from typing import Final
+
+DATA_GLOB: Final = "target=*/window=*/*.parquet"
+RUN_KEY_COL: Final = "run_key"
+INGESTED_AT_COL: Final = "ingested_at"
+META_PREFIX: Final = "_sd_"
+NATURAL_KEY_COL: Final = "_sd_natural_key"
+WRITE_ID_COL: Final = "_sd_write_id"
+PROVENANCE_COL: Final = "_sd_provenance"
+RESERVED: Final = frozenset({RUN_KEY_COL, INGESTED_AT_COL, "target", "window"})
+STAGING_DIR: Final = "_staging"
+RETIRED_DIR: Final = "_retired"
+_TARGET = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def fs_key(run_key: str) -> str:
+    """':' is illegal in Windows file names, and a run_key carries two."""
+    return run_key.replace(":", "_")
+
+
+def check_target(target: str) -> str:
+    if not _TARGET.fullmatch(target):
+        raise ValueError(f"{target!r} is not a target name (lowercase, digits, '-')")
+    return target
+
+
+def split_run_key(run_key: str) -> tuple[str, int, str]:
+    parts = run_key.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"{run_key!r} is not <target>:<spec_version>:<window>")
+    target, version, window = parts
+    return check_target(target), int(version), dt.date.fromisoformat(window).isoformat()
+
+
+def partition_dir(root: Path, target: str, window: str) -> Path:
+    return (root / f"target={check_target(target)}"
+            / f"window={dt.date.fromisoformat(window).isoformat()}")
+
+
+def parse_file_name(name: str) -> tuple[str, int, str]:
+    """{fs_key}-{attempt}-{ulid}.parquet. fs_key contains dashes (the date); a ULID has none."""
+    key, attempt, ulid = name.removesuffix(".parquet").rsplit("-", 2)
+    return key, int(attempt), ulid
+
+
+def is_data_column(name: str) -> bool:
+    return name not in RESERVED and not name.startswith(META_PREFIX)
+```
+
+```python
+# selector_drift/land/writer.py
+"""The lake's only writer (design 9.1). Append-only: a replay, a retry and a late record each add
+a file; nothing already written is rewritten (M6). Accepts a ValidatedExtraction and nothing else --
+the gate is the only way in."""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+from ulid import ULID
+
+from selector_drift.config import get_settings
+from selector_drift.land import compact as _compact
+from selector_drift.land.layout import (INGESTED_AT_COL, META_PREFIX, NATURAL_KEY_COL,
+                                        PROVENANCE_COL, RESERVED, RUN_KEY_COL, WRITE_ID_COL,
+                                        partition_dir, split_run_key)
+from selector_drift.land.layout import fs_key as fs_key   # re-exported: orchestrate/history.py
+from selector_drift.spec.loader import load_spec
+from selector_drift.validate.gate import ValidatedExtraction
+
+COMPACT_AFTER_FILES = 24          # module global so a test can lower it (P4)
+_META = (RUN_KEY_COL, INGESTED_AT_COL, NATURAL_KEY_COL, WRITE_ID_COL, PROVENANCE_COL)
+
+
+def _natural_key(target: str) -> list[str]:
+    return list(load_spec(get_settings().spec_dir / f"{target}.yaml").natural_key)
+
+
+def _records(validated: ValidatedExtraction, key_fields: list[str]) -> list[dict[str, Any]]:
+    now = dt.datetime.now(dt.UTC)
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for i, row in enumerate(validated.rows):
+        clash = sorted(f for f in row if f in RESERVED or f.startswith(META_PREFIX))
+        if clash:
+            raise ValueError(f"field name(s) {clash} collide with the lake's metadata columns")
+        missing = [k for k in key_fields if k not in row]
+        if missing:
+            raise ValueError(f"row {i} lacks natural key field(s) {missing}")
+        values = {name: str(c.value) for name, c in row.items()}
+        key = json.dumps([values[k] for k in key_fields], ensure_ascii=False)
+        if key in seen:
+            raise ValueError(f"row {i}: a natural key occurs twice in one run -- a key that is "
+                             "not unique cannot deduplicate anything")
+        seen.add(key)
+        provenance = {name: c.model_dump(mode="json", exclude={"value"}) for name, c in row.items()}
+        out.append(values | {RUN_KEY_COL: validated.run_key, INGESTED_AT_COL: now,
+                             NATURAL_KEY_COL: key,
+                             PROVENANCE_COL: json.dumps(provenance, sort_keys=True)})
+    return out
+
+
+def _table(records: list[dict[str, Any]], write_id: str) -> pa.Table:
+    data_cols: list[str] = []
+    for r in records:
+        data_cols += [k for k in r if k not in _META and k not in data_cols]
+    schema = pa.schema(
+        [pa.field(c, pa.string()) for c in data_cols]
+        + [pa.field(RUN_KEY_COL, pa.string(), nullable=False),
+           pa.field(INGESTED_AT_COL, pa.timestamp("us", tz="UTC"), nullable=False),
+           pa.field(NATURAL_KEY_COL, pa.string()),
+           pa.field(WRITE_ID_COL, pa.string()),
+           pa.field(PROVENANCE_COL, pa.string())])
+    return pa.Table.from_pylist([r | {WRITE_ID_COL: write_id} for r in records], schema=schema)
+
+
+def write(validated: ValidatedExtraction, *, attempt: int | None = None) -> Path:
+    if not isinstance(validated, ValidatedExtraction):
+        raise TypeError("land.write accepts only a ValidatedExtraction, got "
+                        f"{type(validated).__name__} -- the gate is the only way into the lake")
+    target, _version, window = split_run_key(validated.run_key)
+    records = _records(validated, _natural_key(target))
+    part = partition_dir(get_settings().lake_root, target, window)
+    part.mkdir(parents=True, exist_ok=True)
+    n = attempt if attempt is not None else \
+        1 + sum(1 for _ in part.glob(f"{fs_key(validated.run_key)}-*.parquet"))
+    if n < 1:
+        raise ValueError("attempt numbers start at 1")
+    write_id = str(ULID())
+    final = part / f"{fs_key(validated.run_key)}-{n}-{write_id}.parquet"
+    tmp = part / f".{final.name}.tmp"                  # never matches *.parquet
+    pq.write_table(_table(records, write_id), tmp)
+    os.replace(tmp, final)                              # a reader sees all of it or none of it
+    if sum(1 for _ in part.glob("*.parquet")) > COMPACT_AFTER_FILES:
+        _compact.compact(target)
+    return final
+```
+
+```python
+# selector_drift/land/catalog.py
+"""DuckDB over the lake -- a query layer, never a store (design 9.1). Every call opens an
+in-memory database and closes it; no .duckdb file exists anywhere, so parallel flows never share
+a writer."""
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import duckdb
+import pyarrow.parquet as pq
+
+from selector_drift.config import get_settings
+from selector_drift.land.layout import (DATA_GLOB, INGESTED_AT_COL, NATURAL_KEY_COL,
+                                        PROVENANCE_COL, RUN_KEY_COL, WRITE_ID_COL, check_target,
+                                        fs_key, partition_dir, split_run_key)
+
+_ATTEMPTS = 5
+
+_EMPTY = (f'SELECT CAST(NULL AS VARCHAR) AS target, CAST(NULL AS VARCHAR) AS "window", '
+          f"CAST(NULL AS VARCHAR) AS {RUN_KEY_COL}, "
+          f"CAST(NULL AS TIMESTAMPTZ) AS {INGESTED_AT_COL}, "
+          f"CAST(NULL AS VARCHAR) AS {NATURAL_KEY_COL}, CAST(NULL AS VARCHAR) AS {WRITE_ID_COL}, "
+          f"CAST(NULL AS VARCHAR) AS {PROVENANCE_COL} WHERE false")
+
+_DEDUP = (f"SELECT * EXCLUDE (_sd_rank) FROM (SELECT *, row_number() OVER ("
+          f'PARTITION BY target, "window", {NATURAL_KEY_COL} '
+          f"ORDER BY {INGESTED_AT_COL} DESC, {WRITE_ID_COL} DESC) AS _sd_rank FROM lake_raw) "
+          f"WHERE _sd_rank = 1")
+
+
+@dataclass(frozen=True)
+class QueryResult:
+    columns: tuple[str, ...]
+    rows: list[tuple[Any, ...]]
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self.rows)
+
+    def dicts(self) -> list[dict[str, Any]]:
+        return [dict(zip(self.columns, r, strict=True)) for r in self.rows]
+
+
+def lake_files(target: str | None = None) -> list[Path]:
+    root = get_settings().lake_root
+    pattern = DATA_GLOB if target is None else f"target={check_target(target)}/window=*/*.parquet"
+    return sorted(root.glob(pattern))                  # _staging/ and _retired/ never match
+
+
+def _views(con: duckdb.DuckDBPyConnection, files: list[Path]) -> None:
+    if files:
+        listed = ", ".join("'" + p.as_posix().replace("'", "''") + "'" for p in files)
+        con.execute(f"CREATE VIEW lake_raw AS SELECT * FROM read_parquet([{listed}], "
+                    "hive_partitioning = true, union_by_name = true, "
+                    "hive_types_autocast = false)")
+    else:
+        con.execute(f"CREATE VIEW lake_raw AS {_EMPTY}")
+    con.execute(f"CREATE VIEW lake AS {_DEDUP}")
+
+
+def query(sql: str, params: Sequence[object] = (), *,
+          target: str | None = None) -> QueryResult:
+    """Runs `sql` against `lake` (deduplicated) and `lake_raw` (every row written). A file retired
+    by compaction between listing and reading raises IOException; the listing is retaken."""
+    last: duckdb.Error | None = None
+    for _ in range(_ATTEMPTS):
+        con = duckdb.connect(database=":memory:")
+        try:
+            con.execute("SET TimeZone = 'UTC'")
+            _views(con, lake_files(target))
+            cur = con.execute(sql, list(params))
+            columns = tuple(str(d[0]) for d in (cur.description or ()))
+            return QueryResult(columns=columns, rows=cur.fetchall())
+        except duckdb.IOException as exc:
+            last = exc
+        finally:
+            con.close()
+    assert last is not None
+    raise last
+
+
+def run_columns(run_key: str) -> list[str]:
+    """The columns this run's own files carry -- not the union across the target (Task 29)."""
+    target, _version, window = split_run_key(run_key)
+    names: list[str] = []
+    part = partition_dir(get_settings().lake_root, target, window)
+    for f in sorted(part.glob(f"{fs_key(run_key)}-*.parquet")):
+        names += [n for n in pq.read_schema(f).names if n not in names]
+    return names
+```
+
+```python
+# selector_drift/land/compact.py
+"""Compaction (design 9.1; L7, P4). Folds one run's files in a partition into one file. Built in
+a sibling directory, swapped in with one atomic rename, and the superseded files renamed aside --
+never unlinked -- so the lake view's rows are identical at every instant and a reader holding an
+old listing retries rather than fails."""
+from __future__ import annotations
+
+import datetime as dt
+import os
+import shutil
+import time
+from collections import defaultdict
+from pathlib import Path
+
+import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
+from ulid import ULID
+
+from selector_drift.config import get_settings
+from selector_drift.land.layout import (INGESTED_AT_COL, NATURAL_KEY_COL, RETIRED_DIR,
+                                        STAGING_DIR, WRITE_ID_COL, check_target, parse_file_name)
+
+RETIRED_GRACE = dt.timedelta(minutes=15)
+LOCK_STALE = dt.timedelta(hours=1)
+
+
+def _move(src: Path, dst: Path) -> None:
+    """os.replace is atomic on one filesystem. Windows refuses to rename a file a reader has
+    open; wait for the reader rather than fail the compaction."""
+    for i in range(20):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            time.sleep(0.05 * (i + 1))
+    os.replace(src, dst)
+
+
+def _acquire(lock: Path) -> bool:
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except FileExistsError:
+        try:
+            born = dt.datetime.fromtimestamp(lock.stat().st_mtime, dt.UTC)
+        except FileNotFoundError:
+            return _acquire(lock)                       # released while we looked
+        if dt.datetime.now(dt.UTC) - born < LOCK_STALE:
+            return False                                # another compaction is running
+        lock.unlink(missing_ok=True)                    # a crashed compaction's lock
+        return _acquire(lock)
+
+
+def _dedup(table: pa.Table) -> pa.Table:
+    con = duckdb.connect(database=":memory:")
+    try:
+        con.execute("SET TimeZone = 'UTC'")
+        con.register("t", table)
+        return con.execute(
+            f"SELECT * EXCLUDE (_sd_rank) FROM (SELECT *, row_number() OVER ("
+            f"PARTITION BY {NATURAL_KEY_COL} ORDER BY {INGESTED_AT_COL} DESC, "
+            f"{WRITE_ID_COL} DESC) AS _sd_rank FROM t) WHERE _sd_rank = 1 "
+            f"ORDER BY {INGESTED_AT_COL}, {WRITE_ID_COL}").fetch_arrow_table()
+    finally:
+        con.close()
+
+
+def _compact_partition(root: Path, part: Path, generation: str) -> None:
+    groups: dict[str, list[Path]] = defaultdict(list)
+    for f in sorted(part.glob("*.parquet")):
+        groups[parse_file_name(f.name)[0]].append(f)
+    for key, files in groups.items():
+        if len(files) < 2:
+            continue
+        attempt = max(parse_file_name(f.name)[1] for f in files)
+        folded = _dedup(pa.concat_tables([pq.ParquetFile(f).read() for f in files],
+                                         promote_options="default"))
+        staging = root / STAGING_DIR / generation
+        staging.mkdir(parents=True, exist_ok=True)
+        name = f"{key}-{attempt}-{ULID()}.parquet"
+        pq.write_table(folded, staging / name)
+        _move(staging / name, part / name)              # swap in: one atomic rename
+        retired = root / RETIRED_DIR / generation / part.relative_to(root)
+        retired.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            _move(f, retired / f.name)                  # swap out: renamed aside, not unlinked
+
+
+def _purge_retired(root: Path) -> None:
+    now = dt.datetime.now(dt.UTC)
+    for gen in (root / RETIRED_DIR).glob("*"):
+        try:
+            born = ULID.from_str(gen.name).datetime
+        except ValueError:
+            continue
+        if now - born > RETIRED_GRACE:
+            shutil.rmtree(gen, ignore_errors=True)
+
+
+def compact(target: str) -> None:
+    root = get_settings().lake_root
+    lock = root / f".compact-{check_target(target)}.lock"
+    if not _acquire(lock):
+        return
+    try:
+        generation = str(ULID())
+        for part in sorted((root / f"target={target}").glob("window=*")):
+            _compact_partition(root, part, generation)
+        shutil.rmtree(root / STAGING_DIR / generation, ignore_errors=True)
+        _purge_retired(root)
+    finally:
+        lock.unlink(missing_ok=True)
+```
 
 - [ ] **Step 4: Run them and make sure they pass**
 
-Run: `uv run pytest tests/land -v`
-Expected: PASS, 5 tests.
+Run: `uv run pytest tests/land -v -m "unit or integration" && uv run mypy --strict selector_drift/land selector_drift/config.py && uv run lint-imports`
+Expected: PASS, 21 tests (12 in `test_idempotency.py`, 9 in `test_compaction.py`). mypy clean.
+`lint-imports` still reports every contract kept — `land` imports `validate` (for the type) and
+`spec`, never `resolve`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add selector_drift/land tests/land
-git commit -m "feat(land): idempotent Parquet lake with DuckDB query layer"
+git add selector_drift/config.py selector_drift/land tests/land pyproject.toml uv.lock .env.example
+git commit -m "feat(land): append-only Parquet lake, dedup view and atomic compaction (M6, L7, P4)"
 ```
 
 ---
@@ -7378,67 +18895,616 @@ git commit -m "feat(land): idempotent Parquet lake with DuckDB query layer"
 
 **Files:**
 - Create: `selector_drift/quality/contracts.py`
-- Test: `tests/quality/test_contracts.py`
+- Modify: `tests/test_bok_core_allowlist.py` (Task 1) — `ALLOWED` gains `"bok_core.findings"`
+- Test: `tests/quality/__init__.py` (empty), `tests/quality/conftest.py`, `tests/quality/test_contracts.py`
 
 **Interfaces:**
-- Consumes: `land.query` (Task 28), `bok_core.findings.Finding`, `Severity`.
-- Produces: `evaluate(run_key: str) -> list[Finding]` covering row count vs expectation, null rate, schema drift (against `spec.expected_schema`, Task 5/M4) and distribution shift.
+- Consumes: `query`, `run_columns` (Task 28); `split_run_key`, `is_data_column`, `PROVENANCE_COL` (Task 28 `land.layout`); `load_spec`, `load_scope` (Task 5); `FindingRow`, `AuditLog` (Task 3); `Finding`, `Severity`, `to_sarif` (`bok_core.findings`); `Claim`, `DomSource`, `Method` (`bok_core.provenance`); `get_settings` (Task 28 Step 0).
+- Produces:
+  - `evaluate(run_key: str) -> list[Finding]` — rules `row_count`, `null_rate`, `schema_drift` (against `spec.expected_schema`), `distribution_shift`; **persists every finding** to `findings` as `FindingRow(id=f"{finding.id}@{run_key}", run_key, severity, rule, payload=finding.model_dump(mode="json"), at)`, replacing that run's earlier rows, so re-evaluating a replayed run is idempotent
+  - `psi(reference: Sequence[str], observed: Sequence[str], *, bins: int = 10, epsilon: float = 1e-6) -> float`
+  - Thresholds, each with its reason as a module constant: `ROW_COUNT_RATIO = 0.5`, `NULL_RATE_FLOOR = 0.05`, `PSI_THRESHOLD = 0.20`, `PERSISTENCE = 2`, `REFERENCE_WINDOWS = 30`
 
 **Use the contract's real field names (H8/3, M7).** `INTERFACE-CONTRACT.md` §4 defines
 `Finding(id, severity, title, claim, taxonomy_refs, logical_location, partial_fingerprints,
 properties)`. There is no `rule` attribute and no `detail` attribute; the first draft's tests asserted
-on both. Rule name, threshold and threshold reason go in `properties`. **`claim` is required** — a
-quality finding is a derived assertion and must carry the `Claim` chain it came from, which is also
-what lets the UI open the provenance rail on it (M8).
+on both. Rule name, field, observed value, threshold and threshold reason go in `properties` — the
+keys the API's `finding_view()` (Task 34C) reads. **`claim` is required**: every finding's claim is a
+`DERIVED` `Claim` whose parents are the `DETERMINISTIC` `DomSource` claims of the cells it was
+computed from, rebuilt from the lake's `_sd_provenance` column (Task 28). That chain is what lets the
+UI open the provenance rail on a finding (M8), and it is what `to_sarif()` carries to an auditor. The
+derived claim's own `source` is its first parent's `DomSource` — the snapshot every parent came from
+— matching the fixture shape Task 36 seeds.
+
+**`evaluate()` persists (found 2026-09-26).** It returned `list[Finding]` and nothing stored them, so
+`GET /quality`, `RunDetailView.finding_count` and `history_for()`'s `shift_alerts` had no rows behind
+them. The findings table is written here, once, and nowhere else.
+
+**The quality check does not replace the gate's distributional check — it feeds it.** Task 23's
+`DistributionalAssertion` blocks a *heal* into a shifted distribution; this rule reports shift on
+*every* landed run, and `history_for()` reads these rows as `shift_alerts`, which is how the gate's
+persistence rule knows what happened yesterday. The statistic is the one Task 23 publishes (10
+quantile bins fixed from the reference window, epsilon on both proportions, threshold 0.20, trailing
+30 windows, warm-up from the scope record — M16, M18), so a heal-log line and a quality row about the
+same field cannot disagree.
+
+**Alerting must not cry wolf (B7).** A single-run breach is `MEDIUM` — stored, visible on the quality
+screen, never paged. It becomes `HIGH` (which Task 29A pages) only when the previous landed run
+breached on the same field too and the client did not mark that one expected. No shift finding at all
+until the target has `warmup_runs` windows of reference. No row-count finding until three windows of
+history exist; its baseline is the **median**, so one month-end spike does not move the bar.
+
+**No extracted value leaves in a property.** `schema_drift` reports column names and counts of
+non-conforming rows, never the offending values. Values live only in the claim chain, which stays in
+our database; Task 29A's webhook sends none of it (brief rule 6).
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
+# tests/quality/conftest.py
+import datetime as dt
+from collections.abc import Callable, Iterator
+from pathlib import Path
+
+import pytest
+from sqlalchemy import text
+
+from selector_drift.config import get_settings
+from selector_drift.db.models import Run
+from selector_drift.db.session import Session, engine
+from selector_drift.land.writer import write
+from tests.land.factory import configure_lake, make_validated
+
+BASE = dt.date(2026, 9, 1)
+Lander = Callable[[dt.date, list[dict[str, str]]], str]
+
+
+@pytest.fixture
+def land(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Lander]:
+    configure_lake(tmp_path, monkeypatch)
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE findings, audit_log, runs RESTART IDENTITY CASCADE"))
+
+    def _land(day: dt.date, plain: list[dict[str, str]]) -> str:
+        key = f"testbench:2:{day.isoformat()}"
+        with Session() as s:
+            s.merge(Run(run_key=key, target="testbench", spec_version=2, window=day,
+                        first_started_at=dt.datetime.combine(day, dt.time(4, 12), dt.UTC),
+                        state="completed", rows_written=len(plain)))
+            s.commit()
+        write(make_validated(plain, key))
+        return key
+
+    yield _land
+    get_settings.cache_clear()
+```
+
+```python
 # tests/quality/test_contracts.py
-from selector_drift.quality.contracts import evaluate
+import datetime as dt
+import math
 
-def test_row_count_shortfall_is_reported():
-    fs = evaluate(run_with_half_the_expected_rows())
-    assert any(f.properties["rule"] == "row_count" for f in fs)
+import pytest
+from bok_core.findings import Finding, Severity, to_sarif
+from bok_core.provenance import DomSource, Method
 
-def test_null_rate_spike_is_reported():
-    assert any(f.properties["rule"] == "null_rate" for f in evaluate(run_with_null_spike()))
+from selector_drift.db.models import AuditLog, FindingRow
+from selector_drift.db.session import Session
+from selector_drift.quality.contracts import PSI_THRESHOLD, evaluate, psi
+from tests.land.factory import SNAPSHOT, rows
+from tests.quality.conftest import BASE
 
-def test_schema_drift_is_reported_against_the_specs_expected_schema():
+DAY = BASE + dt.timedelta(days=6)
+
+
+def _history(land, n: int) -> None:
+    for i in range(n):
+        land(BASE + dt.timedelta(days=i), rows())
+
+
+def _rules(findings: list[Finding]) -> set[str]:
+    return {f.properties["rule"] for f in findings}
+
+
+@pytest.mark.integration
+def test_a_clean_run_produces_no_findings(land):
+    _history(land, 6)
+    assert evaluate(land(DAY, rows())) == []
+
+
+@pytest.mark.integration
+def test_row_count_shortfall_is_reported(land):
+    _history(land, 6)
+    f = next(f for f in evaluate(land(DAY, rows(40))) if f.properties["rule"] == "row_count")
+    assert f.severity is Severity.HIGH and f.properties["observed"] == "40"
+
+
+@pytest.mark.integration
+def test_row_count_waits_for_a_basis(land):
+    _history(land, 2)                          # fewer than three windows: no judgement yet
+    assert "row_count" not in _rules(evaluate(land(DAY, rows(10))))
+
+
+@pytest.mark.integration
+def test_null_rate_spike_is_reported(land):
+    _history(land, 6)
+    f = next(f for f in evaluate(land(DAY, rows(blank_amounts=50)))
+             if f.properties["rule"] == "null_rate")
+    assert f.properties["field"] == "amount" and f.properties["observed"] == "0.500"
+
+
+@pytest.mark.integration
+def test_schema_drift_is_reported_against_the_specs_expected_schema(land):
     # M4. The first draft tested schema drift against no baseline.
-    assert any(f.properties["rule"] == "schema_drift" for f in evaluate(run_with_new_column()))
+    _history(land, 6)
+    f = next(f for f in evaluate(land(DAY, rows(extra={"surprise": "x"})))
+             if f.properties["rule"] == "schema_drift")
+    assert f.properties["unexpected"] == ["surprise"] and f.properties["missing"] == []
 
-def test_every_finding_states_its_threshold_and_why():
-    for f in evaluate(run_with_half_the_expected_rows()):
+
+@pytest.mark.integration
+def test_a_missing_column_is_schema_drift(land):
+    _history(land, 6)
+    only_keys = [{"claim_number": r["claim_number"]} for r in rows()]
+    f = next(f for f in evaluate(land(DAY, only_keys)) if f.properties["rule"] == "schema_drift")
+    assert f.properties["missing"] == ["amount"]
+
+
+@pytest.mark.integration
+def test_a_mistyped_column_is_schema_drift_and_names_no_value(land):
+    _history(land, 6)
+    f = next(f for f in evaluate(land(DAY, rows(extra={"amount": "n/a"})))
+             if f.properties["rule"] == "schema_drift")
+    assert f.properties["mistyped"] == {"amount": 100}
+    assert "n/a" not in str(f.properties)                 # counts, never values
+
+
+@pytest.mark.integration
+def test_distribution_shift_is_detected_after_warm_up(land):
+    _history(land, 6)                                      # the fixture scope warms up in 5
+    f = next(f for f in evaluate(land(DAY, rows(scale=3.0)))
+             if f.properties["rule"] == "distribution_shift")
+    assert f.properties["field"] == "amount"
+    assert float(f.properties["observed"]) > PSI_THRESHOLD
+    assert f.severity is Severity.MEDIUM                   # one run is month-end, not an alert
+
+
+@pytest.mark.integration
+def test_no_distribution_judgement_during_warm_up(land):
+    _history(land, 3)
+    assert "distribution_shift" not in _rules(evaluate(land(DAY, rows(scale=3.0))))
+
+
+@pytest.mark.integration
+def test_a_shift_that_persists_escalates_to_high(land):
+    # B7: persistence before paging. Two consecutive runs breach -> HIGH -> Task 29A pages.
+    _history(land, 6)
+    evaluate(land(DAY, rows(scale=3.0)))
+    f = next(f for f in evaluate(land(DAY + dt.timedelta(days=1), rows(scale=3.0)))
+             if f.properties["rule"] == "distribution_shift")
+    assert f.severity is Severity.HIGH
+
+
+@pytest.mark.integration
+def test_a_shift_the_client_marked_expected_does_not_escalate(land):
+    _history(land, 6)
+    first = land(DAY, rows(scale=3.0))
+    evaluate(first)
+    with Session() as s:
+        s.add(AuditLog(at=dt.datetime.now(dt.UTC), actor="op1", action="marked_expected",
+                       subject=first, detail={"field": "amount"}))
+        s.commit()
+    f = next(f for f in evaluate(land(DAY + dt.timedelta(days=1), rows(scale=3.0)))
+             if f.properties["rule"] == "distribution_shift")
+    assert f.severity is Severity.MEDIUM
+
+
+@pytest.mark.integration
+def test_every_finding_states_its_threshold_and_why(land):
+    _history(land, 6)
+    fs = evaluate(land(DAY, rows(40, scale=3.0, blank_amounts=20, extra={"surprise": "x"})))
+    assert _rules(fs) == {"row_count", "null_rate", "schema_drift", "distribution_shift"}
+    for f in fs:
         assert f.properties["threshold"] and f.properties["threshold_reason"]
+        assert "observed" in f.properties and "field" in f.properties
 
-def test_every_finding_carries_the_claim_chain_it_was_derived_from():
-    # INTERFACE-CONTRACT section 4: `claim` is required. Invariant I1: a DERIVED
-    # claim's confidence may not exceed the minimum of its parents'.
-    for f in evaluate(run_with_half_the_expected_rows()):
+
+@pytest.mark.integration
+def test_every_finding_carries_the_claim_chain_it_was_derived_from(land):
+    # INTERFACE-CONTRACT 4: `claim` is required. I1: a DERIVED claim's confidence may not
+    # exceed its parents'; I3: DETERMINISTIC parents have none -- so neither does the finding.
+    _history(land, 6)
+    fs = evaluate(land(DAY, rows(40, scale=3.0, blank_amounts=20, extra={"surprise": "x"})))
+    assert fs
+    for f in fs:
         assert f.claim.method is Method.DERIVED and f.claim.parents
+        assert f.claim.confidence is None
+        for parent in f.claim.parents:
+            assert parent.method is Method.DETERMINISTIC and parent.confidence is None
+            assert isinstance(parent.source, DomSource)
+            assert parent.source.snapshot_id == SNAPSHOT
 
-def test_a_clean_run_produces_no_findings():
-    assert evaluate(clean_run()) == []
+
+@pytest.mark.integration
+def test_findings_are_persisted_with_the_pinned_row_shape(land):
+    _history(land, 6)
+    key = land(DAY, rows(40))
+    fs = evaluate(key)
+    with Session() as s:
+        stored = {r.id: r for r in s.query(FindingRow).filter_by(run_key=key)}
+    assert set(stored) == {f"{f.id}@{key}" for f in fs}
+    for f in fs:
+        row = stored[f"{f.id}@{key}"]
+        assert row.severity == f.severity.value and row.rule == f.properties["rule"]
+        assert Finding.model_validate(row.payload) == f
+
+
+@pytest.mark.integration
+def test_re_evaluating_a_replayed_run_replaces_its_findings(land):
+    _history(land, 6)
+    key = land(DAY, rows(40))
+    first = evaluate(key)
+    evaluate(key)
+    with Session() as s:
+        assert s.query(FindingRow).filter_by(run_key=key).count() == len(first)
+
+
+@pytest.mark.integration
+def test_findings_export_through_the_shared_sarif_emitter(land):
+    # Design 9.4: the shared ladder and the shared emitter, with the chain on every result.
+    _history(land, 6)
+    fs = evaluate(land(DAY, rows(40)))
+    sarif = to_sarif(fs, tool_name="selector-drift", tool_version="0.1.0")
+    results = sarif["runs"][0]["results"]
+    assert [r["properties"]["bok_severity"] for r in results] == [f.severity.value for f in fs]
+    assert all("bok_provenance" in r["properties"] for r in results)
+
+
+@pytest.mark.unit
+def test_psi_of_a_distribution_against_itself_is_zero():
+    values = [f"{100 + 7.5 * i:,.2f}" for i in range(100)]
+    assert psi(values * 6, values) == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.unit
+def test_psi_is_finite_when_a_bin_is_empty():
+    # M16: without epsilon, log(0) makes PSI infinite and every run a breach.
+    reference = [str(i) for i in range(100)]
+    assert math.isfinite(psi(reference, ["5000"] * 10))
+
+
+@pytest.mark.unit
+def test_psi_falls_back_to_category_proportions_for_text():
+    assert psi(["Open", "Paid"] * 50, ["Open", "Paid"] * 50) == pytest.approx(0.0, abs=1e-9)
+    assert psi(["Open", "Paid"] * 50, ["Closed"] * 100) > PSI_THRESHOLD
+```
+
+Add `"bok_core.findings"` to `ALLOWED` in `tests/test_bok_core_allowlist.py`:
+
+```python
+ALLOWED = {"bok_core.boundary.sensitivity", "bok_core.provenance", "bok_core.findings"}
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/quality -v`
-Expected: FAIL.
+Run: `uv run pytest tests/quality/test_contracts.py -v -m "unit or integration"`
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'selector_drift.quality.contracts'`.
 
-- [ ] **Step 3: Implement, reusing the shared severity ladder and the SARIF emitter.**
+- [ ] **Step 3: Implement the contracts**
+
+```python
+# selector_drift/quality/contracts.py
+"""Data-quality contracts over landed rows (design 9.4). Every finding is a bok-core Finding on
+the shared severity ladder; every one states its threshold and why; every one carries a DERIVED
+Claim whose parents are the DomSource claims it was computed from (INTERFACE-CONTRACT 4; H8/3,
+M7, M8). Findings are persisted here and nowhere else."""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import statistics
+from collections import Counter
+from collections.abc import Sequence
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from typing import Any, Final
+
+import numpy as np
+from bok_core.findings import Finding, Severity
+from bok_core.provenance import Claim, DomSource, Method
+from sqlalchemy import delete, select
+
+from selector_drift.config import get_settings
+from selector_drift.db.models import AuditLog, FindingRow
+from selector_drift.db.session import Session
+from selector_drift.land.catalog import query, run_columns
+from selector_drift.land.layout import PROVENANCE_COL, is_data_column, split_run_key
+from selector_drift.spec.loader import load_scope, load_spec
+from selector_drift.spec.schema import TaskSpec
+
+ROW_COUNT_RATIO: Final = 0.5
+ROW_COUNT_MIN_WINDOWS: Final = 3
+ROW_COUNT_REASON: Final = (
+    "fewer than half the trailing median means rows were lost -- a pagination change, a "
+    "virtualised table or a row scope that shrank -- not a quiet day; the median, not the mean, "
+    "so one month-end spike does not move the bar")
+NULL_RATE_FLOOR: Final = 0.05
+NULL_RATE_REASON: Final = (
+    "a field empty in more than 5% of rows, or in twice its trailing rate, usually means the "
+    "resolver landed on a cell that is sometimes blank; the floor stops a field that is never "
+    "empty from alerting on one blank")
+SCHEMA_REASON: Final = (
+    "the spec's expected_schema is the contract the client signed off; a column that appears, "
+    "disappears or changes type is how a UI change the resolver survived still changes what lands")
+PSI_THRESHOLD: Final = 0.20            # the same statistic as DistributionalAssertion (Task 23)
+PSI_BINS: Final = 10
+PSI_EPSILON: Final = 1e-6
+REFERENCE_WINDOWS: Final = 30
+PERSISTENCE: Final = 2
+PSI_REASON: Final = (
+    "PSI over 10 quantile bins fixed from the trailing 30 accepted windows, epsilon 1e-6 on both "
+    "proportions; 0.20 is the conventional 'significant shift' line. One breach is MEDIUM; two "
+    "consecutive unmarked breaches are HIGH, so month-end does not page anyone (B7)")
+MAX_PARENTS: Final = 50
+
+
+@dataclass(frozen=True)
+class _Run:
+    target: str
+    window: str
+    run_key: str
+    spec: TaskSpec
+    warmup_runs: int
+    rows: list[dict[str, Any]]
+    history: list[dict[str, Any]]           # trailing REFERENCE_WINDOWS windows, lake view
+
+
+# ------------------------------------------------------------------ the statistic
+
+
+def _numeric(values: Sequence[str]) -> list[float] | None:
+    out: list[float] = []
+    for v in values:
+        try:
+            d = Decimal(str(v).replace(",", ""))
+        except InvalidOperation:
+            return None
+        if not d.is_finite():
+            return None
+        out.append(float(d))
+    return out
+
+
+def psi(reference: Sequence[str], observed: Sequence[str], *, bins: int = PSI_BINS,
+        epsilon: float = PSI_EPSILON) -> float:
+    """Population stability index. Numeric: quantile bins fixed from the reference. Anything
+    that does not parse as a number: category proportions (Task 23's table, M16)."""
+    ref_n, obs_n = _numeric(reference), _numeric(observed)
+    if ref_n is not None and obs_n is not None:
+        edges = np.unique(np.quantile(np.asarray(ref_n), np.linspace(0.0, 1.0, bins + 1)))
+        inner = edges[1:-1]
+        size = len(inner) + 1
+        e = np.bincount(np.searchsorted(inner, ref_n, side="right"), minlength=size) / len(ref_n)
+        a = np.bincount(np.searchsorted(inner, obs_n, side="right"), minlength=size) / len(obs_n)
+    else:
+        ref_c, obs_c = Counter(map(str, reference)), Counter(map(str, observed))
+        cats = sorted(set(ref_c) | set(obs_c))
+        e = np.array([ref_c[c] for c in cats], dtype=float) / len(reference)
+        a = np.array([obs_c[c] for c in cats], dtype=float) / len(observed)
+    e, a = e + epsilon, a + epsilon
+    return float(np.sum((a - e) * np.log(a / e)))
+
+
+# ------------------------------------------------------------------ claims
+
+
+def _is_null(v: object) -> bool:
+    return v is None or str(v).strip() == ""
+
+
+def _claims(rows: Sequence[dict[str, Any]], field: str) -> list[Claim[Any]]:
+    out: list[Claim[Any]] = []
+    for r in rows:
+        prov = json.loads(r.get(PROVENANCE_COL) or "{}")
+        if field in prov:
+            out.append(Claim.model_validate(prov[field] | {"value": r.get(field)}))
+    return out
+
+
+def _derived(value: object, parents: list[Claim[Any]], spec: TaskSpec) -> Claim[Any]:
+    caveat: str | None = None
+    kept = parents[:MAX_PARENTS]
+    if len(parents) > MAX_PARENTS:
+        caveat = f"parents truncated to the first {MAX_PARENTS} of {len(parents)} cells"
+    if kept:
+        source = kept[0].source
+    else:
+        source = DomSource(snapshot_id="unavailable", selector=spec.row_scope, rung=0)
+        caveat = "no rows were landed, so there is no cell for the chain to point at"
+    return Claim(value=value, source=source, method=Method.DERIVED, confidence=None,
+                 observed_at=dt.datetime.now(dt.UTC), parents=kept, caveat=caveat)
+
+
+def _finding(run: _Run, *, rule: str, field: str | None, severity: Severity, title: str,
+             observed: str, threshold: str, reason: str, parents: list[Claim[Any]],
+             value: object, extra: dict[str, Any] | None = None) -> Finding:
+    where = field or "*"
+    return Finding(
+        id=f"quality/{rule}/{field or 'run'}", severity=severity, title=title,
+        claim=_derived(value, parents, run.spec),
+        taxonomy_refs=[f"selector-drift:quality:{rule}"],
+        logical_location=f"{run.target}/{where}",
+        partial_fingerprints={"selectorDrift/v1": hashlib.sha256(
+            f"{run.target}|{rule}|{where}".encode()).hexdigest()[:32]},
+        properties={"rule": rule, "field": field, "observed": observed, "threshold": threshold,
+                    "threshold_reason": reason, "run_key": run.run_key} | (extra or {}))
+
+
+# ------------------------------------------------------------------ the four rules
+
+
+def _row_count(run: _Run) -> list[Finding]:
+    counts = list(Counter(r["window"] for r in run.history).values())
+    if len(counts) < ROW_COUNT_MIN_WINDOWS:
+        return []
+    median = float(statistics.median(counts))
+    bar = ROW_COUNT_RATIO * median
+    if len(run.rows) >= bar:
+        return []
+    return [_finding(
+        run, rule="row_count", field=None,
+        severity=Severity.CRITICAL if not run.rows else Severity.HIGH,
+        title=f"Row count {len(run.rows)} is below half the trailing median ({median:g})",
+        observed=str(len(run.rows)), threshold=f">= {bar:g}", reason=ROW_COUNT_REASON,
+        parents=_claims(run.rows, run.spec.natural_key[0]), value=len(run.rows),
+        extra={"median": median, "windows": len(counts)})]
+
+
+def _null_rate(run: _Run) -> list[Finding]:
+    if not run.rows:
+        return []
+    out: list[Finding] = []
+    by_window: dict[str, list[dict[str, Any]]] = {}
+    for r in run.history:
+        by_window.setdefault(r["window"], []).append(r)
+    for t in run.spec.targets:
+        rate = sum(_is_null(r.get(t.name)) for r in run.rows) / len(run.rows)
+        past = [sum(_is_null(r.get(t.name)) for r in w) / len(w) for w in by_window.values()]
+        bar = max(NULL_RATE_FLOOR, 2 * (statistics.fmean(past) if past else 0.0))
+        if rate <= bar:
+            continue
+        out.append(_finding(
+            run, rule="null_rate", field=t.name,
+            severity=Severity.HIGH if rate >= 0.5 else Severity.MEDIUM,
+            title=f"{t.name} is empty in {rate:.0%} of rows", observed=f"{rate:.3f}",
+            threshold=f"<= {bar:.3f}", reason=NULL_RATE_REASON,
+            parents=_claims(run.rows, t.name), value=round(rate, 6)))
+    return out
+
+
+def _conforms(kind: str, value: str) -> bool:
+    try:
+        if kind == "decimal":
+            return Decimal(value.replace(",", "")).is_finite()
+        if kind in {"integer", "int"}:
+            int(value.replace(",", ""))
+        elif kind == "date":
+            dt.date.fromisoformat(value)
+    except (InvalidOperation, ValueError):
+        return False
+    return True
+
+
+def _schema_drift(run: _Run) -> list[Finding]:
+    if not run.rows:
+        return []                                       # row_count already speaks for it
+    columns = [c for c in run_columns(run.run_key) if is_data_column(c)]
+    expected = {name: str(getattr(kind, "value", kind))
+                for name, kind in run.spec.expected_schema.items()}
+    missing = sorted(set(expected) - set(columns))
+    unexpected = sorted(set(columns) - set(expected))
+    mistyped = {name: n for name, kind in sorted(expected.items()) if name in columns
+                if (n := sum(1 for r in run.rows if not _is_null(r.get(name))
+                             and not _conforms(kind, str(r[name])))) > 0}
+    if not (missing or unexpected or mistyped):
+        return []
+    parts = [f"missing {missing}" if missing else "", f"unexpected {unexpected}" if unexpected
+             else "", f"mistyped {mistyped}" if mistyped else ""]
+    return [_finding(
+        run, rule="schema_drift", field=None, severity=Severity.HIGH,
+        title="Landed columns differ from the spec's expected schema",
+        observed="; ".join(p for p in parts if p),
+        threshold=f"columns and types exactly as expected_schema (spec v{run.spec.version})",
+        reason=SCHEMA_REASON,
+        parents=[c for name in columns for c in _claims(run.rows[:1], name)],
+        value={"missing": missing, "unexpected": unexpected, "mistyped": mistyped},
+        extra={"missing": missing, "unexpected": unexpected, "mistyped": mistyped})]
+
+
+def _previous_breach(run: _Run, field: str) -> bool:
+    windows = sorted({r["window"] for r in run.history})
+    if not windows:
+        return False
+    keys = sorted({r["run_key"] for r in run.history if r["window"] == windows[-1]})
+    with Session() as s:
+        breached = s.scalar(select(FindingRow.id).where(
+            FindingRow.run_key.in_(keys), FindingRow.rule == "distribution_shift",
+            FindingRow.payload["properties"]["field"].astext == field).limit(1))
+        expected = s.scalar(select(AuditLog.id).where(
+            AuditLog.action == "marked_expected", AuditLog.subject.in_(keys),
+            AuditLog.detail["field"].astext == field).limit(1))
+    return breached is not None and expected is None
+
+
+def _distribution_shift(run: _Run) -> list[Finding]:
+    out: list[Finding] = []
+    for t in run.spec.targets:
+        if not t.distributional:
+            continue
+        ref_rows = [r for r in run.history if not _is_null(r.get(t.name))]
+        if len({r["window"] for r in ref_rows}) < run.warmup_runs:
+            continue                                     # warm-up: no basis yet (M18)
+        observed = [str(r[t.name]) for r in run.rows if not _is_null(r.get(t.name))]
+        if not observed:
+            continue                                     # null_rate speaks for an empty field
+        value = psi([str(r[t.name]) for r in ref_rows], observed)
+        if value <= PSI_THRESHOLD:
+            continue
+        persisted = _previous_breach(run, t.name)
+        out.append(_finding(
+            run, rule="distribution_shift", field=t.name,
+            severity=Severity.HIGH if persisted else Severity.MEDIUM,
+            title=f"{t.name} distribution shifted (PSI {value:.2f})",
+            observed=f"{value:.4f}", threshold=f"PSI {PSI_THRESHOLD:.2f}", reason=PSI_REASON,
+            parents=_claims(run.rows, t.name), value=round(value, 6),
+            extra={"n_reference": len(ref_rows), "n_observed": len(observed),
+                   "consecutive": PERSISTENCE if persisted else 1}))
+    return out
+
+
+# ------------------------------------------------------------------ entry point
+
+
+def _persist(run_key: str, findings: list[Finding]) -> None:
+    now = dt.datetime.now(dt.UTC)
+    with Session() as s:
+        s.execute(delete(FindingRow).where(FindingRow.run_key == run_key))
+        s.add_all(FindingRow(id=f"{f.id}@{run_key}", run_key=run_key, severity=f.severity.value,
+                             rule=str(f.properties["rule"]),
+                             payload=f.model_dump(mode="json"), at=now) for f in findings)
+        s.commit()
+
+
+def evaluate(run_key: str) -> list[Finding]:
+    target, _version, window = split_run_key(run_key)
+    settings = get_settings()
+    spec = load_spec(settings.spec_dir / f"{target}.yaml")
+    scope = load_scope(settings.scope_dir / f"{target}.yaml")
+    current = query("select * from lake where run_key = ?", [run_key], target=target).dicts()
+    history = query(
+        'select * from lake where "window" in (select distinct "window" from lake '
+        f'where "window" < ? order by 1 desc limit {REFERENCE_WINDOWS:d}) order by "window"',
+        [window], target=target).dicts()
+    run = _Run(target=target, window=window, run_key=run_key, spec=spec,
+               warmup_runs=scope.warmup_runs, rows=current, history=history)
+    findings = [*_row_count(run), *_null_rate(run), *_schema_drift(run),
+                *_distribution_shift(run)]
+    _persist(run_key, findings)
+    return findings
+```
 
 - [ ] **Step 4: Run them and make sure they pass**
 
-Run: `uv run pytest tests/quality -v`
-Expected: PASS, 5 tests.
+Run: `uv run pytest tests/quality/test_contracts.py tests/test_bok_core_allowlist.py -v -m "unit or integration" && uv run mypy --strict selector_drift/quality`
+Expected: PASS, 19 tests in `test_contracts.py` (16 integration, 3 unit) plus the allow-list
+test. mypy clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add selector_drift/quality tests/quality
-git commit -m "feat(quality): data-quality contracts as typed Findings"
+git add selector_drift/quality/contracts.py tests/quality tests/test_bok_core_allowlist.py
+git commit -m "feat(quality): data-quality contracts as persisted, provenance-carrying Findings (H8, M7, M8)"
 ```
 
 ---
@@ -7450,47 +19516,284 @@ git commit -m "feat(quality): data-quality contracts as typed Findings"
 - Test: `tests/land/test_changeset.py`
 
 **Interfaces:**
-- Consumes: `land.query` (Task 28).
-- Produces: `changeset(run_key: str, prior: Path, fmt: Literal["csv", "json"]) -> Path` — rows plus a diff against a client-supplied prior snapshot, each row carrying `action` (`add`/`change`/`unchanged`) and an `accept` flag defaulting to `false`. **No connectors. We never hold write credentials.**
+- Consumes: `query` (Task 28), `split_run_key`, `fs_key` (Task 28 `land.layout`), `load_spec` (Task 5), `get_settings` (Task 28 Step 0).
+- Produces: `changeset(run_key: str, prior: Path, fmt: Literal["csv", "json"], *, out_dir: Path | None = None) -> Path` — one line per `(natural key, field)` of the run's landed rows, diffed against a client-supplied prior snapshot (`.csv` or `.json`, keyed by the spec's `natural_key`). Columns: the natural-key fields, `field`, `prior_value`, `new_value`, `action` (`add`/`change`/`unchanged`), `accept` (always `false`). Written atomically to `out_dir` (default `<lake_root>/../changesets/`) as `{fs_key(run_key)}.{fmt}`. **No connectors. We never hold write credentials** (brief rule 7).
+
+**Why a file and never a connector.** A wrong write into a system of record is unrecoverable in a way a
+wrong read is not. The change-set is reviewable: every line defaults to `accept=false`, so nothing
+reaches the client's system unless a human there flips it and runs their own import.
+
+**Three rules the first draft left unsaid, each with a test:**
+- **An absent row is not a deletion.** A key in the prior snapshot but not in this run is not reported:
+  pagination, a filter or a virtualised table all hide rows without deleting them, and a "remove"
+  line is a write-back instruction we cannot justify from a read.
+- **Only the spec's fields are exported**, in `expected_schema` order. The lake view unions columns
+  across a target's spec versions; a column the current spec no longer declares is not the client's
+  contract.
+- **CSV cells are neutralised against formula injection.** Every value came from a third party's
+  page and the change-set is opened in a spreadsheet; a cell beginning `=`, `+`, `-`, `@`, tab or CR
+  is prefixed with `'` (OWASP CSV-injection guidance). JSON is not affected.
+
+**The no-network test is fixed (M19).** The first draft grepped the source for `requests`, `httpx`
+and `urllib` — which passes for a module that opens a socket through anything else, and fails for a
+comment that mentions one. The test now blocks every socket entry point and runs the export.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/land/test_changeset.py
+import csv
+import json
+import socket
 from pathlib import Path
+
+import pytest
+
 from selector_drift.land.changeset import changeset
+from selector_drift.land.writer import write
+from tests.land.factory import RUN_KEY, make_validated, rows
 
-def test_changeset_marks_every_row_and_defaults_to_not_accepted(run_with_changes):
-    rows = read_csv(changeset(run_with_changes, PRIOR, "csv"))
-    assert {r["action"] for r in rows} <= {"add", "change", "unchanged"}
-    assert all(r["accept"] == "false" for r in rows)
+RUN = rows(3)          # AB10000000 100.00 | AB10000001 107.50 | AB10000002 115.00
 
-def test_a_changed_row_reports_both_values(run_with_changes):
-    row = next(r for r in read_csv(changeset(run_with_changes, PRIOR, "csv")) if r["action"] == "change")
-    assert row["prior_value"] and row["new_value"] and row["prior_value"] != row["new_value"]
 
-def test_changeset_opens_no_network_connection():
-    src = Path("selector_drift/land/changeset.py").read_text()
-    assert "requests" not in src and "httpx" not in src and "urllib" not in src
+def _prior_csv(tmp_path: Path) -> Path:
+    p = tmp_path / "prior.csv"
+    p.write_text("claim_number,amount\n"
+                 "AB10000000,100.00\n"            # unchanged
+                 "AB10000001,999.99\n"            # changed
+                 "AB19999999,5.00\n",             # absent from the run: not a deletion
+                 encoding="utf-8")
+    return p
+
+
+def _read_csv(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+@pytest.fixture
+def run_with_changes(lake_dir) -> str:
+    write(make_validated(RUN))
+    return RUN_KEY
+
+
+@pytest.fixture
+def no_network(monkeypatch) -> list[object]:
+    attempts: list[object] = []
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        attempts.append(args)
+        raise OSError("network blocked by the test")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    return attempts
+
+
+@pytest.mark.integration
+def test_changeset_marks_every_line_and_defaults_to_not_accepted(run_with_changes, tmp_path):
+    lines = _read_csv(changeset(run_with_changes, _prior_csv(tmp_path), "csv"))
+    assert len(lines) == 3                                   # three rows x one non-key field
+    assert {r["action"] for r in lines} == {"add", "change", "unchanged"}
+    assert all(r["accept"] == "false" for r in lines)
+
+
+@pytest.mark.integration
+def test_a_changed_line_reports_both_values(run_with_changes, tmp_path):
+    line = next(r for r in _read_csv(changeset(run_with_changes, _prior_csv(tmp_path), "csv"))
+                if r["action"] == "change")
+    assert (line["claim_number"], line["field"]) == ("AB10000001", "amount")
+    assert (line["prior_value"], line["new_value"]) == ("999.99", "107.50")
+
+
+@pytest.mark.integration
+def test_an_added_row_has_no_prior_value(run_with_changes, tmp_path):
+    line = next(r for r in _read_csv(changeset(run_with_changes, _prior_csv(tmp_path), "csv"))
+                if r["action"] == "add")
+    assert line["claim_number"] == "AB10000002" and line["prior_value"] == ""
+
+
+@pytest.mark.integration
+def test_a_row_absent_from_the_run_is_not_reported_as_a_deletion(run_with_changes, tmp_path):
+    lines = _read_csv(changeset(run_with_changes, _prior_csv(tmp_path), "csv"))
+    assert "AB19999999" not in {r["claim_number"] for r in lines}
+    assert {r["action"] for r in lines} <= {"add", "change", "unchanged"}
+
+
+@pytest.mark.integration
+def test_json_output_carries_the_same_lines_with_a_boolean_accept(run_with_changes, tmp_path):
+    prior = tmp_path / "prior.json"
+    prior.write_text(json.dumps([{"claim_number": "AB10000001", "amount": "999.99"}]),
+                     encoding="utf-8")
+    lines = json.loads(changeset(run_with_changes, prior, "json").read_text(encoding="utf-8"))
+    assert len(lines) == 3 and all(line["accept"] is False for line in lines)
+    assert sum(line["action"] == "change" for line in lines) == 1
+
+
+@pytest.mark.integration
+def test_changeset_opens_no_network_connection(run_with_changes, tmp_path, no_network):
+    # Fixed (M19): the first draft grepped the source for three library names.
+    out = changeset(run_with_changes, _prior_csv(tmp_path), "csv")
+    assert out.is_file()
+    assert no_network == []
+
+
+@pytest.mark.integration
+def test_a_formula_from_the_portal_cannot_execute_in_the_clients_spreadsheet(lake_dir, tmp_path):
+    hostile = rows(1)
+    hostile[0]["amount"] = '=HYPERLINK("https://evil.example.invalid","1.00")'
+    write(make_validated(hostile))
+    line = _read_csv(changeset(RUN_KEY, _prior_csv(tmp_path), "csv"))[0]
+    assert line["new_value"].startswith("'=")
+
+
+@pytest.mark.integration
+def test_the_file_is_named_by_fs_key_and_lands_in_out_dir(run_with_changes, tmp_path):
+    out = changeset(run_with_changes, _prior_csv(tmp_path), "csv", out_dir=tmp_path / "cs")
+    assert out == tmp_path / "cs" / "testbench_2_2026-09-07.csv"
+    assert not list((tmp_path / "cs").glob("*.tmp"))
+
+
+@pytest.mark.integration
+def test_a_prior_without_the_natural_key_is_refused(run_with_changes, tmp_path):
+    bad = tmp_path / "prior.csv"
+    bad.write_text("amount\n1.00\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="claim_number"):
+        changeset(run_with_changes, bad, "csv")
+
+
+@pytest.mark.integration
+def test_a_run_with_no_landed_rows_has_nothing_to_export(lake_dir, tmp_path):
+    with pytest.raises(LookupError, match="no landed rows"):
+        changeset(RUN_KEY, _prior_csv(tmp_path), "csv")
+
+
+@pytest.mark.unit
+def test_an_unknown_format_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="csv or json"):
+        changeset(RUN_KEY, tmp_path / "prior.csv", "xlsx")  # type: ignore[arg-type]
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/land/test_changeset.py -v`
-Expected: FAIL.
+Run: `uv run pytest tests/land/test_changeset.py -v -m "unit or integration"`
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'selector_drift.land.changeset'`.
 
-- [ ] **Step 3: Implement the diff and export.**
+- [ ] **Step 3: Implement the diff and export**
+
+```python
+# selector_drift/land/changeset.py
+"""The reviewable change-set (design 9.1, 2.1 Q3). Reads the lake, diffs against the client's
+prior snapshot, and writes a file the CLIENT applies. No connector, no network, no write
+credential: every line defaults to accept=false (brief rule 7)."""
+from __future__ import annotations
+
+import csv
+import io
+import json
+import os
+from pathlib import Path
+from typing import Any, Final, Literal
+
+from selector_drift.config import get_settings
+from selector_drift.land.catalog import query
+from selector_drift.land.layout import fs_key, split_run_key
+from selector_drift.spec.loader import load_spec
+
+Action = Literal["add", "change", "unchanged"]
+_FORMULA: Final = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _cell(value: str) -> str:
+    """OWASP CSV injection: a value from a third party's page must not become a formula."""
+    return f"'{value}" if value.startswith(_FORMULA) else value
+
+
+def _read_prior(prior: Path, keys: list[str]) -> dict[tuple[str, ...], dict[str, str]]:
+    if prior.suffix.lower() == ".json":
+        loaded = json.loads(prior.read_text(encoding="utf-8"))
+        if not isinstance(loaded, list):
+            raise ValueError(f"{prior.name}: a JSON prior is a list of objects")
+        records: list[dict[str, Any]] = [r for r in loaded if isinstance(r, dict)]
+    else:
+        with prior.open(newline="", encoding="utf-8") as fh:
+            records = list(csv.DictReader(fh))
+    out: dict[tuple[str, ...], dict[str, str]] = {}
+    for i, r in enumerate(records):
+        missing = [k for k in keys if k not in r]
+        if missing:
+            raise ValueError(f"{prior.name} record {i} lacks natural key field(s) {missing}")
+        out[tuple(str(r[k]) for k in keys)] = {k: "" if v is None else str(v)
+                                                for k, v in r.items()}
+    return out
+
+
+def _lines(run_key: str, prior: Path) -> tuple[list[str], list[dict[str, Any]]]:
+    target, _version, _window = split_run_key(run_key)
+    spec = load_spec(get_settings().spec_dir / f"{target}.yaml")
+    keys = list(spec.natural_key)
+    result = query("select * from lake where run_key = ?", [run_key], target=target)
+    current = result.dicts()
+    if not current:
+        raise LookupError(f"{run_key}: no landed rows -- a quarantined run has nothing to "
+                          "export until a human promotes it")
+    fields = [f for f in spec.expected_schema if f not in keys and f in result.columns]
+    before_by_key = _read_prior(prior, keys)
+    lines: list[dict[str, Any]] = []
+    for row in sorted(current, key=lambda r: [str(r[k]) for k in keys]):
+        ident = tuple(str(row[k]) for k in keys)
+        before = before_by_key.get(ident)
+        for field in fields:
+            new = "" if row.get(field) is None else str(row[field])
+            action: Action
+            if before is None:
+                action, old = "add", ""
+            else:
+                old = before.get(field, "")
+                action = "unchanged" if old.strip() == new.strip() else "change"
+            lines.append(dict(zip(keys, ident, strict=True))
+                         | {"field": field, "prior_value": old, "new_value": new,
+                            "action": action, "accept": False})
+    return keys, lines
+
+
+def changeset(run_key: str, prior: Path, fmt: Literal["csv", "json"], *,
+              out_dir: Path | None = None) -> Path:
+    if fmt not in ("csv", "json"):
+        raise ValueError(f"format must be csv or json, not {fmt!r}")
+    keys, lines = _lines(run_key, prior)
+    if fmt == "json":
+        payload = json.dumps(lines, indent=2, ensure_ascii=False)
+    else:
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=[*keys, "field", "prior_value", "new_value",
+                                                 "action", "accept"], lineterminator="\n")
+        writer.writeheader()
+        for line in lines:
+            writer.writerow({k: "false" if k == "accept" else _cell(str(v))
+                             for k, v in line.items()})
+        payload = buf.getvalue()
+    target_dir = out_dir or get_settings().lake_root.parent / "changesets"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    final = target_dir / f"{fs_key(run_key)}.{fmt}"
+    tmp = target_dir / f".{final.name}.tmp"
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, final)
+    return final
+```
 
 - [ ] **Step 4: Run them and make sure they pass**
 
-Run: `uv run pytest tests/land -v`
-Expected: PASS, 3 new tests.
+Run: `uv run pytest tests/land -v -m "unit or integration" && uv run mypy --strict selector_drift/land`
+Expected: PASS, 11 new tests (32 in `tests/land`). mypy clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add selector_drift/land/changeset.py tests/land/test_changeset.py
-git commit -m "feat(land): reviewable change-set export"
+git commit -m "feat(land): reviewable change-set export, no network, formula-safe (M19)"
 ```
 
 ---
@@ -7498,16 +19801,17 @@ git commit -m "feat(land): reviewable change-set export"
 ### Task 29A: Alerting, the intervention ledger, and deploy history — R17 (M1, M2, M10)
 
 **Files:**
-- Create: `selector_drift/quality/alerts.py`, `selector_drift/orchestrate/interventions.py`, `selector_drift/orchestrate/deploys.py`
-- Modify: `selector_drift/orchestrate/pipeline.py` (Task 26A)
-- Test: `tests/quality/test_alerts.py`, `tests/orchestrate/test_interventions.py`
+- Create: `selector_drift/quality/alerts.py`, `selector_drift/orchestrate/interventions.py`, `selector_drift/orchestrate/deploys.py`, `selector_drift/orchestrate/watch.py`, `deploys.yaml`
+- Modify: `selector_drift/orchestrate/pipeline.py` (Task 26A), `selector_drift/orchestrate/quarantine_actions.py` (Task 26A Part 2), `selector_drift/orchestrate/deployments.py` (Task 6), `pyproject.toml`, `.env.example`
+- Test: `tests/quality/test_alerts.py`, `tests/orchestrate/test_interventions.py`, `tests/orchestrate/test_deploys.py`
 
 **Interfaces:**
-- Consumes: `Finding` (Task 29), the `interventions` and `deploys` tables (Task 3).
+- Consumes: `Finding`, `Severity` (`bok_core.findings`); `evaluate` (Task 29); the `audit_log`, `heartbeats`, `interventions`, `deploys`, `runs`, `heal_events` tables (Task 3); `load_spec`, `TaskSpec` (Task 5); `get_settings` (Task 28 Step 0); Task 26C's `audit_log(action="scored", detail={"judgement": ...})` rows.
 - Produces:
-  - `notify(findings, run) -> None` — one webhook. Fires on a quarantine, a `HIGH`+ finding, or a missed heartbeat. Deduplicates per `(target, rule)` per day so an alert is not a pager
-  - `record_intervention(kind, actor, target, field, before, after, reason)` — called by the spec loader when a spec's hash changes between runs, by any manual cache edit, and by `promote()`
-  - `ingest_deploys(target) -> int` — pulls deployment timestamps for the control-arm targets into `deploys`
+  - `quality.alerts`: `notify(findings: Sequence[Finding], run: Run, *, now: datetime | None = None) -> None` — fires on a quarantined run and on every `HIGH`+ finding; `notify_false_accepts(*, now=None) -> None` — fires at `HIGH` on any `scored` `audit_log` row whose `detail->>'judgement' = 'false_accept'`; `notify_missed_heartbeats(*, now=None) -> None` — fires at `HIGH` when a target's latest cron slot has no heartbeat; `check_alert_channel() -> bool`. One webhook, URL from `SD_ALERT_WEBHOOK` (optional; absent ⇒ logged, never sent), deduplicated per `(target, rule)` per UTC day through `audit_log(action="alert_sent", subject="<target>:<rule>:<day>")`
+  - `orchestrate.interventions`: `record_intervention(kind, actor, target, field, before, after, reason, *, at=None) -> int`; `observe_spec(target: str, spec: TaskSpec, *, actor: str = "system:spec_loader", now=None) -> list[int]`; `spec_changes(old: TaskSpec, new: TaskSpec) -> list[tuple[str, dict[str, Any], dict[str, Any]]]`; `record_cache_edit(actor, target, field, before, after, reason) -> int`
+  - `orchestrate.deploys`: `DeployRecord`, `DeployFeed` protocol, `SelfHostLog(path)`, `GitHubDeployments(repo, environment="production", token=None)`, `feed_for(target) -> DeployFeed`, `ingest_deploys(target: str, *, feed: DeployFeed | None = None, now=None) -> int`, `preceding_deploy(heal: HealEvent) -> Deploy | None`
+  - `orchestrate.watch`: `alert_watch()` — Prefect flow; `watch_deployment()` in `deployments.py`, cron `*/15 * * * *`
 
 **Why this task exists — three published claims currently have no evidence path.**
 
@@ -7517,46 +19821,1073 @@ git commit -m "feat(land): reviewable change-set export"
 | *"Zero manual selector fixes"* | design §8.3 — the headline | Nothing recorded a human editing a spec or a cache row, so the number was **unfalsifiable** — exactly the epistemic status of the vendor numbers `00` was written to reject (M1) |
 | *"Heals fired only on runs following an actual deploy, verified against deploy history"* | design §8.1 — the control arm, *"the half nobody else has"* | No task ingested deploy history (M10) |
 
-- [ ] **Step 1: Write the failing tests**
+**Folded in from the 2026-09-26 amendment.** (1) **Schedule edits are interventions**: any change to a
+spec's `schedule` writes `interventions(kind="spec_edit", field="schedule", before={"schedule": old},
+after={"schedule": new})`, the exact shape `derive._schedule_spans` (Task 34B) replays to rebuild the
+schedule in force on each day. (2) **A wrong heal the gate let through pages**: `notify_false_accepts`
+fires at `HIGH` on every `scored` row with `judgement = "false_accept"` (Task 26C).
 
-```python
-def test_a_quarantine_notifies_exactly_once(quarantined_run, webhook):
-    notify(*evaluate_and_run(quarantined_run)); notify(*evaluate_and_run(quarantined_run))
-    assert len(webhook.calls) == 1                       # dedup per (target, rule) per day
+**An alert is a pager only if it cannot be muted by noise (B7).** Dedup is per `(target, rule)` per UTC
+day and is stored in `audit_log`, not process memory, so ten flows and a restart still send one alert.
+An alert is recorded only once it is **delivered**; a failed POST is retried on the next check rather
+than silently marked sent. With no webhook configured, every alert is logged at `WARNING` and nothing
+is recorded — an alerting system nobody configured is worse than none, so it says so every time.
 
-def test_a_spec_edit_between_runs_is_recorded_as_an_intervention(session):
-    edit_spec("specs/testbench.yaml", field="claim_number", description="the reference cell")
-    extraction_flow("specs/testbench.yaml")
-    row = session.query(Intervention).one()
-    assert row.kind == "spec_edit" and row.before != row.after
+**The webhook never carries client data (brief rule 6).** Its body is an allow-list — target, rule,
+severity, title, run key, threshold, day. Never a claim, never a value, never evidence. The webhook
+URL is itself a credential (a Slack or Teams incoming-webhook URL is a bearer token), so it is never
+logged: `httpx` logs every request URL at `INFO`, and a filter on the `httpx` logger drops any record
+that contains it.
 
-def test_the_manual_fix_count_is_queryable_because_the_headline_depends_on_it(session):
-    assert manual_fix_count(since=DAY_ONE) == session.query(Intervention).count()
+**Every computed figure comes from `derive.py` (Global Constraints).** The first draft's
+`manual_fix_count()` lived here, making a second place a headline number is computed. It is gone:
+this task records rows; Task 34B counts them.
 
-def test_a_heal_on_a_control_target_is_joinable_to_a_deploy(session):
-    ingest_deploys("agent-perimeter")
-    heal = latest_heal("agent-perimeter")
-    assert preceding_deploy(heal) is not None           # the control arm's whole claim
-```
+**How a spec edit is detected.** The spec file is edited outside the product, so there is no editor to
+hook. `observe_spec()` runs at the top of every run: it stores the spec it saw in
+`audit_log(action="spec_seen", subject=target, detail={"sha256", "spec"})` and, when the hash differs
+from the last one seen, writes one `spec_edit` row **per changed field** — `schedule`, `natural_key`,
+… by name, and each `FieldTarget` as `targets.<name>` (so a field called `schedule` cannot collide with
+the schedule). First sight is a baseline, not an edit.
 
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** The webhook target is an env var; a missing one logs loudly at startup rather than failing silently, because an alerting system nobody configured is worse than none (B7's cousin).
-- [ ] **Step 4: Run the full check.**
-- [ ] **Step 5: Commit**
+**Deploy history is a feed per target, declared in `deploys.yaml`.** The control-arm targets are still
+unnamed (P-3), so the file ships with the bench only; each control target adds one entry when it is
+named. Two feeds cover both hosting choices: the VM's deploy script appends a JSON line per deploy
+(`self-host`), and GitHub's deployments API for anything deployed by Actions (`gh-actions`). Ingest is
+idempotent on `(target, deployed_at, ref)`.
+
+- [ ] **Step 1: Dependencies**
 
 ```bash
-git add selector_drift/quality/alerts.py selector_drift/orchestrate tests
-git commit -m "feat(quality): alerting, intervention ledger, deploy-history ingest"
+uv add croniter
+uv add --dev types-croniter
 ```
 
-**Amended 2026-09-26.**
-- **Schedule edits are interventions.** `derive.missed_runs` (Task 34B) counts expected cron slots
-  "as versioned at the time", and no table holds schedule history. Any change to a spec's `schedule`
-  writes `interventions(kind="spec_edit", field="schedule", before={"schedule": old},
-  after={"schedule": new})`, and `derive.py` replays those rows to rebuild the schedule in force on
-  each day.
-- **`notify()` also fires, at `HIGH`, on every new `audit_log` row with
-  `detail->>'judgement' = 'false_accept'`** — a wrong heal the gate let through (Task 26C).
+(Moved here from Task 34B Step 1, whose commands become no-ops: `notify_missed_heartbeats` is the
+first consumer.)
+
+- [ ] **Step 2: Write the failing tests**
+
+```python
+# tests/quality/test_alerts.py
+import datetime as dt
+import logging
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from bok_core.findings import Finding, Severity
+from bok_core.provenance import Claim, DomSource, Method
+from sqlalchemy import text
+
+from selector_drift.config import get_settings
+from selector_drift.db.models import AuditLog, Heartbeat, Run
+from selector_drift.db.session import Session, engine
+from selector_drift.quality.alerts import (check_alert_channel, notify, notify_false_accepts,
+                                           notify_missed_heartbeats)
+from tests.land.factory import SPEC_YAML
+
+WEBHOOK = "https://hooks.example.invalid/services/T0/B0/test-only-not-a-secret"
+NOW = dt.datetime(2026, 10, 1, 6, 0, tzinfo=dt.UTC)
+KEY = "testbench:2:2026-10-01"
+CELL = "AB12345678"
+
+
+@pytest.fixture(autouse=True)
+def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    specs = tmp_path / "specs"
+    specs.mkdir()
+    (specs / "testbench.yaml").write_text(SPEC_YAML, encoding="utf-8")   # schedule 12 4 * * *
+    monkeypatch.setenv("SD_SPEC_DIR", str(specs))
+    monkeypatch.setenv("SD_ALERT_WEBHOOK", WEBHOOK)
+    get_settings.cache_clear()
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE audit_log, heartbeats, heal_events, runs "
+                       "RESTART IDENTITY CASCADE"))
+    yield
+    get_settings.cache_clear()
+
+
+def _run(state: str = "completed") -> Run:
+    return Run(run_key=KEY, target="testbench", spec_version=2, window=NOW.date(),
+               first_started_at=NOW, state=state)
+
+
+def _finding(severity: Severity, rule: str = "row_count") -> Finding:
+    parent = Claim(value=CELL, method=Method.DETERMINISTIC, observed_at=NOW,
+                   source=DomSource(snapshot_id="e5" * 32, selector="td", rung=1))
+    derived = Claim(value=40, method=Method.DERIVED, observed_at=NOW, source=parent.source,
+                    parents=[parent])
+    return Finding(id=f"quality/{rule}/run", severity=severity, title=f"{rule} breached",
+                   claim=derived, properties={"rule": rule, "field": None, "observed": "40",
+                                              "threshold": ">= 50", "threshold_reason": "why"})
+
+
+def _sent() -> int:
+    with Session() as s:
+        return s.query(AuditLog).filter_by(action="alert_sent").count()
+
+
+@pytest.mark.integration
+def test_a_quarantine_notifies_exactly_once(httpx_mock):
+    httpx_mock.add_response(url=WEBHOOK, method="POST")
+    notify([], _run("quarantined"), now=NOW)
+    notify([], _run("quarantined"), now=NOW)           # dedup per (target, rule) per day
+    assert len(httpx_mock.get_requests()) == 1
+    assert _sent() == 1
+
+
+@pytest.mark.integration
+def test_a_high_finding_alerts_and_a_medium_one_does_not(httpx_mock):
+    httpx_mock.add_response(url=WEBHOOK, method="POST")
+    notify([_finding(Severity.MEDIUM, "null_rate"), _finding(Severity.HIGH, "row_count")],
+           _run(), now=NOW)
+    (request,) = httpx_mock.get_requests()
+    assert b'"rule":"row_count"' in request.content.replace(b" ", b"")
+
+
+@pytest.mark.integration
+def test_two_high_findings_of_one_rule_are_one_alert(httpx_mock):
+    httpx_mock.add_response(url=WEBHOOK, method="POST")
+    notify([_finding(Severity.HIGH), _finding(Severity.CRITICAL)], _run(), now=NOW)
+    assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.integration
+def test_the_same_rule_alerts_again_the_next_day(httpx_mock):
+    httpx_mock.add_response(url=WEBHOOK, method="POST")
+    httpx_mock.add_response(url=WEBHOOK, method="POST")
+    notify([], _run("quarantined"), now=NOW)
+    notify([], _run("quarantined"), now=NOW + dt.timedelta(days=1))
+    assert len(httpx_mock.get_requests()) == 2
+
+
+@pytest.mark.integration
+def test_the_webhook_body_carries_no_extracted_value(httpx_mock):
+    # Brief rule 6: a portal value never leaves the client's boundary, not even in an alert.
+    httpx_mock.add_response(url=WEBHOOK, method="POST")
+    notify([_finding(Severity.HIGH)], _run(), now=NOW)
+    (request,) = httpx_mock.get_requests()
+    assert CELL.encode() not in request.content and b"claim" not in request.content
+
+
+@pytest.mark.integration
+def test_a_missing_webhook_logs_and_sends_nothing(httpx_mock, monkeypatch, caplog):
+    monkeypatch.delenv("SD_ALERT_WEBHOOK")
+    with caplog.at_level(logging.WARNING, logger="selector_drift.quality.alerts"):
+        notify([], _run("quarantined"), now=NOW)
+    assert httpx_mock.get_requests() == []
+    assert "SD_ALERT_WEBHOOK" in caplog.text and "quarantine" in caplog.text
+    assert _sent() == 0                                 # not delivered, so not "sent"
+
+
+@pytest.mark.integration
+def test_a_failed_delivery_is_retried_not_marked_sent(httpx_mock):
+    httpx_mock.add_response(url=WEBHOOK, method="POST", status_code=500)
+    httpx_mock.add_response(url=WEBHOOK, method="POST", status_code=200)
+    notify([], _run("quarantined"), now=NOW)
+    assert _sent() == 0
+    notify([], _run("quarantined"), now=NOW)
+    assert len(httpx_mock.get_requests()) == 2 and _sent() == 1
+
+
+@pytest.mark.integration
+def test_the_webhook_url_is_never_logged(httpx_mock, caplog):
+    # An incoming-webhook URL is a bearer credential.
+    httpx_mock.add_response(url=WEBHOOK, method="POST", status_code=500)
+    with caplog.at_level(logging.DEBUG):
+        notify([], _run("quarantined"), now=NOW)
+    assert WEBHOOK not in caplog.text and "T0/B0" not in caplog.text
+
+
+@pytest.mark.integration
+def test_a_false_accept_pages_at_high_once(httpx_mock):
+    # Amended 2026-09-26: a wrong heal the gate let through (Task 26C).
+    httpx_mock.add_response(url=WEBHOOK, method="POST")
+    with Session() as s:
+        s.add(AuditLog(at=NOW, actor="testbench.score", action="scored", subject=KEY,
+                       detail={"judgement": "false_accept", "field": "amount"}))
+        s.commit()
+    notify_false_accepts(now=NOW)
+    notify_false_accepts(now=NOW + dt.timedelta(minutes=15))
+    (request,) = httpx_mock.get_requests()
+    body = request.content.replace(b" ", b"")
+    assert b'"rule":"false_accept"' in body and b'"severity":"HIGH"' in body
+
+
+@pytest.mark.integration
+def test_a_correct_judgement_does_not_page(httpx_mock):
+    with Session() as s:
+        s.add(AuditLog(at=NOW, actor="testbench.score", action="scored", subject=KEY,
+                       detail={"judgement": "correct_refusal"}))
+        s.commit()
+    notify_false_accepts(now=NOW)
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.integration
+def test_a_missed_heartbeat_pages(httpx_mock):
+    httpx_mock.add_response(url=WEBHOOK, method="POST")
+    yesterday = dt.datetime(2026, 9, 30, 4, 12, tzinfo=dt.UTC)
+    with Session() as s:
+        s.add(Heartbeat(target="testbench", scheduled_for=yesterday, fired_at=yesterday,
+                        run_key=None))
+        s.commit()
+    notify_missed_heartbeats(now=NOW)                  # today's 04:12 slot never fired
+    (request,) = httpx_mock.get_requests()
+    assert b'"rule":"missed_heartbeat"' in request.content.replace(b" ", b"")
+
+
+@pytest.mark.integration
+def test_a_fired_slot_does_not_page(httpx_mock):
+    today = dt.datetime(2026, 10, 1, 4, 12, 3, tzinfo=dt.UTC)
+    with Session() as s:
+        s.add(Heartbeat(target="testbench", scheduled_for=today.replace(second=0),
+                        fired_at=today, run_key=KEY))
+        s.commit()
+    notify_missed_heartbeats(now=NOW)
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.integration
+def test_a_target_whose_log_has_not_started_is_not_missed(httpx_mock):
+    notify_missed_heartbeats(now=NOW)                   # no heartbeat has ever been written
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.unit
+def test_an_unconfigured_channel_says_so(monkeypatch, caplog):
+    monkeypatch.delenv("SD_ALERT_WEBHOOK", raising=False)
+    with caplog.at_level(logging.WARNING, logger="selector_drift.quality.alerts"):
+        assert check_alert_channel() is False
+    assert "LOGGED ONLY" in caplog.text
+```
+
+```python
+# tests/orchestrate/test_interventions.py
+import ast
+import datetime as dt
+from pathlib import Path
+
+import pytest
+import yaml
+from sqlalchemy import text
+
+from selector_drift.db.models import Intervention
+from selector_drift.db.session import Session, engine
+from selector_drift.orchestrate import quarantine_actions
+from selector_drift.orchestrate.interventions import observe_spec, record_intervention
+from selector_drift.spec.schema import TaskSpec
+from tests.land.factory import SPEC_YAML
+
+T0 = dt.datetime(2026, 10, 1, 4, 12, tzinfo=dt.UTC)
+
+
+def _spec(**changes: object) -> TaskSpec:
+    body = yaml.safe_load(SPEC_YAML)
+    return TaskSpec.model_validate(body | changes)
+
+
+@pytest.fixture
+def ledger():
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE interventions, audit_log RESTART IDENTITY CASCADE"))
+    with Session() as s:
+        yield s
+
+
+def _rows(s) -> list[Intervention]:
+    return list(s.query(Intervention).order_by(Intervention.id))
+
+
+@pytest.mark.integration
+def test_first_sight_of_a_spec_is_a_baseline_not_an_edit(ledger):
+    assert observe_spec("testbench", _spec(), now=T0) == []
+    assert _rows(ledger) == []
+
+
+@pytest.mark.integration
+def test_an_unchanged_spec_records_nothing(ledger):
+    observe_spec("testbench", _spec(), now=T0)
+    assert observe_spec("testbench", _spec(), now=T0 + dt.timedelta(days=1)) == []
+
+
+@pytest.mark.integration
+def test_a_spec_edit_between_runs_is_recorded_as_an_intervention(ledger):
+    observe_spec("testbench", _spec(), now=T0)
+    edited = yaml.safe_load(SPEC_YAML)
+    edited["targets"][0]["description"] = "the reference cell"
+    observe_spec("testbench", TaskSpec.model_validate(edited), now=T0 + dt.timedelta(days=1))
+    (row,) = _rows(ledger)
+    assert row.kind == "spec_edit" and row.field == "targets.claim_number"
+    assert row.before != row.after
+    assert row.after["target"]["description"] == "the reference cell"
+    assert row.actor == "system:spec_loader"
+
+
+@pytest.mark.integration
+def test_a_schedule_edit_has_the_shape_derive_replays(ledger):
+    # Amended 2026-09-26; pinned by Task 34B's test_a_schedule_edit_changes_the_expected_slots.
+    observe_spec("testbench", _spec(), now=T0)
+    observe_spec("testbench", _spec(schedule="12 4,16 * * *"), now=T0 + dt.timedelta(days=1))
+    (row,) = _rows(ledger)
+    assert (row.kind, row.field) == ("spec_edit", "schedule")
+    assert row.before == {"schedule": "12 4 * * *"}
+    assert row.after == {"schedule": "12 4,16 * * *"}
+
+
+@pytest.mark.integration
+def test_every_changed_field_is_its_own_row(ledger):
+    observe_spec("testbench", _spec(), now=T0)
+    observe_spec("testbench", _spec(schedule="0 5 * * *", row_scope="each result card"),
+                 now=T0 + dt.timedelta(days=1))
+    assert {r.field for r in _rows(ledger)} == {"schedule", "row_scope"}
+
+
+@pytest.mark.integration
+def test_the_ledger_is_queryable_because_the_headline_depends_on_it(ledger):
+    # Replaces the first draft's manual_fix_count(): the COUNT belongs to derive.py (34B).
+    record_intervention("cache_edit", "op1", "testbench", "amount", {"selector": "td:nth-child(3)"},
+                        {"selector": "td:nth-child(4)"}, "hand-fixed after a reorder", at=T0)
+    since = ledger.query(Intervention).filter(Intervention.at >= T0).count()
+    assert since == 1
+
+
+@pytest.mark.unit
+def test_an_intervention_needs_a_known_kind_and_an_actor():
+    with pytest.raises(ValueError, match="kind"):
+        record_intervention("hotfix", "op1", "testbench", "x", None, None, "r")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="actor"):
+        record_intervention("spec_edit", "", "testbench", "x", None, None, "r")
+
+
+@pytest.mark.unit
+def test_the_pipeline_observes_the_spec_before_it_resolves_anything():
+    src = Path("selector_drift/orchestrate/pipeline.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_once")
+    calls = [ast.unparse(c.func) for c in ast.walk(fn) if isinstance(c, ast.Call)]
+    assert "observe_spec" in calls
+    lines = {ast.unparse(c.func): c.lineno for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert lines["observe_spec"] < lines["resolve_cascade"]
+
+
+@pytest.mark.unit
+def test_a_manual_promote_is_recorded_as_an_intervention(monkeypatch):
+    recorded: list[tuple[object, ...]] = []
+    monkeypatch.setattr(quarantine_actions.quarantine, "promote",
+                        lambda run_key, *, actor, reason: object())
+    monkeypatch.setattr(quarantine_actions, "accept_promoted",
+                        lambda run_key, validated, *, cache: Path("/lake/x.parquet"))
+    monkeypatch.setattr(quarantine_actions.CacheWriter, "for_run_key",
+                        classmethod(lambda cls, run_key: object()))
+    monkeypatch.setattr(quarantine_actions, "record_intervention",
+                        lambda *a, **k: recorded.append(a) or 1)
+    quarantine_actions.build_quarantine_actions().promote("testbench:2:2026-10-01", "op1",
+                                                          "values checked")
+    ((kind, actor, target, *_rest),) = recorded
+    assert (kind, actor, target) == ("manual_promote", "op1", "testbench")
+```
+
+```python
+# tests/orchestrate/test_deploys.py
+import datetime as dt
+import json
+import logging
+from pathlib import Path
+
+import pytest
+from pydantic import SecretStr
+from sqlalchemy import text
+
+from selector_drift.db.models import Deploy, HealEvent, Run
+from selector_drift.db.session import Session, engine
+from selector_drift.orchestrate.deploys import (GitHubDeployments, SelfHostLog, feed_for,
+                                                ingest_deploys, preceding_deploy)
+
+
+def at(day: int, h: int = 4, m: int = 12) -> dt.datetime:
+    return dt.datetime(2026, 10, day, h, m, tzinfo=dt.UTC)
+
+
+@pytest.fixture(autouse=True)
+def clean():
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE deploys, heal_events, runs RESTART IDENTITY CASCADE"))
+
+
+def _log(tmp_path: Path, *lines: dict[str, str]) -> SelfHostLog:
+    p = tmp_path / "deploys.jsonl"
+    p.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    return SelfHostLog(p)
+
+
+@pytest.mark.integration
+def test_self_host_deploys_are_ingested_idempotently(tmp_path):
+    feed = _log(tmp_path, {"deployed_at": at(2, 1).isoformat(), "ref": "a1"},
+                {"deployed_at": at(3, 1).isoformat(), "ref": "b2"})
+    assert ingest_deploys("testbench", feed=feed) == 2
+    assert ingest_deploys("testbench", feed=feed) == 0
+    with Session() as s:
+        assert {d.source for d in s.query(Deploy)} == {"self-host"}
+
+
+@pytest.mark.integration
+def test_a_deploy_time_without_a_timezone_is_refused(tmp_path):
+    feed = _log(tmp_path, {"deployed_at": "2026-10-02T01:00:00", "ref": "a1"})
+    with pytest.raises(ValueError, match="timezone"):
+        ingest_deploys("testbench", feed=feed)
+
+
+@pytest.mark.integration
+def test_github_deployments_are_read_with_the_token_in_a_header_only(httpx_mock, caplog):
+    token = SecretStr("gh-test-only-not-a-secret")
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/app/deployments?environment=production&per_page=100",
+        json=[{"created_at": "2026-10-02T01:00:00Z", "sha": "c3"}])
+    with caplog.at_level(logging.DEBUG):
+        n = ingest_deploys("testbench", feed=GitHubDeployments("owner/app", token=token))
+    assert n == 1
+    (request,) = httpx_mock.get_requests()
+    assert request.headers["Authorization"] == "Bearer gh-test-only-not-a-secret"
+    assert token.get_secret_value() not in str(request.url)
+    assert token.get_secret_value() not in caplog.text
+
+
+@pytest.mark.integration
+def test_a_heal_on_a_control_target_is_joinable_to_a_deploy(tmp_path):
+    # The control arm's whole claim (design 8.1).
+    with Session() as s:
+        s.add(Run(run_key="testbench:2:2026-10-01", target="testbench", spec_version=2,
+                  window=at(1).date(), first_started_at=at(1), state="completed"))
+        s.add(Run(run_key="testbench:2:2026-10-02", target="testbench", spec_version=2,
+                  window=at(2).date(), first_started_at=at(2), state="healed"))
+        heal = HealEvent(run_key="testbench:2:2026-10-02", target="testbench", field="amount",
+                         broke_at=at(2, 4, 13), winning_rung=3, selector_after="td",
+                         anchor_after={}, trace=[], verdicts=[])
+        s.add(heal)
+        s.commit()
+        s.refresh(heal)
+    ingest_deploys("testbench", feed=_log(tmp_path, {"deployed_at": at(2, 1).isoformat(),
+                                                      "ref": "a1"}))
+    found = preceding_deploy(heal)
+    assert found is not None and found.ref == "a1"
+
+
+@pytest.mark.integration
+def test_a_heal_with_no_deploy_since_the_last_run_has_none(tmp_path):
+    with Session() as s:
+        s.add(Run(run_key="testbench:2:2026-10-01", target="testbench", spec_version=2,
+                  window=at(1).date(), first_started_at=at(1), state="completed"))
+        s.add(Run(run_key="testbench:2:2026-10-02", target="testbench", spec_version=2,
+                  window=at(2).date(), first_started_at=at(2), state="healed"))
+        heal = HealEvent(run_key="testbench:2:2026-10-02", target="testbench", field="amount",
+                         broke_at=at(2, 4, 13), winning_rung=3, selector_after="td",
+                         anchor_after={}, trace=[], verdicts=[])
+        s.add(heal)
+        s.commit()
+        s.refresh(heal)
+    ingest_deploys("testbench", feed=_log(tmp_path, {"deployed_at": at(1, 1).isoformat(),
+                                                      "ref": "old"}))   # before the last run
+    assert preceding_deploy(heal) is None
+
+
+@pytest.mark.unit
+def test_a_target_with_no_declared_feed_is_refused(tmp_path, monkeypatch):
+    f = tmp_path / "deploys.yaml"
+    f.write_text("testbench: { source: self-host, path: deploy/deploys.jsonl }\n",
+                 encoding="utf-8")
+    monkeypatch.setenv("SD_DEPLOYS_FILE", str(f))
+    assert isinstance(feed_for("testbench"), SelfHostLog)
+    with pytest.raises(LookupError, match="control-app"):
+        feed_for("control-app")
+```
+
+- [ ] **Step 3: Run them and watch them fail**
+
+Run: `uv run pytest tests/quality/test_alerts.py tests/orchestrate/test_interventions.py tests/orchestrate/test_deploys.py -v -m "unit or integration"`
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'selector_drift.quality.alerts'`
+(and `...orchestrate.interventions`, `...orchestrate.deploys`).
+
+- [ ] **Step 4: Implement the alert channel**
+
+```python
+# selector_drift/quality/alerts.py
+"""One alert channel (M2). A webhook, deduplicated per (target, rule) per UTC day in audit_log,
+so an alert stays an alert and never becomes a pager a client mutes (B7). Carries no client
+data, and never logs its own URL, which is a credential."""
+from __future__ import annotations
+
+import datetime as dt
+import logging
+import os
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Final
+
+import httpx
+from bok_core.findings import Finding, Severity
+from croniter import croniter
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session as OrmSession
+
+from selector_drift.config import get_settings
+from selector_drift.db.models import AuditLog, HealEvent, Heartbeat, Run
+from selector_drift.db.session import Session
+from selector_drift.spec.loader import load_spec
+
+log = logging.getLogger(__name__)
+
+WEBHOOK_ENV: Final = "SD_ALERT_WEBHOOK"
+ACTOR: Final = "system:alerts"
+SENT: Final = "alert_sent"
+PAGE: Final = frozenset({Severity.CRITICAL, Severity.HIGH})
+_RANK: Final = {Severity.CRITICAL: 0, Severity.HIGH: 1, Severity.MEDIUM: 2, Severity.LOW: 3,
+                Severity.INFO: 4}
+HEARTBEAT_GRACE: Final = dt.timedelta(minutes=30)
+TIMEOUT_S: Final = 10.0
+
+
+def webhook_url() -> str | None:
+    url = os.environ.get(WEBHOOK_ENV, "").strip()
+    if url and not url.startswith("https://"):
+        log.error("%s is not an https URL; alerts will be LOGGED ONLY", WEBHOOK_ENV)
+        return None
+    return url or None
+
+
+class _HideWebhook(logging.Filter):
+    """httpx logs every request URL at INFO; an incoming-webhook URL is a bearer credential."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        url = webhook_url()
+        return not (url and url in record.getMessage())
+
+
+logging.getLogger("httpx").addFilter(_HideWebhook())
+
+
+@dataclass(frozen=True)
+class Alert:
+    target: str
+    rule: str
+    severity: Severity
+    title: str
+    run_key: str | None
+    threshold: str | None = None
+    day: dt.date | None = None
+
+    def body(self, day: dt.date) -> dict[str, str | None]:
+        # An allow-list. Never a claim, never an extracted value, never evidence (rule 6).
+        return {"target": self.target, "rule": self.rule, "severity": self.severity.value,
+                "title": self.title, "run_key": self.run_key, "threshold": self.threshold,
+                "day": day.isoformat()}
+
+
+def check_alert_channel() -> bool:
+    if webhook_url() is None:
+        log.warning("%s is not set: alerts will be LOGGED ONLY and reach nobody", WEBHOOK_ENV)
+        return False
+    return True
+
+
+def _post(url: str, body: dict[str, str | None]) -> bool:
+    try:
+        httpx.post(url, json=body, timeout=TIMEOUT_S).raise_for_status()
+        return True
+    except httpx.HTTPError as exc:
+        log.error("alert webhook delivery failed (%s); retried on the next check",
+                  type(exc).__name__)                   # never str(exc): it carries the URL
+        return False
+
+
+def _unique(alerts: Sequence[Alert]) -> list[Alert]:
+    best: dict[tuple[str, str, dt.date | None], Alert] = {}
+    for a in alerts:
+        k = (a.target, a.rule, a.day)
+        if k not in best or _RANK[a.severity] < _RANK[best[k].severity]:
+            best[k] = a
+    return list(best.values())
+
+
+def _dispatch(alerts: Sequence[Alert], now: dt.datetime) -> None:
+    url = webhook_url()
+    with Session() as s:
+        for alert in _unique(alerts):
+            day = alert.day or now.astimezone(dt.UTC).date()
+            subject = f"{alert.target}:{alert.rule}:{day.isoformat()}"
+            if s.scalar(select(AuditLog.id).where(AuditLog.action == SENT,
+                                                  AuditLog.subject == subject).limit(1)):
+                continue
+            if url is None:
+                log.warning("ALERT NOT DELIVERED (%s unset): %s %s %s -- %s", WEBHOOK_ENV,
+                            alert.severity.value, alert.target, alert.rule, alert.title)
+                continue
+            if not _post(url, alert.body(day)):
+                continue                                 # not delivered, so not recorded
+            s.add(AuditLog(at=now, actor=ACTOR, action=SENT, subject=subject,
+                           detail={"target": alert.target, "rule": alert.rule,
+                                   "severity": alert.severity.value, "run_key": alert.run_key}))
+            s.commit()
+
+
+def notify(findings: Sequence[Finding], run: Run, *, now: dt.datetime | None = None) -> None:
+    alerts: list[Alert] = []
+    if run.state == "quarantined":
+        alerts.append(Alert(run.target, "quarantine", Severity.HIGH,
+                            f"{run.run_key} quarantined: data held, nothing written",
+                            run.run_key))
+    for f in findings:
+        if f.severity in PAGE:
+            threshold = f.properties.get("threshold")
+            alerts.append(Alert(run.target, str(f.properties.get("rule", f.id)), f.severity,
+                                f.title, run.run_key,
+                                str(threshold) if threshold is not None else None))
+    _dispatch(alerts, now or dt.datetime.now(dt.UTC))
+
+
+def _target_of(s: OrmSession, subject: str) -> str | None:
+    """Task 26C writes the heal id as subject; Task 34B's fixtures write the run_key."""
+    if ":" in subject:
+        return subject.split(":", 1)[0]
+    if subject.isdigit():
+        heal = s.get(HealEvent, int(subject))
+        return heal.target if heal is not None else None
+    return None
+
+
+def notify_false_accepts(*, now: dt.datetime | None = None) -> None:
+    alerts: list[Alert] = []
+    with Session() as s:
+        rows = s.scalars(select(AuditLog).where(
+            AuditLog.action == "scored",
+            AuditLog.detail["judgement"].astext == "false_accept")).all()
+        for row in rows:
+            target = _target_of(s, row.subject)
+            if target is not None:
+                alerts.append(Alert(target, "false_accept", Severity.HIGH,
+                                    f"the gate accepted a wrong heal ({row.subject})",
+                                    row.subject if ":" in row.subject else None,
+                                    day=row.at.astimezone(dt.UTC).date()))
+    _dispatch(alerts, now or dt.datetime.now(dt.UTC))
+
+
+def notify_missed_heartbeats(*, now: dt.datetime | None = None) -> None:
+    now = now or dt.datetime.now(dt.UTC)
+    alerts: list[Alert] = []
+    with Session() as s:
+        for path in sorted(get_settings().spec_dir.glob("*.yaml")):
+            target = path.stem                           # spec files are <target>.yaml
+            first = s.scalar(select(func.min(Heartbeat.scheduled_for))
+                             .where(Heartbeat.target == target))
+            if first is None:
+                continue                                 # this target's log has not started
+            slot: dt.datetime = croniter(load_spec(path).schedule,
+                                         now - HEARTBEAT_GRACE).get_prev(dt.datetime)
+            if slot < first:
+                continue
+            hit = s.scalar(select(Heartbeat.id).where(
+                Heartbeat.target == target,
+                Heartbeat.scheduled_for >= slot - dt.timedelta(minutes=1),
+                Heartbeat.scheduled_for <= slot + dt.timedelta(minutes=1)).limit(1))
+            if hit is None:
+                alerts.append(Alert(target, "missed_heartbeat", Severity.HIGH,
+                                    f"{target}: no heartbeat for the {slot:%Y-%m-%d %H:%M}Z slot",
+                                    None, day=slot.date()))
+    _dispatch(alerts, now)
+```
+
+- [ ] **Step 5: Implement the intervention ledger**
+
+```python
+# selector_drift/orchestrate/interventions.py
+"""The intervention ledger (M1). 'Zero manual selector fixes' is a claim only if every manual
+fix is a row. This module writes rows; derive.py (Task 34B) is the only thing that counts them."""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+from typing import Any, Final, Literal, get_args
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session as OrmSession
+
+from selector_drift.db.models import AuditLog, Intervention
+from selector_drift.db.session import Session
+from selector_drift.spec.schema import TaskSpec
+
+Kind = Literal["spec_edit", "cache_edit", "manual_promote"]
+SPEC_SEEN: Final = "spec_seen"
+LOADER_ACTOR: Final = "system:spec_loader"
+_NOT_A_FIELD: Final = frozenset({"targets", "version"})
+
+
+def _row(kind: Kind, actor: str, target: str, field: str, before: dict[str, Any] | None,
+         after: dict[str, Any] | None, reason: str, at: dt.datetime) -> Intervention:
+    if kind not in get_args(Kind):
+        raise ValueError(f"unknown intervention kind {kind!r}")
+    if not actor.strip():
+        raise ValueError("an intervention with no actor is not evidence")
+    return Intervention(at=at, actor=actor, kind=kind, target=target, field=field,
+                        before=before, after=after, reason=reason)
+
+
+def record_intervention(kind: Kind, actor: str, target: str, field: str,
+                        before: dict[str, Any] | None, after: dict[str, Any] | None,
+                        reason: str, *, at: dt.datetime | None = None) -> int:
+    row = _row(kind, actor, target, field, before, after, reason, at or dt.datetime.now(dt.UTC))
+    with Session() as s:
+        s.add(row)
+        s.commit()
+        return int(row.id)
+
+
+def record_cache_edit(actor: str, target: str, field: str, before: dict[str, Any] | None,
+                      after: dict[str, Any] | None, reason: str) -> int:
+    """The only sanctioned way to change a selector_cache row by hand."""
+    return record_intervention("cache_edit", actor, target, field, before, after, reason)
+
+
+def spec_changes(old: TaskSpec, new: TaskSpec) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """One entry per changed field. Top-level fields by name (the schedule's shape is pinned by
+    derive._schedule_spans); each FieldTarget as targets.<name>."""
+    o, n = old.model_dump(mode="json"), new.model_dump(mode="json")
+    out: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    for key in sorted((set(o) | set(n)) - _NOT_A_FIELD):
+        if o.get(key) != n.get(key):
+            out.append((key, {key: o.get(key)}, {key: n.get(key)}))
+    ot = {t["name"]: t for t in o.get("targets", [])}
+    nt = {t["name"]: t for t in n.get("targets", [])}
+    for name in sorted(set(ot) | set(nt)):
+        if ot.get(name) != nt.get(name):
+            out.append((f"targets.{name}", {"target": ot.get(name)}, {"target": nt.get(name)}))
+    return out
+
+
+def _last_seen(s: OrmSession, target: str) -> dict[str, Any] | None:
+    last = s.scalars(select(AuditLog).where(AuditLog.action == SPEC_SEEN,
+                                            AuditLog.subject == target)
+                     .order_by(AuditLog.at.desc(), AuditLog.id.desc()).limit(1)).first()
+    return dict(last.detail) if last is not None else None
+
+
+def observe_spec(target: str, spec: TaskSpec, *, actor: str = LOADER_ACTOR,
+                 now: dt.datetime | None = None) -> list[int]:
+    now = now or dt.datetime.now(dt.UTC)
+    body = spec.model_dump(mode="json")
+    digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+    with Session() as s:
+        previous = _last_seen(s, target)
+        if previous is not None and previous.get("sha256") == digest:
+            return []
+        s.add(AuditLog(at=now, actor=actor, action=SPEC_SEEN, subject=target,
+                       detail={"sha256": digest, "spec": body}))
+        rows: list[Intervention] = []
+        if previous is not None:                        # first sight is a baseline, not an edit
+            reason = (f"spec file changed between runs "
+                      f"({str(previous['sha256'])[:12]} -> {digest[:12]})")
+            rows = [_row("spec_edit", actor, target, field, before, after, reason, now)
+                    for field, before, after in spec_changes(
+                        TaskSpec.model_validate(previous["spec"]), spec)]
+            s.add_all(rows)
+        s.commit()
+        return [int(r.id) for r in rows]
+```
+
+- [ ] **Step 6: Implement deploy history**
+
+```yaml
+# deploys.yaml -- where each target's deploy history comes from (M10). Read by
+# orchestrate/deploys.py; path overridable with SD_DEPLOYS_FILE.
+testbench:
+  source: self-host
+  path: deploy/deploys.jsonl      # appended by the VM's deploy script, one JSON line per deploy
+# The two control-arm targets are added here when P-3 names them, as either
+#   <name>: { source: self-host, path: deploy/<name>.jsonl }
+# or
+#   <name>: { source: gh-actions, repo: <real-account>/<repo>, environment: production }
+```
+
+```python
+# selector_drift/orchestrate/deploys.py
+"""Deploy history for the control arm (M10). 'Heals fired only on runs following an actual
+deploy, verified against deploy history' is checkable only against a stored feed."""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal, Protocol
+
+import httpx
+import yaml
+from pydantic import SecretStr
+from sqlalchemy import func, select
+
+from selector_drift.db.models import Deploy, HealEvent, Run
+from selector_drift.db.session import Session
+
+Source = Literal["self-host", "gh-actions", "manual"]
+DEPLOYS_FILE_ENV = "SD_DEPLOYS_FILE"
+GITHUB_TOKEN_ENV = "SD_GITHUB_TOKEN"
+GITHUB_API = "https://api.github.com"
+
+
+@dataclass(frozen=True)
+class DeployRecord:
+    deployed_at: dt.datetime
+    ref: str
+
+
+class DeployFeed(Protocol):
+    @property
+    def source(self) -> Source: ...
+
+    def fetch(self) -> list[DeployRecord]: ...
+
+
+def _aware(value: str, where: str) -> dt.datetime:
+    at = dt.datetime.fromisoformat(value)
+    if at.tzinfo is None:
+        raise ValueError(f"{where}: deployed_at has no timezone; the log is UTC throughout (M20)")
+    return at.astimezone(dt.UTC)
+
+
+@dataclass(frozen=True)
+class SelfHostLog:
+    path: Path
+    source: Source = "self-host"
+
+    def fetch(self) -> list[DeployRecord]:
+        out: list[DeployRecord] = []
+        for i, line in enumerate(self.path.read_text(encoding="utf-8").splitlines(), start=1):
+            if line.strip():
+                obj = json.loads(line)
+                out.append(DeployRecord(_aware(str(obj["deployed_at"]), f"{self.path}:{i}"),
+                                        str(obj["ref"])))
+        return out
+
+
+@dataclass(frozen=True)
+class GitHubDeployments:
+    repo: str
+    environment: str = "production"
+    token: SecretStr | None = None
+    source: Source = "gh-actions"
+
+    def fetch(self) -> list[DeployRecord]:
+        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+        if self.token is not None:
+            headers["Authorization"] = f"Bearer {self.token.get_secret_value()}"
+        url: str | None = f"{GITHUB_API}/repos/{self.repo}/deployments"
+        params: dict[str, Any] | None = {"environment": self.environment, "per_page": 100}
+        out: list[DeployRecord] = []
+        while url is not None:
+            r = httpx.get(url, params=params, headers=headers, timeout=15.0)
+            r.raise_for_status()
+            out += [DeployRecord(_aware(str(d["created_at"]), self.repo), str(d["sha"]))
+                    for d in r.json()]
+            nxt = r.links.get("next")
+            url, params = (nxt["url"], None) if nxt else (None, None)
+        return out
+
+
+def feed_for(target: str) -> DeployFeed:
+    path = Path(os.environ.get(DEPLOYS_FILE_ENV, "deploys.yaml"))
+    declared = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    entry = declared.get(target)
+    if not isinstance(entry, dict):
+        raise LookupError(f"{target}: no deploy feed declared in {path.name}")
+    if entry.get("source") == "self-host":
+        return SelfHostLog(Path(str(entry["path"])))
+    if entry.get("source") == "gh-actions":
+        token = os.environ.get(GITHUB_TOKEN_ENV)
+        return GitHubDeployments(str(entry["repo"]), str(entry.get("environment", "production")),
+                                 SecretStr(token) if token else None)
+    raise LookupError(f"{target}: unknown deploy source {entry.get('source')!r}")
+
+
+def ingest_deploys(target: str, *, feed: DeployFeed | None = None,
+                   now: dt.datetime | None = None) -> int:
+    feed = feed or feed_for(target)
+    now = now or dt.datetime.now(dt.UTC)
+    new = 0
+    with Session() as s:
+        for rec in feed.fetch():
+            known = s.scalar(select(func.count()).select_from(Deploy).where(
+                Deploy.target == target, Deploy.deployed_at == rec.deployed_at,
+                Deploy.ref == rec.ref))
+            if not known:
+                s.add(Deploy(target=target, deployed_at=rec.deployed_at, source=feed.source,
+                             ref=rec.ref, ingested_at=now))
+                new += 1
+        s.commit()
+    return new
+
+
+def preceding_deploy(heal: HealEvent) -> Deploy | None:
+    """The latest deploy of the heal's target after the previous run started and before the
+    heal. None means this heal followed no deploy -- the control arm says it should not exist."""
+    with Session() as s:
+        previous = s.scalar(select(func.max(Run.first_started_at)).where(
+            Run.target == heal.target, Run.run_key != heal.run_key,
+            Run.first_started_at < heal.broke_at))
+        q = select(Deploy).where(Deploy.target == heal.target, Deploy.deployed_at <= heal.broke_at)
+        if previous is not None:
+            q = q.where(Deploy.deployed_at > previous)
+        return s.scalars(q.order_by(Deploy.deployed_at.desc()).limit(1)).first()
+```
+
+**One feed being down must not stop the other feeds, and must not be a warning either** — every
+target is attempted, then the flow run fails naming the ones that did not ingest:
+
+```python
+# selector_drift/orchestrate/watch.py
+"""Every fifteen minutes: the checks that have no run to hang off."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import yaml
+from prefect import flow
+
+from selector_drift.orchestrate.deploys import DEPLOYS_FILE_ENV, ingest_deploys
+from selector_drift.quality.alerts import (check_alert_channel, notify_false_accepts,
+                                           notify_missed_heartbeats)
+
+
+@flow(name="alert-watch", retries=0, timeout_seconds=300)
+def alert_watch() -> None:
+    check_alert_channel()
+    notify_missed_heartbeats()
+    notify_false_accepts()
+    declared = yaml.safe_load(Path(os.environ.get(DEPLOYS_FILE_ENV, "deploys.yaml"))
+                              .read_text(encoding="utf-8")) or {}
+    failed: list[str] = []
+    for target in sorted(declared):
+        try:
+            ingest_deploys(target)
+        except Exception:                               # noqa: BLE001 -- collected, re-raised below
+            failed.append(target)
+    if failed:                                          # fails the flow run: visible, not a warning
+        raise RuntimeError(f"deploy ingest failed for {failed}")
+```
+
+In `selector_drift/orchestrate/deployments.py`, beside `retention_deployment()` (Task 33):
+
+```python
+from selector_drift.orchestrate.watch import alert_watch
+
+WATCH_CRON = "*/15 * * * *"
+
+
+def watch_deployment() -> RunnerDeployment:
+    return alert_watch.to_deployment(name="alert-watch", cron=WATCH_CRON,
+                                     job_variables={"mem_limit": "256m"})
+```
+
+and the module's `serve(...)` call gains `watch_deployment()`.
+
+- [ ] **Step 7: Wire the pipeline and promotion**
+
+In `selector_drift/orchestrate/pipeline.py` (Task 26A), add the imports:
+
+```python
+from selector_drift.orchestrate.interventions import observe_spec
+from selector_drift.quality.alerts import notify
+```
+
+observe the spec immediately after the scope record is loaded, **before** authorisation, so a spec
+edit is recorded even on a run that is then refused:
+
+```python
+    spec = load_spec(settings.spec_dir / spec_path)
+    record = load_scope(settings.scope_dir / spec.scope_ref.split("/")[-1])
+    observe_spec(record.target, spec)                          # Task 29A (M1)
+    key = run_key(record.target, spec.version, window.isoformat())
+```
+
+add `run_for`:
+
+```python
+def run_for(key: str) -> Run:
+    with Session() as s:
+        run = s.get(Run, key)
+        if run is None:
+            raise LookupError(f"no run {key}")
+        return run
+```
+
+and replace Part 1's decision block and its tail with (Part 2's `settle()` replacement keeps the
+`findings` / `notify` lines unchanged):
+
+```python
+    findings: list[Finding] = []
+    if isinstance(result, ValidatedExtraction):
+        land_writer.write(result, attempt=attempt)
+        writer = CacheWriter(target=target.target, spec_version=spec.version)
+        for name, el in elements.items():
+            writer.put(result, el, field=name)                     # ONLY here (C2)
+        findings = evaluate(key)                                   # Task 29: persists findings
+        state = "healed" if heals else "completed"
+        rows = len(result.rows)
+    else:
+        _hold_minimal(key, result.reason, result.verdicts)
+        state, rows = "quarantined", 0
+
+    record_attempt(key, attempt, state, None, target.record_sha256)
+    record_run(key, target=target.target, spec_version=spec.version, window=window,
+               state=state, rows_written=rows)
+    notify(findings, run_for(key))                                 # every settled run (M2)
+    return key
+```
+
+with `from bok_core.findings import Finding` added to the imports. The `RowMisaligned` early return
+also calls `notify([], run_for(key))` after its `record_run`.
+
+In `selector_drift/orchestrate/quarantine_actions.py` (Task 26A Part 2), import
+`from selector_drift.orchestrate.interventions import record_intervention` and make `_promote`:
+
+```python
+    def _promote(run_key: str, actor: str, reason: str) -> None:
+        validated = quarantine.promote(run_key, actor=actor, reason=reason)  # re-runs the gate
+        accept_promoted(run_key, validated, cache=CacheWriter.for_run_key(run_key))
+        record_intervention("manual_promote", actor, run_key.split(":", 1)[0], "*",
+                            {"run_key": run_key, "state": "quarantined"},
+                            {"run_key": run_key, "state": "promoted"}, reason)
+```
+
+Append to `.env.example`:
+
+```bash
+SD_ALERT_WEBHOOK=          # optional; https only; unset = alerts are logged, never sent
+SD_DEPLOYS_FILE=deploys.yaml
+SD_GITHUB_TOKEN=           # optional; fine-grained, read-only deployments, for gh-actions feeds
+```
+
+- [ ] **Step 8: Run the tests and the full check**
+
+Run: `uv run pytest tests/quality/test_alerts.py tests/orchestrate/test_interventions.py tests/orchestrate/test_deploys.py -v -m "unit or integration"`
+Expected: PASS, 29 tests (14 alerts, 9 interventions, 6 deploys).
+
+Run: *the full check*. Expected: PASS; `lint-imports` still kept (`quality` and `orchestrate` import
+neither `resolve` nor `testbench.answers`).
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add selector_drift/quality/alerts.py selector_drift/orchestrate/interventions.py \
+        selector_drift/orchestrate/deploys.py selector_drift/orchestrate/watch.py \
+        selector_drift/orchestrate/deployments.py selector_drift/orchestrate/pipeline.py \
+        selector_drift/orchestrate/quarantine_actions.py deploys.yaml pyproject.toml uv.lock \
+        .env.example tests/quality/test_alerts.py tests/orchestrate/test_interventions.py \
+        tests/orchestrate/test_deploys.py
+git commit -m "feat(quality): alerting, intervention ledger, deploy-history ingest (M1, M2, M10)"
+```
 
 ---
 
@@ -7567,201 +20898,1204 @@ git commit -m "feat(quality): alerting, intervention ledger, deploy-history inge
 ### Task 31: `CredentialProvider`, session injection, and the seed that does not exist
 
 **Files:**
-- Create: `selector_drift/credentials/provider.py`, `selector_drift/credentials/session.py`
-- Test: `tests/credentials/test_no_totp_seed.py`, `tests/credentials/test_session.py`
+- Create: `selector_drift/credentials/provider.py`, `selector_drift/credentials/session.py`, `selector_drift/credentials/registry.py`
+- Test: `tests/credentials/__init__.py` (empty), `tests/credentials/conftest.py`, `tests/credentials/test_no_totp_seed.py`, `tests/credentials/test_session.py`, `tests/credentials/test_registry.py`
 
 **Interfaces:**
-- Consumes: `AuthorisedTarget` (Task 2).
+- Consumes: `AuthorisedTarget`, `ScopeRecord`, `authorise` (Task 2); `load_scope` (Task 5, `spec/loader.py`); `get_settings` (Task 28 Step 0).
 - Produces:
-  - `Credentials(cookies: list[dict] | None, username: str | None, password: SecretStr | None)`
+  - `Credentials(cookies: list[dict[str, Any]] | None = None, username: str | None = None, password: SecretStr | None = None)` — frozen, `extra="forbid"`; `cookies` is excluded from `repr`
   - `CredentialProvider` protocol — `get(target: AuthorisedTarget) -> Credentials`, `get_totp_code(target: AuthorisedTarget) -> str`
-  - `NotSupported(Exception)` — raised by `get_totp_code` on every provider except `ClientBroker`
-  - `SessionInjection(storage_state_path: Path)` — the **default offer**
+  - `NotSupported(Exception)` — raised by `get_totp_code` on every provider except `ClientBroker` (Task 32); `CredentialsUnavailable(Exception)`
+  - `SessionInjection(storage_state_path: Path, *, now: Callable[[], datetime] = ...)` — the **default offer**
+  - `registry.provider_for(target: str) -> CredentialProvider`, `registry.register(posture: str, factory: Callable[[ScopeRecord], CredentialProvider]) -> None`, `registry.session_path(target: str) -> Path`
+
+**Folded in from the 2026-09-26 amendment: one registry names each target's credential posture.**
+Task 26A's flow calls `provider_for(target)`, and no task created it. It is created here with
+`SessionInjection` registered; Task 32 registers `ClientBroker` and `EncryptedStore` and adds the
+`credential_posture` field. The `scope_records.credential_posture` mirror column already exists
+(Task 3 — the schema freezes on day one). Until Task 32 every target uses the default, which is also
+the default offer (design §2.1 Q2). **Two corrections to the amendment's code:** it imported
+`load_scope` from `scope.gate`, but Task 5 defines it in `spec/loader.py`; and its factories took the
+target name, so the encrypted store could not find the *client* its per-client key belongs to — a
+factory now receives the whole `ScopeRecord`. The amendment's `test_an_unknown_posture_...` moves to
+Task 32: until the field exists there is nothing to be unknown, and once it is a `Literal`, an unknown
+value is refused **at load**, before the registry is reached.
+
+**The guarantee you sell is a feature that does not exist.** Storing a TOTP seed defeats the second
+factor and may breach the client's own policy even when they ask for it (brief rule 4). The first
+draft's test looked only at Pydantic `model_fields`; a dataclass field or a database column named
+`totp_secret` passed it. It now inspects Pydantic fields, dataclass fields **and SQLAlchemy columns**
+of every class in `selector_drift`, by exact name and by pattern.
+
+**Cookies are credentials too.** A session cookie *is* the login. `Credentials.cookies` is excluded
+from `repr`; `SessionInjection` refuses a state file readable by group or others (POSIX), drops every
+cookie whose domain is not one of the target's authorised origins (H2 — never hand a portal cookie to
+another origin), refuses a session with no live cookie rather than proceeding logged-out, and logs
+counts only.
+
+**Two first-draft tests were vacuous (M19-class).** `test_secrets_never_appear_in_a_log` asserted that
+`"hunter2"` never appeared after `SessionInjection.get()` — a value that was never in the state file,
+so the test could not fail. It now asserts on the cookie value `get()` actually loads. And Step 4 ran
+`uv run gitleaks`; gitleaks is a Go binary (Task 1, L5), run through `pre-commit`.
 
 - [ ] **Step 1: Write the failing tests — the guarantee you actually sell**
 
 ```python
+# tests/credentials/conftest.py
+import datetime as dt
+
+import pytest
+
+from selector_drift.scope.gate import authorise
+from selector_drift.scope.record import AuthorisedTarget, Basis, ScopeRecord
+
+SCOPE_YAML = """target: testbench
+basis: self-owned
+authorising_party: Acme Claims Ltd
+authorised_on: 2026-01-01
+expires_on: 2027-12-31
+evidence_uri: null
+evidence_sha256: null
+origins: [ https://bench.example.invalid ]
+rate_limit: { requests: 1, per_seconds: 30 }
+user_agent_contact: https://example.invalid/contact
+first_heal_policy: auto_promote
+legal_review: self_drafted
+"""
+
+
+@pytest.fixture
+def target() -> AuthorisedTarget:
+    rec = ScopeRecord(target="testbench", basis=Basis.SELF_OWNED, authorising_party="me",
+                      authorised_on=dt.date(2026, 1, 1), expires_on=dt.date(2027, 12, 31),
+                      evidence_uri=None, evidence_sha256=None,
+                      origins=["https://bench.example.invalid"],
+                      rate_limit={"requests": 1, "per_seconds": 30},
+                      user_agent_contact="https://example.invalid/contact",
+                      first_heal_policy="required", legal_review="self_drafted")
+    return authorise(rec, today=dt.date(2026, 9, 7))
+```
+
+```python
 # tests/credentials/test_no_totp_seed.py
-import inspect, pkgutil, importlib
+import dataclasses
+import importlib
+import inspect
+import pkgutil
+import re
 from pathlib import Path
+
+import pytest
+
 import selector_drift
 
-FORBIDDEN = {"totp_seed", "totp_secret", "otp_seed", "shared_secret", "seed"}
+FORBIDDEN = {"seed", "totp_seed", "totp_secret", "totp_key", "otp_seed", "otp_secret",
+             "mfa_seed", "mfa_secret", "shared_secret", "otpauth_uri"}
+PATTERN = re.compile(r"(totp|otp|mfa|2fa|authenticator).*(seed|secret|key|uri)", re.IGNORECASE)
 
+
+def _field_names(cls: type) -> set[str]:
+    names = set(getattr(cls, "model_fields", None) or {})
+    if dataclasses.is_dataclass(cls):
+        names |= {f.name for f in dataclasses.fields(cls)}
+    table = getattr(cls, "__table__", None)
+    if table is not None:
+        names |= {c.name for c in table.columns}
+    return names
+
+
+@pytest.mark.unit
 def test_no_field_anywhere_is_named_for_a_totp_seed():
-    """Spec 2.1 Q2. Storing a TOTP seed defeats the second factor. This is not a
-    policy we follow, it is a feature that does not exist."""
+    """Design 2.1 Q2. Storing a TOTP seed defeats the second factor. This is not a policy we
+    follow, it is a feature that does not exist -- in a model, a dataclass or a table."""
+    offenders = []
     for mod in pkgutil.walk_packages(selector_drift.__path__, "selector_drift."):
+        if mod.name.endswith("__main__"):
+            continue
         m = importlib.import_module(mod.name)
         for _, cls in inspect.getmembers(m, inspect.isclass):
-            fields = set(getattr(cls, "model_fields", {}))
-            assert not (FORBIDDEN & fields), f"{cls.__name__} carries a seed field"
+            for name in _field_names(cls):
+                if name.lower() in FORBIDDEN or PATTERN.search(name):
+                    offenders.append(f"{mod.name}.{cls.__name__}.{name}")
+    assert offenders == [], offenders
 
+
+@pytest.mark.unit
 def test_totp_code_is_fetched_never_computed():
-    assert "pyotp" not in Path("pyproject.toml").read_text()
+    # No TOTP library: a code is asked of the client's broker (Task 32), never derived here.
+    for path in ("pyproject.toml", "uv.lock"):
+        text = Path(path).read_text(encoding="utf-8").lower()
+        assert "pyotp" not in text and "mintotp" not in text, path
 ```
 
 ```python
 # tests/credentials/test_session.py
-from selector_drift.credentials.provider import Credentials, NotSupported
-from selector_drift.credentials.session import SessionInjection
+import datetime as dt
+import json
+import logging
+import os
+from pathlib import Path
+
 import pytest
 
+from selector_drift.credentials.provider import (CredentialProvider, Credentials,
+                                                 CredentialsUnavailable, NotSupported)
+from selector_drift.credentials.session import SessionInjection
+
+COOKIE = "sid-7f3e9a1c-test-only"
+FUTURE = dt.datetime(2030, 1, 1, tzinfo=dt.UTC).timestamp()
+
+
+def _state(tmp_path: Path, cookies: list[dict]) -> Path:
+    p = tmp_path / "testbench.json"
+    p.write_text(json.dumps({"cookies": cookies, "origins": []}), encoding="utf-8")
+    if os.name != "nt":
+        p.chmod(0o600)
+    return p
+
+
+def _cookie(domain: str = "bench.example.invalid", expires: float = FUTURE) -> dict:
+    return {"name": "session", "value": COOKIE, "domain": domain, "path": "/",
+            "expires": expires, "httpOnly": True, "secure": True, "sameSite": "Lax"}
+
+
+@pytest.mark.unit
 def test_password_is_a_secret_str():
     c = Credentials(password="hunter2")
-    assert c.password.get_secret_value() == "hunter2"
-    assert "hunter2" not in repr(c)
+    assert c.password is not None and c.password.get_secret_value() == "hunter2"
+    assert "hunter2" not in repr(c) and "hunter2" not in str(c)
 
-def test_secrets_never_appear_in_a_log(caplog, target):
-    SessionInjection(STATE_PATH).get(target)
-    assert "hunter2" not in caplog.text
 
-def test_session_injection_cannot_produce_a_totp_code(target):
+@pytest.mark.unit
+def test_cookie_values_are_not_in_the_repr():
+    c = Credentials(cookies=[_cookie()])
+    assert COOKIE not in repr(c) and COOKIE not in str(c)
+
+
+@pytest.mark.unit
+def test_session_injection_is_a_credential_provider(tmp_path):
+    assert isinstance(SessionInjection(_state(tmp_path, [_cookie()])), CredentialProvider)
+
+
+@pytest.mark.unit
+def test_session_injection_returns_the_cookies_for_the_authorised_origin(tmp_path, target):
+    creds = SessionInjection(_state(tmp_path, [_cookie()])).get(target)
+    assert creds.cookies is not None and [c["value"] for c in creds.cookies] == [COOKIE]
+    assert creds.password is None and creds.username is None
+
+
+@pytest.mark.unit
+def test_secrets_never_appear_in_a_log(tmp_path, target, caplog):
+    # Fixed (M19-class): the first draft checked for "hunter2", which was never loaded.
+    with caplog.at_level(logging.DEBUG):
+        SessionInjection(_state(tmp_path, [_cookie()])).get(target)
+    assert COOKIE not in caplog.text
+
+
+@pytest.mark.unit
+def test_a_cookie_for_another_origin_is_never_handed_over(tmp_path, target):
+    # H2: the injected session may only ever reach the authorised origin.
+    state = _state(tmp_path, [_cookie(), _cookie(domain=".tracker.example.invalid")])
+    creds = SessionInjection(state).get(target)
+    assert [c["domain"] for c in creds.cookies or []] == ["bench.example.invalid"]
+
+
+@pytest.mark.unit
+def test_an_expired_session_is_refused_not_used_logged_out(tmp_path, target):
+    state = _state(tmp_path, [_cookie(expires=dt.datetime(2020, 1, 1, tzinfo=dt.UTC).timestamp())])
+    with pytest.raises(CredentialsUnavailable, match="fresh session"):
+        SessionInjection(state).get(target)
+
+
+@pytest.mark.unit
+def test_a_missing_state_file_is_refused(tmp_path, target):
+    with pytest.raises(CredentialsUnavailable):
+        SessionInjection(tmp_path / "absent.json").get(target)
+
+
+@pytest.mark.unit
+def test_a_state_file_readable_by_others_is_refused(tmp_path, target):
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits; the VM is Linux")
+    state = _state(tmp_path, [_cookie()])
+    state.chmod(0o644)
+    with pytest.raises(CredentialsUnavailable, match="chmod 600"):
+        SessionInjection(state).get(target)
+
+
+@pytest.mark.unit
+def test_session_injection_cannot_produce_a_totp_code(tmp_path, target):
     with pytest.raises(NotSupported):
-        SessionInjection(STATE_PATH).get_totp_code(target)
-```
-
-- [ ] **Step 2: Run them and watch them fail**
-
-Run: `uv run pytest tests/credentials -v`
-Expected: FAIL — `ModuleNotFoundError`.
-
-- [ ] **Step 3: Implement the protocol and `SessionInjection`.**
-
-- [ ] **Step 4: Run the tests and make sure they pass**
-
-Run: `uv run pytest tests/credentials -v && uv run gitleaks detect --no-git`
-Expected: PASS, 5 tests. gitleaks clean.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add selector_drift/credentials tests/credentials
-git commit -m "feat(credentials): provider protocol, session injection, no TOTP seed"
-```
-
-
-**Amended 2026-09-26: one registry names each target's credential posture.** Task 26A's flow calls
-`selector_drift.credentials.registry.provider_for(target: str) -> CredentialProvider`, and no task
-created it. Create `selector_drift/credentials/registry.py` here: a mapping from target name to a
-provider factory, read from the target's scope record, with `SessionInjection` registered in this
-task and `ClientBroker` and `EncryptedStore` registered by Task 32. **Task 32 also adds
-`credential_posture: Literal["session_injection", "client_broker", "encrypted_store"] =
-"session_injection"` to `ScopeRecord`** — the Pydantic field only. Its `scope_records` mirror column, `credential_posture` (text, not null,
-default `'session_injection'`), is created **in Task 3**, because the schema freezes on day one and a
-column added in week 18 is exactly what that rule forbids. Until Task 32 every target uses the default,
-which is also the default offer (design §2.1 Q2). An unknown posture is a refusal, never a fallback to a weaker
-one:
-
-```python
-# selector_drift/credentials/registry.py
-from collections.abc import Callable
-
-from selector_drift.config import get_settings
-from selector_drift.credentials.provider import CredentialProvider
-from selector_drift.credentials.session import SessionInjection
-from selector_drift.scope.gate import load_scope
-
-_FACTORIES: dict[str, Callable[[str], CredentialProvider]] = {
-    "session_injection": lambda target: SessionInjection(
-        get_settings().evidence_root.parent / "sessions" / f"{target}.json"),
-}
-
-
-def register(posture: str, factory: Callable[[str], CredentialProvider]) -> None:
-    _FACTORIES[posture] = factory
-
-
-def provider_for(target: str) -> CredentialProvider:
-    record = load_scope(get_settings().scope_dir / f"{target}.yaml")
-    posture = getattr(record, "credential_posture", "session_injection")   # field added by Task 32
-    if posture not in _FACTORIES:
-        raise LookupError(f"{target}: unknown credential posture {posture!r} -- refusing, not downgrading")
-    return _FACTORIES[posture](target)
+        SessionInjection(_state(tmp_path, [_cookie()])).get_totp_code(target)
 ```
 
 ```python
 # tests/credentials/test_registry.py
 import pytest
 
+from selector_drift.config import get_settings
+from selector_drift.credentials import registry
+from selector_drift.credentials.session import SessionInjection
+from tests.credentials.conftest import SCOPE_YAML
+
+
+@pytest.fixture
+def scopes(tmp_path, monkeypatch):
+    d = tmp_path / "scopes"
+    d.mkdir()
+    (d / "testbench.yaml").write_text(SCOPE_YAML, encoding="utf-8")
+    monkeypatch.setenv("SD_SCOPE_DIR", str(d))
+    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(tmp_path / "evidence"))
+    get_settings.cache_clear()
+    yield d
+    get_settings.cache_clear()
+
+
 @pytest.mark.unit
-def test_an_unknown_posture_is_refused_not_downgraded(monkeypatch, scope_with_posture):
-    from selector_drift.credentials.registry import provider_for
-    scope_with_posture("testbench", "totp_seed_store")
-    with pytest.raises(LookupError):
-        provider_for("testbench")
+def test_the_default_posture_is_session_injection(scopes, tmp_path):
+    provider = registry.provider_for("testbench")
+    assert isinstance(provider, SessionInjection)
+    assert provider.storage_state_path == tmp_path / "sessions" / "testbench.json"
+
+
+@pytest.mark.unit
+def test_a_target_name_cannot_escape_the_sessions_directory():
+    with pytest.raises(ValueError):
+        registry.session_path("../evidence/x")
 ```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `uv run pytest tests/credentials -v -m unit`
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'selector_drift.credentials.provider'`.
+
+- [ ] **Step 3: Implement the protocol, `SessionInjection` and the registry**
+
+```python
+# selector_drift/credentials/provider.py
+"""What a target's credentials are, and the one operation only the client's own broker may
+perform (design 2.1 Q2; brief rule 4). No field here, or anywhere, holds a TOTP seed."""
+from __future__ import annotations
+
+from typing import Any, Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+from selector_drift.scope.record import AuthorisedTarget
+
+
+class NotSupported(Exception):
+    """This provider cannot do that -- by design, not by omission."""
+
+
+class CredentialsUnavailable(Exception):
+    """No usable credential for the target. The run fails; it never proceeds logged out."""
+
+
+class Credentials(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cookies: list[dict[str, Any]] | None = Field(default=None, repr=False)   # a cookie IS a login
+    username: str | None = None
+    password: SecretStr | None = None
+
+
+@runtime_checkable
+class CredentialProvider(Protocol):
+    def get(self, target: AuthorisedTarget) -> Credentials: ...
+
+    def get_totp_code(self, target: AuthorisedTarget) -> str: ...
+```
+
+```python
+# selector_drift/credentials/session.py
+"""Session injection -- the default offer (design 2.1 Q2). The client logs in, exports a
+Playwright storage state, and we replay its cookies. We never see a password or a second factor."""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+from selector_drift.credentials.provider import Credentials, CredentialsUnavailable, NotSupported
+from selector_drift.scope.record import AuthorisedTarget
+
+log = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _domain_matches(domain: str, hosts: set[str]) -> bool:
+    d = domain.lstrip(".").lower()
+    return bool(d) and any(h == d or h.endswith("." + d) for h in hosts)
+
+
+class SessionInjection:
+    def __init__(self, storage_state_path: Path, *,
+                 now: Callable[[], datetime] = _utc_now) -> None:
+        self.storage_state_path = storage_state_path
+        self._now = now
+
+    def __repr__(self) -> str:
+        return f"SessionInjection({self.storage_state_path.name!r})"
+
+    def _read(self) -> dict[str, Any]:
+        p = self.storage_state_path
+        if not p.is_file():
+            raise CredentialsUnavailable(f"no session state at {p.name}; ask the client for one")
+        if os.name != "nt" and p.stat().st_mode & 0o077:
+            raise CredentialsUnavailable(f"{p.name} is readable by group or others; chmod 600")
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise CredentialsUnavailable(f"{p.name} is not a Playwright storage state") from None
+        if not isinstance(data, dict) or not isinstance(data.get("cookies", []), list):
+            raise CredentialsUnavailable(f"{p.name} is not a Playwright storage state")
+        return data
+
+    def get(self, target: AuthorisedTarget) -> Credentials:
+        hosts = {h for o in target.origins if (h := urlsplit(o).hostname)}
+        now = self._now().timestamp()
+        cookies = [c for c in self._read().get("cookies", [])
+                   if isinstance(c, dict) and _domain_matches(str(c.get("domain", "")), hosts)]
+        live = [c for c in cookies if float(c.get("expires", -1)) < 0
+                or float(c.get("expires", -1)) > now]
+        if not live:
+            raise CredentialsUnavailable(
+                f"{target.target}: the injected session has no live cookie for the authorised "
+                "origin -- ask the client for a fresh session")
+        log.info("session injection: %d cookie(s) for %s", len(live), target.target)
+        return Credentials(cookies=live)
+
+    def get_totp_code(self, target: AuthorisedTarget) -> str:
+        raise NotSupported("session injection replays a session; it holds no second factor -- "
+                           "the client completes MFA when they export the session")
+```
+
+```python
+# selector_drift/credentials/registry.py
+"""Which provider a target uses -- named by its scope record, never guessed. An unknown posture
+is a refusal, never a fallback to a weaker one."""
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from pathlib import Path
+
+from selector_drift.config import get_settings
+from selector_drift.credentials.provider import CredentialProvider
+from selector_drift.credentials.session import SessionInjection
+from selector_drift.scope.record import ScopeRecord
+from selector_drift.spec.loader import load_scope
+
+Factory = Callable[[ScopeRecord], CredentialProvider]
+_TARGET = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def session_path(target: str) -> Path:
+    if not _TARGET.fullmatch(target):
+        raise ValueError(f"{target!r} is not a target name")
+    return get_settings().evidence_root.parent / "sessions" / f"{target}.json"
+
+
+_FACTORIES: dict[str, Factory] = {
+    "session_injection": lambda record: SessionInjection(session_path(record.target)),
+}
+
+
+def register(posture: str, factory: Factory) -> None:
+    _FACTORIES[posture] = factory
+
+
+def provider_for(target: str) -> CredentialProvider:
+    record = load_scope(get_settings().scope_dir / f"{target}.yaml")
+    posture = str(getattr(record, "credential_posture", "session_injection"))  # field: Task 32
+    factory = _FACTORIES.get(posture)
+    if factory is None:
+        raise LookupError(f"{target}: no provider registered for credential posture "
+                          f"{posture!r} -- refusing, not downgrading")
+    return factory(record)
+```
+
+- [ ] **Step 4: Run the tests and make sure they pass**
+
+Run: `uv run pytest tests/credentials -v -m unit && uv run mypy --strict selector_drift/credentials && pre-commit run gitleaks --all-files`
+Expected: PASS, 14 tests (2 seed, 10 session, 2 registry; `test_a_state_file_readable_by_others_is_refused`
+reports SKIPPED on Windows). mypy clean. gitleaks: `Passed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add selector_drift/credentials tests/credentials
+git commit -m "feat(credentials): provider protocol, session injection, registry, no TOTP seed"
+```
+
 ---
 
 ### Task 32: The client broker and the encrypted store
 
 **Files:**
-- Create: `selector_drift/credentials/broker.py`, `selector_drift/credentials/store.py`
-- Modify: `docs/security.md`
-- Test: `tests/credentials/test_broker.py`, `tests/credentials/test_store.py`
+- Create: `selector_drift/credentials/broker.py`, `selector_drift/credentials/store.py`, `docs/security.md`
+- Modify: `selector_drift/scope/record.py` (Task 2) — `ScopeRecord.credential_posture`; `selector_drift/credentials/registry.py` (Task 31); `.env.example`
+- Test: `tests/credentials/test_broker.py`, `tests/credentials/test_store.py`, `tests/credentials/test_posture.py`
 
 **Interfaces:**
-- Consumes: `CredentialProvider`, `Credentials` (Task 31).
+- Consumes: `CredentialProvider`, `Credentials`, `NotSupported`, `registry` (Task 31); `AuthorisedTarget`, `ScopeRecord` (Task 2).
 - Produces:
-  - `ClientBroker(endpoint: str, token: SecretStr)` — the only provider implementing `get_totp_code()`, which **asks the client's endpoint for a fresh code**; the seed stays with them
-  - `EncryptedStore(key_id: str)` — envelope encryption, per-client data key, ciphertext at rest, last resort
+  - `CredentialPosture = Literal["session_injection", "client_broker", "encrypted_store"]` and `ScopeRecord.credential_posture: CredentialPosture = "session_injection"` — **the Pydantic field only**; its `scope_records` mirror column exists since Task 3
+  - `ClientBroker(endpoint: str, token: SecretStr, *, timeout: float = 10.0)` — the **only** provider implementing `get_totp_code()`, which **asks the client's endpoint for a fresh code**; the seed stays with the client. `BrokerError(Exception)`
+  - `EncryptedStore(client_id: str, *, root: Path | None = None)` — envelope encryption: a KEK from `SD_CREDENTIAL_KEK` (never on disk) wraps a per-client AES-256 data key; each target's credential is AES-GCM-sealed under the data key with AAD `client|target`. `record_acknowledgement(document: Path, *, actor: str) -> str`, `put(target, creds)`, `get(target) -> Credentials`, `get_totp_code` → `NotSupported`, `_data_key() -> bytes`. `StoreError`, `AcknowledgementRequired`
+  - registry postures `client_broker` (env `SD_BROKER_URL_<TARGET>` / `SD_BROKER_TOKEN_<TARGET>`) and `encrypted_store` (client id = slug of `authorising_party`)
+
+**The preference order is the product (brief rule 4):** client-supplied session injection → a
+client-controlled credential broker → delegated access → stored credentials as a last resort **with
+written acknowledgement**. The code enforces the last clause: `EncryptedStore.put()` and `get()` raise
+`AcknowledgementRequired` until the signed document's SHA-256 is recorded — the same integrity move as
+the scope record's `evidence_sha256` (R3/H10), so "they agreed to this" is checkable, not remembered.
+
+**The broker stores nothing, and the test now proves it (M19).** The first draft asserted
+`not list(tmp_path.rglob("*"))` — but the broker was never told about `tmp_path`, so the test could not
+fail. It now points every storage root the product has (evidence, lake, sessions, credential store, and
+the working directory) at one temporary tree, records every file opened for writing during the call,
+and asserts both are empty — plus that no attribute of the broker holds the code afterwards.
+
+**The token never leaves the `Authorization` header.** Not in the URL (proxies and `httpx`'s INFO
+request log record URLs), not in an exception message (`from None` drops the chained `httpx` error),
+not in `repr`. A broker endpoint must be `https`, with no userinfo or query string. A malformed answer
+is a `BrokerError`, and a Pydantic validation error over the broker's answer is converted before it
+can print the password it failed to validate.
+
+**Envelope encryption, concretely.** `cryptography`'s `AESGCM`, 96-bit random nonces, 256-bit keys.
+The data key exists on disk only wrapped (`datakey.bin`, AAD `datakey|<client>`); a credential blob is
+bound by AAD to its client and target, so a blob copied into another client's directory — or renamed
+to another target — fails authentication instead of decrypting. Rotating the KEK re-wraps one small
+file per client. Files are written atomically with mode `0600`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/credentials/test_broker.py
-from selector_drift.credentials.broker import ClientBroker
+import builtins
+import logging
+import os
+from pathlib import Path
 
-def test_broker_fetches_a_code_and_stores_nothing(httpx_mock, tmp_path, target):
-    httpx_mock.add_response(json={"code": "123456"})
-    assert ClientBroker(ENDPOINT, TOKEN).get_totp_code(target) == "123456"
-    assert not list(tmp_path.rglob("*"))
+import pytest
+from pydantic import SecretStr
 
+from selector_drift.config import get_settings
+from selector_drift.credentials.broker import BrokerError, ClientBroker
+from selector_drift.credentials.provider import Credentials
+
+ENDPOINT = "https://broker.client.example.invalid/v1"
+TOKEN = SecretStr("broker-test-only-not-a-secret")
+
+
+@pytest.fixture
+def storage(tmp_path, monkeypatch):
+    """Every place the product writes, pointed at one tree -- the broker's real storage paths."""
+    root = tmp_path / "all-storage"
+    root.mkdir()
+    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(root / "evidence"))
+    monkeypatch.setenv("SD_LAKE_ROOT", str(root / "lake"))
+    monkeypatch.setenv("SD_CREDENTIAL_STORE", str(root / "credentials"))
+    monkeypatch.chdir(root)
+    get_settings.cache_clear()
+    yield root
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def writes(monkeypatch):
+    """Every file opened for writing, by any code path, during the test."""
+    opened: list[str] = []
+    real_open, real_os_open = builtins.open, os.open
+
+    def spy_open(file, mode="r", *args, **kwargs):
+        if any(ch in mode for ch in "wax+"):
+            opened.append(str(file))
+        return real_open(file, mode, *args, **kwargs)
+
+    def spy_os_open(path, flags, *args, **kwargs):
+        if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT):
+            opened.append(str(path))
+        return real_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(os, "open", spy_os_open)
+    return opened
+
+
+@pytest.mark.unit
+def test_broker_fetches_a_code_and_stores_nothing(httpx_mock, target, storage, writes):
+    # Fixed (M19): asserted against the product's real storage roots, not an unrelated tmp_path.
+    httpx_mock.add_response(url=f"{ENDPOINT}/totp?target=testbench", json={"code": "123456"})
+    broker = ClientBroker(ENDPOINT, TOKEN)
+    assert broker.get_totp_code(target) == "123456"
+    assert writes == []
+    assert [p for p in storage.rglob("*")] == []
+    assert "123456" not in repr(vars(broker))
+
+
+@pytest.mark.unit
+def test_the_token_travels_in_a_header_and_never_in_the_url(httpx_mock, target):
+    httpx_mock.add_response(url=f"{ENDPOINT}/totp?target=testbench", json={"code": "654321"})
+    ClientBroker(ENDPOINT, TOKEN).get_totp_code(target)
+    (request,) = httpx_mock.get_requests()
+    assert request.headers["Authorization"] == f"Bearer {TOKEN.get_secret_value()}"
+    assert TOKEN.get_secret_value() not in str(request.url)
+
+
+@pytest.mark.unit
 def test_broker_token_is_never_logged(caplog, httpx_mock, target):
-    httpx_mock.add_response(json={"username": "u", "password": "p"})
-    ClientBroker(ENDPOINT, TOKEN).get(target)
+    httpx_mock.add_response(url=f"{ENDPOINT}/credentials?target=testbench",
+                            json={"username": "u", "password": "p-test-only"})
+    with caplog.at_level(logging.DEBUG):
+        creds = ClientBroker(ENDPOINT, TOKEN).get(target)
     assert TOKEN.get_secret_value() not in caplog.text
+    assert "p-test-only" not in caplog.text
+    assert isinstance(creds, Credentials) and creds.password is not None
+    assert creds.password.get_secret_value() == "p-test-only"
+
+
+@pytest.mark.unit
+def test_a_broker_error_does_not_echo_the_token(httpx_mock, target):
+    httpx_mock.add_response(url=f"{ENDPOINT}/totp?target=testbench", status_code=500)
+    with pytest.raises(BrokerError) as exc:
+        ClientBroker(ENDPOINT, TOKEN).get_totp_code(target)
+    assert TOKEN.get_secret_value() not in str(exc.value) and exc.value.__cause__ is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("answer", [{"code": "12345"}, {"code": "abcdef"}, {"code": 123456}, {}])
+def test_a_malformed_code_is_refused(httpx_mock, target, answer):
+    httpx_mock.add_response(url=f"{ENDPOINT}/totp?target=testbench", json=answer)
+    with pytest.raises(BrokerError, match="6-8 digit"):
+        ClientBroker(ENDPOINT, TOKEN).get_totp_code(target)
+
+
+@pytest.mark.unit
+def test_a_malformed_credential_answer_does_not_print_the_password(httpx_mock, target):
+    httpx_mock.add_response(url=f"{ENDPOINT}/credentials?target=testbench",
+                            json={"username": ["not", "a", "string"], "password": "p-test-only"})
+    with pytest.raises(BrokerError) as exc:
+        ClientBroker(ENDPOINT, TOKEN).get(target)
+    assert "p-test-only" not in str(exc.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("url", ["http://broker.example.invalid", "https://u:p@broker.example.invalid",
+                                 "https://broker.example.invalid/?token=x", "broker.example.invalid"])
+def test_a_broker_endpoint_must_be_plain_https(url):
+    with pytest.raises(ValueError):
+        ClientBroker(url, TOKEN)
+
+
+@pytest.mark.unit
+def test_the_repr_hides_the_token():
+    assert TOKEN.get_secret_value() not in repr(ClientBroker(ENDPOINT, TOKEN))
 ```
+
+(`parametrize` is not a tier marker; each test carries exactly one tier marker, `unit`.)
 
 ```python
 # tests/credentials/test_store.py
-from selector_drift.credentials.store import EncryptedStore
-from selector_drift.credentials.provider import Credentials
+import logging
+import os
+import shutil
 
-def test_store_holds_no_plaintext_at_rest(tmp_path, target):
-    EncryptedStore("client-a", root=tmp_path).put(target, Credentials(password="hunter2"))
-    assert not any(b"hunter2" in p.read_bytes() for p in tmp_path.rglob("*") if p.is_file())
+import pytest
 
+from selector_drift.credentials.provider import Credentials, NotSupported
+from selector_drift.credentials.store import AcknowledgementRequired, EncryptedStore, StoreError
+
+COOKIE = "sid-test-only"
+
+
+@pytest.fixture(autouse=True)
+def kek(monkeypatch):
+    key = os.urandom(32).hex()          # generated per test: no key material in the repo
+    monkeypatch.setenv("SD_CREDENTIAL_KEK", key)
+    return key
+
+
+@pytest.fixture
+def ack(tmp_path):
+    doc = tmp_path / "signed-acknowledgement.pdf"
+    doc.write_bytes(b"client countersigned: stored credentials, last resort")
+    return doc
+
+
+def _store(root, client="client-a", ack_doc=None) -> EncryptedStore:
+    s = EncryptedStore(client, root=root)
+    if ack_doc is not None:
+        s.record_acknowledgement(ack_doc, actor="op1")
+    return s
+
+
+def _creds() -> Credentials:
+    return Credentials(username="svc-user", password="hunter2",
+                       cookies=[{"name": "s", "value": COOKIE, "domain": "x.example.invalid"}])
+
+
+def _all_bytes(root) -> bytes:
+    return b"".join(p.read_bytes() for p in root.rglob("*") if p.is_file())
+
+
+@pytest.mark.unit
+def test_store_holds_no_plaintext_at_rest(tmp_path, target, ack):
+    root = tmp_path / "store"
+    _store(root, ack_doc=ack).put(target, _creds())
+    blob = _all_bytes(root)
+    for secret in (b"hunter2", b"svc-user", COOKIE.encode()):
+        assert secret not in blob
+
+
+@pytest.mark.unit
+def test_the_data_key_is_never_on_disk_unwrapped(tmp_path, target, ack):
+    s = _store(tmp_path / "store", ack_doc=ack)
+    s.put(target, _creds())
+    assert s._data_key() not in _all_bytes(tmp_path / "store")
+
+
+@pytest.mark.unit
 def test_each_client_gets_a_distinct_data_key(tmp_path):
     a = EncryptedStore("a", root=tmp_path)._data_key()
     b = EncryptedStore("b", root=tmp_path)._data_key()
-    assert a != b
+    assert a != b and len(a) == len(b) == 32
+    assert EncryptedStore("a", root=tmp_path)._data_key() == a        # stable per client
 
-def test_round_trip_recovers_the_credential(tmp_path, target):
-    s = EncryptedStore("client-a", root=tmp_path)
-    s.put(target, Credentials(password="hunter2"))
-    assert s.get(target).password.get_secret_value() == "hunter2"
+
+@pytest.mark.unit
+def test_round_trip_recovers_the_credential(tmp_path, target, ack):
+    s = _store(tmp_path / "store", ack_doc=ack)
+    s.put(target, _creds())
+    got = s.get(target)
+    assert got.password is not None and got.password.get_secret_value() == "hunter2"
+    assert got.username == "svc-user" and got.cookies == _creds().cookies
+
+
+@pytest.mark.unit
+def test_nothing_is_stored_without_a_written_acknowledgement(tmp_path, target):
+    with pytest.raises(AcknowledgementRequired):
+        EncryptedStore("client-a", root=tmp_path / "store").put(target, _creds())
+    assert not (tmp_path / "store").exists()           # refused before anything touched disk
+
+
+@pytest.mark.unit
+def test_a_blob_moved_to_another_client_does_not_decrypt(tmp_path, target, ack):
+    root = tmp_path / "store"
+    _store(root, "client-a", ack).put(target, _creds())
+    other = _store(root, "client-b", ack)
+    other._data_key()
+    shutil.copy(root / "client-a" / "testbench.bin", root / "client-b" / "testbench.bin")
+    with pytest.raises(StoreError, match="cannot be decrypted"):
+        other.get(target)
+
+
+@pytest.mark.unit
+def test_the_wrong_kek_cannot_open_the_store(tmp_path, target, ack, monkeypatch):
+    s = _store(tmp_path / "store", ack_doc=ack)
+    s.put(target, _creds())
+    monkeypatch.setenv("SD_CREDENTIAL_KEK", os.urandom(32).hex())
+    with pytest.raises(StoreError, match="cannot be decrypted"):
+        s.get(target)
+
+
+@pytest.mark.unit
+def test_no_kek_no_store(tmp_path, monkeypatch):
+    monkeypatch.delenv("SD_CREDENTIAL_KEK")
+    with pytest.raises(StoreError, match="SD_CREDENTIAL_KEK"):
+        EncryptedStore("client-a", root=tmp_path)._data_key()
+
+
+@pytest.mark.unit
+def test_a_stored_credential_is_never_a_second_factor(tmp_path, target):
+    with pytest.raises(NotSupported, match="TOTP seed"):
+        EncryptedStore("client-a", root=tmp_path).get_totp_code(target)
+
+
+@pytest.mark.unit
+def test_the_store_logs_nothing_secret(tmp_path, target, ack, caplog, kek):
+    with caplog.at_level(logging.DEBUG):
+        s = _store(tmp_path / "store", ack_doc=ack)
+        s.put(target, _creds())
+        s.get(target)
+    for secret in ("hunter2", COOKIE, kek):
+        assert secret not in caplog.text
+```
+
+```python
+# tests/credentials/test_posture.py
+import typing
+
+import pytest
+from pydantic import SecretStr
+
+from selector_drift.config import get_settings
+from selector_drift.credentials import registry
+from selector_drift.credentials.broker import ClientBroker
+from selector_drift.credentials.provider import NotSupported
+from selector_drift.credentials.session import SessionInjection
+from selector_drift.credentials.store import EncryptedStore
+from selector_drift.scope.record import ScopeRecord
+from tests.credentials.conftest import SCOPE_YAML
+
+
+@pytest.fixture
+def scope_with_posture(tmp_path, monkeypatch):
+    d = tmp_path / "scopes"
+    d.mkdir()
+    monkeypatch.setenv("SD_SCOPE_DIR", str(d))
+    monkeypatch.setenv("SD_EVIDENCE_ROOT", str(tmp_path / "evidence"))
+    get_settings.cache_clear()
+
+    def write(target: str, posture: str) -> None:
+        text = SCOPE_YAML.replace("target: testbench", f"target: {target}")
+        (d / f"{target}.yaml").write_text(text + f"credential_posture: {posture}\n",
+                                          encoding="utf-8")
+
+    yield write
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+def test_the_posture_defaults_to_the_default_offer():
+    assert ScopeRecord.model_fields["credential_posture"].default == "session_injection"
+
+
+@pytest.mark.unit
+def test_no_posture_stores_a_second_factor():
+    postures = typing.get_args(ScopeRecord.model_fields["credential_posture"].annotation)
+    assert set(postures) == {"session_injection", "client_broker", "encrypted_store"}
+    assert not any("totp" in p or "seed" in p for p in postures)
+
+
+@pytest.mark.unit
+def test_an_unknown_posture_is_refused_at_load_not_downgraded(scope_with_posture):
+    # Moved from Task 31's amendment: once the field is a Literal, the refusal is at load.
+    scope_with_posture("testbench", "totp_seed_store")
+    with pytest.raises(ValueError):                    # pydantic's ValidationError is one
+        registry.provider_for("testbench")
+
+
+@pytest.mark.unit
+def test_a_known_posture_with_no_provider_is_refused_not_downgraded(scope_with_posture,
+                                                                    monkeypatch):
+    scope_with_posture("testbench", "client_broker")
+    monkeypatch.delitem(registry._FACTORIES, "client_broker")
+    with pytest.raises(LookupError, match="refusing, not downgrading"):
+        registry.provider_for("testbench")
+
+
+@pytest.mark.unit
+def test_the_broker_posture_reads_its_endpoint_and_token_from_the_environment(
+        scope_with_posture, monkeypatch):
+    scope_with_posture("claims-portal", "client_broker")
+    monkeypatch.setenv("SD_BROKER_URL_CLAIMS_PORTAL", "https://broker.example.invalid/v1")
+    monkeypatch.setenv("SD_BROKER_TOKEN_CLAIMS_PORTAL", "broker-test-only-not-a-secret")
+    assert isinstance(registry.provider_for("claims-portal"), ClientBroker)
+
+
+@pytest.mark.unit
+def test_the_broker_posture_without_its_environment_is_refused(scope_with_posture):
+    scope_with_posture("claims-portal", "client_broker")
+    with pytest.raises(LookupError, match="SD_BROKER_URL_CLAIMS_PORTAL"):
+        registry.provider_for("claims-portal")
+
+
+@pytest.mark.unit
+def test_the_store_posture_keys_by_client_not_by_target(scope_with_posture):
+    scope_with_posture("claims-portal", "encrypted_store")
+    provider = registry.provider_for("claims-portal")
+    assert isinstance(provider, EncryptedStore) and provider.client_id == "acme-claims-ltd"
+
+
+@pytest.mark.unit
+def test_only_the_client_broker_can_produce_a_totp_code(tmp_path, target, httpx_mock):
+    for provider in (SessionInjection(tmp_path / "s.json"), EncryptedStore("a", root=tmp_path)):
+        with pytest.raises(NotSupported):
+            provider.get_totp_code(target)
+    httpx_mock.add_response(json={"code": "123456"})
+    assert ClientBroker("https://b.example.invalid", SecretStr("t")).get_totp_code(target)
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `uv run pytest tests/credentials -v`
-Expected: FAIL.
+Run: `uv run pytest tests/credentials -v -m unit`
+Expected: FAIL at collection — `ModuleNotFoundError: No module named 'selector_drift.credentials.broker'`.
 
-- [ ] **Step 3: Implement both providers.**
+- [ ] **Step 3: Add the posture field**
 
-- [ ] **Step 4: Document the posture in `docs/security.md`** — the three tiers, the preference order, and the seed refusal in plain language, including the sentence you will say in a first call.
+In `selector_drift/scope/record.py`, beside `Basis` and `FirstHealPolicy`:
 
-- [ ] **Step 5: Run them and make sure they pass**
+```python
+from typing import Literal
 
-Run: `uv run pytest tests/credentials -v && uv run gitleaks detect --no-git`
-Expected: PASS, 5 new tests. gitleaks clean.
+CredentialPosture = Literal["session_injection", "client_broker", "encrypted_store"]
+```
 
-- [ ] **Step 6: Commit**
+and on `ScopeRecord`, after `evidence_retention_days`:
+
+```python
+    credential_posture: CredentialPosture = "session_injection"   # design 2.1 Q2 -- the default offer
+```
+
+Whatever writes the `scope_records` mirror (Task 3's `ScopeRecordRow`) writes
+`credential_posture=record.credential_posture`; the column has existed since day one with the same
+default, so rows written before this task already read `'session_injection'`.
+
+- [ ] **Step 4: Implement the broker and the store, and register both**
+
+```python
+# selector_drift/credentials/broker.py
+"""The client-controlled credential broker (design 2.1 Q2, second in the preference order). The
+client keeps the password and the TOTP seed; we ask their endpoint for what one run needs and
+keep nothing."""
+from __future__ import annotations
+
+import re
+from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
+from pydantic import SecretStr, ValidationError
+
+from selector_drift.credentials.provider import Credentials
+from selector_drift.scope.record import AuthorisedTarget
+
+_CODE = re.compile(r"^\d{6,8}$")
+
+
+class BrokerError(Exception):
+    """The broker could not answer usefully. Carries no token, no credential, no response body."""
+
+
+class ClientBroker:
+    def __init__(self, endpoint: str, token: SecretStr, *, timeout: float = 10.0) -> None:
+        parts = urlsplit(endpoint)
+        if parts.scheme != "https" or not parts.hostname:
+            raise ValueError("the client broker must be an https URL")
+        if parts.username or parts.password or parts.query:
+            raise ValueError("no userinfo or query string in a broker URL: the token travels "
+                             "in the Authorization header only")
+        self._endpoint = endpoint.rstrip("/")
+        self._token = token
+        self._timeout = timeout
+
+    def __repr__(self) -> str:
+        return f"ClientBroker(endpoint={self._endpoint!r}, token=SecretStr('**********'))"
+
+    def _get(self, path: str, target: AuthorisedTarget) -> dict[str, Any]:
+        try:
+            r = httpx.get(f"{self._endpoint}/{path}", params={"target": target.target},
+                          headers={"Authorization": f"Bearer {self._token.get_secret_value()}",
+                                   "Accept": "application/json"},
+                          timeout=self._timeout)
+            r.raise_for_status()
+            body = r.json()
+        except httpx.HTTPStatusError as exc:
+            raise BrokerError(f"client broker answered {exc.response.status_code} "
+                              f"for /{path}") from None
+        except (httpx.HTTPError, ValueError):
+            raise BrokerError(f"client broker unreachable or not JSON for /{path}") from None
+        if not isinstance(body, dict):
+            raise BrokerError(f"client broker answer for /{path} is not an object")
+        return body
+
+    def get(self, target: AuthorisedTarget) -> Credentials:
+        body = self._get("credentials", target)
+        password = body.get("password")
+        try:
+            return Credentials(cookies=body.get("cookies"), username=body.get("username"),
+                               password=SecretStr(password) if isinstance(password, str) else None)
+        except ValidationError:
+            raise BrokerError("client broker returned malformed credentials") from None
+
+    def get_totp_code(self, target: AuthorisedTarget) -> str:
+        code = self._get("totp", target).get("code")
+        if not isinstance(code, str) or not _CODE.fullmatch(code):
+            raise BrokerError("the broker's answer is not a 6-8 digit code")
+        return code
+```
+
+```python
+# selector_drift/credentials/store.py
+"""Stored credentials -- the last resort (design 2.1 Q2), with a written acknowledgement.
+Envelope encryption: a KEK from the environment wraps a per-client AES-256 data key; the data
+key seals each target's credential with AES-GCM, bound by AAD to its client and target."""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+from typing import Final
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from selector_drift.credentials.provider import Credentials, NotSupported
+from selector_drift.scope.record import AuthorisedTarget
+
+KEK_ENV: Final = "SD_CREDENTIAL_KEK"
+ROOT_ENV: Final = "SD_CREDENTIAL_STORE"
+_MAGIC: Final = b"SDC1"
+_NONCE: Final = 12
+_ACK: Final = "acknowledgement.json"
+_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+class StoreError(Exception):
+    """The store cannot be opened or written. Never carries key or credential material."""
+
+
+class AcknowledgementRequired(StoreError):
+    """No written acknowledgement on file for this client."""
+
+
+def _kek() -> bytes:
+    raw = os.environ.get(KEK_ENV, "")
+    if not raw:
+        raise StoreError(f"{KEK_ENV} is not set; stored credentials cannot be opened")
+    try:
+        key = bytes.fromhex(raw)
+    except ValueError:
+        raise StoreError(f"{KEK_ENV} is not hex") from None
+    if len(key) != 32:
+        raise StoreError(f"{KEK_ENV} must be 32 bytes (64 hex characters)")
+    return key
+
+
+def _seal(plaintext: bytes, key: bytes, aad: bytes) -> bytes:
+    nonce = os.urandom(_NONCE)
+    return _MAGIC + nonce + AESGCM(key).encrypt(nonce, plaintext, aad)
+
+
+def _open(blob: bytes, key: bytes, aad: bytes, what: str) -> bytes:
+    if not blob.startswith(_MAGIC):
+        raise StoreError(f"{what} is not a sealed credential file")
+    nonce, sealed = blob[len(_MAGIC):len(_MAGIC) + _NONCE], blob[len(_MAGIC) + _NONCE:]
+    try:
+        return AESGCM(key).decrypt(nonce, sealed, aad)
+    except InvalidTag:
+        raise StoreError(f"{what} cannot be decrypted: wrong key, or moved from another "
+                         "client or target") from None
+
+
+def _write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if exclusive:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        return
+    tmp = path.with_name(f".{path.name}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+
+
+class EncryptedStore:
+    def __init__(self, client_id: str, *, root: Path | None = None) -> None:
+        if not _ID.fullmatch(client_id):
+            raise ValueError(f"{client_id!r} is not a client id (lowercase, digits, '-')")
+        self.client_id = client_id
+        self._dir = (root or Path(os.environ.get(ROOT_ENV, "/data/credentials"))) / client_id
+
+    def __repr__(self) -> str:
+        return f"EncryptedStore({self.client_id!r})"
+
+    # -- the written acknowledgement ------------------------------------------------------
+
+    def record_acknowledgement(self, document: Path, *, actor: str) -> str:
+        digest = hashlib.sha256(document.read_bytes()).hexdigest()
+        body = {"sha256": digest, "document": document.name, "actor": actor,
+                "at": dt.datetime.now(dt.UTC).isoformat()}
+        _write(self._dir / _ACK, json.dumps(body, sort_keys=True).encode())
+        return digest
+
+    def _require_acknowledgement(self) -> None:
+        if not (self._dir / _ACK).is_file():
+            raise AcknowledgementRequired(
+                f"{self.client_id}: stored credentials are a last resort and need the client's "
+                "written acknowledgement on file (record_acknowledgement)")
+
+    # -- keys ---------------------------------------------------------------------------------
+
+    def _data_key(self) -> bytes:
+        path = self._dir / "datakey.bin"
+        aad = f"datakey|{self.client_id}".encode()
+        if not path.is_file():
+            key = AESGCM.generate_key(bit_length=256)
+            try:
+                _write(path, _seal(key, _kek(), aad), exclusive=True)
+                return key
+            except FileExistsError:
+                pass                                    # another process won the race: read it
+        return _open(path.read_bytes(), _kek(), aad, "the data key")
+
+    def _blob(self, target: str) -> Path:
+        if not _ID.fullmatch(target):
+            raise ValueError(f"{target!r} is not a target name")
+        return self._dir / f"{target}.bin"
+
+    # -- CredentialProvider ---------------------------------------------------------------
+
+    def put(self, target: AuthorisedTarget, creds: Credentials) -> None:
+        self._require_acknowledgement()
+        payload = json.dumps({
+            "cookies": creds.cookies, "username": creds.username,
+            "password": creds.password.get_secret_value() if creds.password else None}).encode()
+        aad = f"{self.client_id}|{target.target}".encode()
+        _write(self._blob(target.target), _seal(payload, self._data_key(), aad))
+
+    def get(self, target: AuthorisedTarget) -> Credentials:
+        self._require_acknowledgement()
+        path = self._blob(target.target)
+        if not path.is_file():
+            raise StoreError(f"{self.client_id}: no stored credential for {target.target}")
+        aad = f"{self.client_id}|{target.target}".encode()
+        data = json.loads(_open(path.read_bytes(), self._data_key(), aad, "the credential"))
+        return Credentials(cookies=data["cookies"], username=data["username"],
+                           password=data["password"])
+
+    def get_totp_code(self, target: AuthorisedTarget) -> str:
+        raise NotSupported("a stored credential is never a second factor: storing a TOTP seed "
+                           "defeats it (brief rule 4) -- use the client's broker")
+```
+
+Replace the body of `selector_drift/credentials/registry.py` from `_FACTORIES` onward (Task 31) with:
+
+```python
+import os
+
+from pydantic import SecretStr
+
+from selector_drift.credentials.broker import ClientBroker
+from selector_drift.credentials.store import EncryptedStore
+
+
+def _env_suffix(target: str) -> str:
+    return target.upper().replace("-", "_")
+
+
+def _broker(record: ScopeRecord) -> CredentialProvider:
+    suffix = _env_suffix(record.target)
+    url = os.environ.get(f"SD_BROKER_URL_{suffix}")
+    token = os.environ.get(f"SD_BROKER_TOKEN_{suffix}")
+    if not url or not token:
+        raise LookupError(f"{record.target}: posture client_broker needs SD_BROKER_URL_{suffix} "
+                          f"and SD_BROKER_TOKEN_{suffix} -- refusing, not downgrading")
+    return ClientBroker(url, SecretStr(token))
+
+
+def client_slug(authorising_party: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", authorising_party.lower()).strip("-")
+
+
+def _store(record: ScopeRecord) -> CredentialProvider:
+    return EncryptedStore(client_slug(record.authorising_party))    # per CLIENT, not per target
+
+
+_FACTORIES: dict[str, Factory] = {
+    "session_injection": lambda record: SessionInjection(session_path(record.target)),
+    "client_broker": _broker,
+    "encrypted_store": _store,
+}
+
+
+def register(posture: str, factory: Factory) -> None:
+    _FACTORIES[posture] = factory
+
+
+def provider_for(target: str) -> CredentialProvider:
+    record = load_scope(get_settings().scope_dir / f"{target}.yaml")
+    factory = _FACTORIES.get(record.credential_posture)
+    if factory is None:
+        raise LookupError(f"{target}: no provider registered for credential posture "
+                          f"{record.credential_posture!r} -- refusing, not downgrading")
+    return factory(record)
+```
+
+(the `import os`, `from pydantic import SecretStr` and the two provider imports join the module's
+import block at the top; `getattr(record, "credential_posture", ...)` is gone now the field exists.)
+
+Append to `.env.example`:
 
 ```bash
-git add selector_drift/credentials tests/credentials docs/security.md
-git commit -m "feat(credentials): client broker and envelope-encrypted store"
+SD_CREDENTIAL_STORE=/data/credentials
+SD_CREDENTIAL_KEK=         # 64 hex chars; generate: python -c "import secrets; print(secrets.token_hex(32))"
+# Per client_broker target, e.g. for target claims-portal:
+# SD_BROKER_URL_CLAIMS_PORTAL=https://...
+# SD_BROKER_TOKEN_CLAIMS_PORTAL=
+```
+
+- [ ] **Step 5: Document the posture in `docs/security.md`**
+
+```markdown
+# Credentials and access
+
+## The one sentence for the first call
+
+"We would rather never hold your password: the default is that you log in yourself and hand us the
+session, and if you need us to hold a second factor, the answer is no — storing your authenticator
+seed would defeat the reason you turned MFA on, and it may breach your own security policy even if
+you ask us to."
+
+## Preference order
+
+| # | Posture (`credential_posture`) | What we hold | Second factor |
+|---|---|---|---|
+| 1 | `session_injection` — **the default offer** | a Playwright storage state you export after logging in, mode 0600, cookies for your portal's origin only | you complete MFA when you export the session |
+| 2 | `client_broker` | a bearer token for **your** broker endpoint; nothing else | your broker returns a fresh code per run; the seed never leaves you |
+| 3 | delegated access | whatever your identity provider grants a service identity | governed by your IdP |
+| 4 | `encrypted_store` — **last resort** | username and password, envelope-encrypted | none: we cannot hold one |
+
+`encrypted_store` refuses to store anything until your signed acknowledgement is on file; we record
+its SHA-256, so the acknowledgement that was in force is checkable later.
+
+## What we never do
+
+- **Store a TOTP seed.** No field, column or setting for one exists anywhere in the product, and a
+  test fails the build if one is added.
+- Circumvent authentication or defeat anti-bot measures. A portal that needs evasion is out of scope.
+- Write into your portal. The change-set export is a file you review and import yourself.
+- Log a credential. Passwords are `SecretStr`; cookies are excluded from every representation;
+  tokens travel in an `Authorization` header and never in a URL.
+
+## How stored credentials are protected
+
+A key-encryption key (KEK) lives only in the worker's environment (`SD_CREDENTIAL_KEK`). It wraps a
+per-client 256-bit data key; the data key seals each target's credential with AES-GCM, bound to that
+client and target, so a file copied to another client or target does not decrypt. Rotating the KEK
+re-wraps one small file per client. Files are written atomically with owner-only permissions.
+```
+
+- [ ] **Step 6: Run them and make sure they pass**
+
+Run: `uv run pytest tests/credentials -v -m unit && uv run mypy --strict selector_drift/credentials selector_drift/scope && pre-commit run gitleaks --all-files`
+Expected: PASS, 32 new test cases (14 broker incl. parametrised cases, 10 store, 8 posture —
+plus Task 31's 14). mypy clean. gitleaks: `Passed` — every key in these tests is generated at runtime or
+visibly labelled `test-only-not-a-secret`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add selector_drift/credentials selector_drift/scope/record.py tests/credentials \
+        docs/security.md .env.example
+git commit -m "feat(credentials): client broker, acknowledged envelope-encrypted store, posture (M19)"
 ```
 
 ---
@@ -22421,3 +36755,31 @@ lake), 29 (contract field names), 33 (`Labelled`, `guard_write`, credential scru
 **One thing is still open and only you can close it: P-3.** Two self-owned, deployed applications must
 carry the control arm in place of `agent-perimeter` and `ledger-sense`. Until they are named, Task 5's
 scope records, Task 6's target list and design §8.1's control-arm claim carry placeholder names.
+
+### Revision of 2026-09-26 — sub-specs, code-level tasks, and the defects reconciliation found
+
+Four sub-specs were written contract-first ([API and evidence](../specs/2026-09-26-selector-drift-api-contract.md),
+[web UI](../specs/2026-09-26-selector-drift-web-ui.md), [test bench](../specs/2026-09-26-selector-drift-testbench-portal.md),
+[`bok-ui` slice](../specs/2026-09-26-selector-drift-bok-ui-slice.md)), and every task was brought to
+code level. Reconciling the drafts against each other found defects the 2026-08-29 audit did not,
+each fixed at its point of use and marked *"found 2026-09-26"*:
+
+| Defect | Fixed in |
+|---|---|
+| **Tasks were out of dependency order** — 26A consumed 27–33 and ran before them; 26 called `extract` from 27 | sections physically reordered; §Sequencing notes |
+| The pipeline's own implementation step had no code; nothing executed a spec's `navigate` steps | 26A Step 3 (`run_once`, `run_steps`, `record_heals`, `history_for`) |
+| The cache write-back made `resolve/` import `validate/`, breaking "the judged cannot call the judge" | 17 → `orchestrate/cache_writer.py` `CacheWriter` |
+| `history` had no type; no gate for a whole run; nothing turned a spec's assertions into checks | 20 (`History`, `gate_run`), 25 (`checks_for`) |
+| `heal_events.confirmer_*` had no producer — confirmers were reported only in prose | 20 (`Verdict.confirmed_by`), 26A (`record_heals`) |
+| Extraction had no row model and three call signatures | 27 (rewritten) |
+| The Next.js bench's hydration would re-render mutated pages back to the original in the browser | 7, 8 (server-rendered Python portal); bench spec §1 |
+| A heal had no "before" page; missed runs, findings and sessions had no tables | 3 (`heartbeats`, `findings`, `operators`, `sessions`), 33, API spec §7 |
+| The bench spec extracted one field while every suite targets `amount`/`reserve` | 12 Step 0 (spec version 2) |
+| No scorer produced the published "correctly refused" count, and false accepts were uncounted | new 26C |
+| 26 and 26B used undefined fixtures; 11A asserted `QuarantinedRun` before it existed | 26 Step 0, 26B Step 0, 11A |
+| `bok_core.gateway` cannot be forbidden by import-linter for an external package | 1 (AST allow-list test) |
+| Lake file names carried `:`, illegal on Windows | 28 (`fs_key`) |
+
+**Flagged for your sign-off, not applied:** the `INTERFACE-CONTRACT.md` proposals in
+`docs/proposals/` (`QuerySource`; three `bok-ui` components delivered early with their props;
+`EmptyState` `headline`/`measuredVerb`; a `bok-ui/client` entry).
