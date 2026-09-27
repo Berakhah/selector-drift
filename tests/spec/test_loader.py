@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
 
 import pytest
@@ -17,10 +16,10 @@ from selector_drift.spec.loader import (
     target_of,
 )
 from selector_drift.spec.schema import SpecError
+from tests._day_one import blocked_on_day_one_values as _blocked_on_day_one_values
 
 REPO = Path(__file__).resolve().parents[2]
 SPECS = sorted((REPO / "specs").glob("*.yaml"))
-SCOPES = sorted((REPO / "scopes").glob("*.yaml"))
 UNSAFE_YAML = {
     "load",
     "unsafe_load",
@@ -34,18 +33,15 @@ UNSAFE_YAML = {
 }
 
 # Deviation from the brief (controller rulings 2 and 3, 2026-09-28, recorded in the Task 5
-# report): the day-one scope records still carry <UPPER-CASE> placeholders, and ruling 3's new
-# ScopeRecord.user_agent_contact validation refuses a placeholder URL at load -- by design, so
-# that an unresolved placeholder cannot silently pass as a real contact URL. This test loads
-# the real scope records (via `load_scope`) to check they name the right target, so it inherits
-# the same block as the five tests in tests/scope/test_records_load.py until day one's values
-# land, rather than the ModuleNotFoundError-style crash a bare load_scope() call would raise.
-_PLACEHOLDER = re.compile(r"<[A-Z0-9][A-Z0-9-]*>")
-_blocked_on_day_one_values = pytest.mark.skipif(
-    any(_PLACEHOLDER.search(p.read_text(encoding="utf-8")) for p in SCOPES),
-    reason="blocked on day-one values (P-2/P-3/P-4) -- "
-    "see test_no_scope_record_carries_an_unresolved_placeholder",
-)
+# report, fix round 1 minor 2): the day-one scope records still carry <UPPER-CASE> placeholders,
+# and ruling 3's new ScopeRecord.user_agent_contact validation refuses a placeholder URL at load
+# -- by design, so that an unresolved placeholder cannot silently pass as a real contact URL.
+# This test loads the real scope records (via `load_scope`) to check they name the right target,
+# so it inherits the same block as the five tests in tests/scope/test_records_load.py until day
+# one's values land, rather than raising `ScopeRefusal` from that validator. The gate itself
+# (PLACEHOLDER regex + skipif) is defined once in tests/_day_one.py and imported here, not
+# redefined, so this file and tests/scope/test_records_load.py cannot diverge (fix round 1,
+# Important 1).
 
 
 @pytest.mark.unit
