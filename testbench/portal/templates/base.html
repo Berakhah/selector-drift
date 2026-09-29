@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Claims{% endblock %} · Claims Portal (synthetic test bench)</title>
+  <link rel="stylesheet" href="/static/portal.css">
+</head>
+<body>
+  <header class="site-header">
+    <span class="brand">Claims Portal</span>
+    {% if signed_in %}
+    <nav aria-label="Main"><a href="/search">Search</a><a href="/results">Results</a><a href="/logout">Sign out</a></nav>
+    {% endif %}
+  </header>
+  <main id="main">
+{% block content %}{% endblock %}
+  </main>
+  <footer class="site-footer">Synthetic data. Every name and number on this site is generated.</footer>
+</body>
+</html>

@@ -1,0 +1,15 @@
+:root { font-family: system-ui, sans-serif; color: #1d1d1f; background: #fafafa; }
+body { margin: 0; background: #fafafa; }
+.site-header { display: flex; justify-content: space-between; align-items: center;
+               padding: .75rem 1.5rem; background: #2f3a8f; color: #fff; }
+.site-header nav a { color: #fff; margin-left: 1rem; }
+main { max-width: 72rem; margin: 0 auto; padding: 1.5rem; }
+table.results { border-collapse: collapse; width: 100%; background: #fff; }
+table.results th, table.results td { border: 1px solid #d0d0d7; padding: .4rem .6rem; text-align: left; }
+.col-amount, .col-reserve { text-align: right; font-variant-numeric: tabular-nums; }
+.pagination ul { display: flex; flex-wrap: wrap; gap: .5rem; list-style: none; padding: 0; }
+dl.claim-detail { display: grid; grid-template-columns: max-content 1fr; gap: .4rem 1.5rem; }
+dl.claim-detail dt { font-weight: 600; }
+form label { display: block; margin-bottom: .75rem; }
+.error { color: #a4161a; }
+.site-footer { padding: 1rem 1.5rem; color: #555; font-size: .875rem; }

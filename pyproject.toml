@@ -42,16 +42,26 @@ dependencies = [
 dev = [
     "hypothesis>=6.165.10",
     "import-linter>=2.14",
+    "lxml-stubs>=0.5.1",
     "mypy>=2.3.1",
     "pre-commit>=4.6.2",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-httpx>=0.36.2",
+    "pytest-playwright>=0.9.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.16.5",
     "types-pyyaml>=6.0.12.20260906",
     "types-regex>=2026.9.10.20260911",
+]
+testbench = [
+    "fastapi>=0.141.1",
+    "itsdangerous>=2.2.0",
+    "jinja2>=3.1.6",
+    "lxml>=6.1.2",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.52.4",
 ]
 
 [build-system]
@@ -103,6 +113,9 @@ markers = [
 # ms-playwright/chromium-1234). B8: an unpinned browser turns a UI-change test into a
 # browser-change test.
 playwright_chromium_revision = "1234"
+
+[tool.uv]
+default-groups = ["dev", "testbench"]
 
 [tool.uv.sources]
 bok-core = { path = "D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-core-minimal", editable = true }
