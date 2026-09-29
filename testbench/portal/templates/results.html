@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Results{% endblock %}
+{% block content %}
+<h1>Claims</h1>
+<p class="summary">{{ total }} claims · page {{ page }} of {{ pages }} · <a href="{{ export_href }}">Export CSV</a></p>
+<table class="results" id="results">
+  <caption>Claims matching your search</caption>
+  <thead>
+    <tr>{% for key, label in columns %}<th scope="col" class="col-{{ key }}">{{ label }}</th>{% endfor %}</tr>
+  </thead>
+  <tbody>
+{% for row in rows %}
+    <tr>{% for key, label in columns %}<td class="col-{{ key }}"{% if mark_truth %} data-sd-truth="{{ key }}"{% endif %}>{% if key == "claim_number" %}<a href="/claims/{{ row[key] }}">{{ row[key] }}</a>{% else %}{{ row[key] }}{% endif %}</td>{% endfor %}</tr>
+{% endfor %}
+  </tbody>
+</table>
+<nav class="pagination" aria-label="Pagination">
+  <ul>
+{% for number, href in links %}
+    <li>{% if number == page %}<span aria-current="page">{{ number }}</span>{% else %}<a href="{{ href }}">{{ number }}</a>{% endif %}</li>
+{% endfor %}
+  </ul>
+</nav>
+{% endblock %}
