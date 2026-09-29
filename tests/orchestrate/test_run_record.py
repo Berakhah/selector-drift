@@ -7,7 +7,7 @@ import pytest
 
 from selector_drift.db.models import AuditLog, Heartbeat, Run, RunAttempt, ScopeRecordRow
 from selector_drift.db.session import Session
-from selector_drift.orchestrate.flows import extraction_flow
+from selector_drift.orchestrate.flows import StartPageError, extraction_flow
 from selector_drift.orchestrate.run_record import (
     NO_TERMINAL_STATE,
     heartbeat,
@@ -23,6 +23,10 @@ REPO = Path(__file__).resolve().parents[2]
 # A failing test must not sleep through two 300 s retries. The retry policy itself is pinned
 # in test_deployments.py.
 ONCE = extraction_flow.with_options(retries=0)
+# Hookfix brief: the retry-attempt-identity tests below need one real retry (no sleep between
+# attempts) so a Prefect retry actually re-enters extraction_flow in the same process/context --
+# that re-entry is exactly what made a bare bool flag ((`_ALERTED_IN_FLOW`) unsafe.
+ONE_RETRY = extraction_flow.with_options(retries=1, retry_delay_seconds=0)
 
 
 def _today() -> str:
@@ -267,3 +271,103 @@ def test_the_failure_alert_never_carries_page_content(
     with Session() as s:
         run = s.get(Run, _bench_key())
         assert run is not None and run.error is not None and "<td" in run.error
+
+
+@pytest.mark.integration
+def test_fail_post_auth_then_fail_pre_auth_alerts_exactly_twice(
+    prefect_api, db, local_site, monkeypatch
+) -> None:
+    """Hookfix brief, regression test A. Attempt 1 fails post-authorisation (the flow body's own
+    `except Exception` branch posts an alert and records its run_count before raising). Attempt 2
+    (the one retry) fails pre-authorisation -- a SpecError loading the spec, before the flow body
+    ever reaches its own alert branch again. `alert_on_flow_failure` (on_failure) must still
+    alert for attempt 2, because the value it must compare against is the run_count of the
+    attempt that actually failed last, not a flag that merely remembers some earlier attempt
+    alerted. On e218ab0, `_ALERTED_IN_FLOW` is a bare bool that stays True across the retry, so
+    the hook wrongly skips attempt 2's alert -- this must go red there."""
+    calls: list[AlertCall] = []
+    monkeypatch.setattr(
+        "selector_drift.orchestrate.flows.post_alert",
+        lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
+    )
+
+    real_load_spec = load_spec
+    spec_calls = {"n": 0}
+
+    def flaky_load_spec(path: Path):  # type: ignore[no-untyped-def]
+        spec_calls["n"] += 1
+        if spec_calls["n"] >= 2:
+            raise SpecError("synthetic pre-auth failure on the retry attempt")
+        return real_load_spec(path)
+
+    async def always_fail_start_page(target: object) -> int:
+        raise StartPageError("synthetic post-auth failure on the first attempt")
+
+    monkeypatch.setattr("selector_drift.orchestrate.flows.load_spec", flaky_load_spec)
+    monkeypatch.setattr("selector_drift.orchestrate.flows.load_start_page", always_fail_start_page)
+
+    with pytest.raises(Exception, match=r"\S"):
+        ONE_RETRY("specs/testbench.yaml")
+
+    assert len(calls) == 2
+    kinds = [c[0] for c in calls]
+    assert kinds == ["failed", "failed"]
+
+
+@pytest.mark.integration
+def test_fail_post_auth_then_succeed_alerts_exactly_once(
+    prefect_api, db, local_site, monkeypatch
+) -> None:
+    """Hookfix brief, regression test B. Attempt 1 fails post-authorisation and alerts in-body.
+    Attempt 2 (the retry) succeeds. The flow completes, so the on_failure hook never runs at
+    all -- exactly one alert, from attempt 1's own branch."""
+    calls: list[AlertCall] = []
+    monkeypatch.setattr(
+        "selector_drift.orchestrate.flows.post_alert",
+        lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
+    )
+
+    start_calls = {"n": 0}
+
+    async def fail_then_succeed(target: object) -> int:
+        start_calls["n"] += 1
+        if start_calls["n"] == 1:
+            raise StartPageError("synthetic post-auth failure on the first attempt")
+        return 42
+
+    monkeypatch.setattr("selector_drift.orchestrate.flows.load_start_page", fail_then_succeed)
+
+    key = ONE_RETRY("specs/testbench.yaml")
+
+    assert len(calls) == 1
+    assert calls[0][0] == "failed"
+    with Session() as s:
+        assert s.get(Run, key).state == "completed"
+
+
+@pytest.mark.integration
+def test_fail_post_auth_then_fail_post_auth_alerts_exactly_twice_hook_skips(
+    prefect_api, db, local_site, monkeypatch
+) -> None:
+    """Hookfix brief, regression test C. Both attempts fail post-authorisation, each posting its
+    own in-body alert and recording its own run_count. When the hook fires after the final
+    attempt, the recorded run_count matches the run_count of the attempt that actually failed
+    last, so the hook must skip -- exactly two alerts total, both in-body, no third from the
+    hook."""
+    calls: list[AlertCall] = []
+    monkeypatch.setattr(
+        "selector_drift.orchestrate.flows.post_alert",
+        lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
+    )
+
+    async def always_fail_start_page(target: object) -> int:
+        raise StartPageError("synthetic post-auth failure on every attempt")
+
+    monkeypatch.setattr("selector_drift.orchestrate.flows.load_start_page", always_fail_start_page)
+
+    with pytest.raises(Exception, match=r"\S"):
+        ONE_RETRY("specs/testbench.yaml")
+
+    assert len(calls) == 2
+    kinds = [c[0] for c in calls]
+    assert kinds == ["failed", "failed"]
