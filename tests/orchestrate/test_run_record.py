@@ -25,7 +25,7 @@ REPO = Path(__file__).resolve().parents[2]
 ONCE = extraction_flow.with_options(retries=0)
 # Hookfix brief: the retry-attempt-identity tests below need one real retry (no sleep between
 # attempts) so a Prefect retry actually re-enters extraction_flow in the same process/context --
-# that re-entry is exactly what made a bare bool flag ((`_ALERTED_IN_FLOW`) unsafe.
+# that re-entry is exactly what made a bare bool flag (`_ALERTED_IN_FLOW`) unsafe.
 ONE_RETRY = extraction_flow.with_options(retries=1, retry_delay_seconds=0)
 
 
@@ -310,8 +310,19 @@ def test_fail_post_auth_then_fail_pre_auth_alerts_exactly_twice(
         ONE_RETRY("specs/testbench.yaml")
 
     assert len(calls) == 2
-    kinds = [c[0] for c in calls]
-    assert kinds == ["failed", "failed"]
+    # calls[0] is attempt 1's in-body alert: it carries the real run_key. calls[1] is the hook's
+    # alert for attempt 2 -- the hook never learns the run_key (M-5/plus item, unchanged by this
+    # brief), and its summary is built from the SpecError the retry raised, proving this alert
+    # came from the hook, not a second in-body post.
+    assert calls[0] == (
+        "failed",
+        "testbench",
+        _bench_key(),
+        "StartPageError: synthetic post-auth failure on the first attempt",
+    )
+    kind, target, alerted_key, summary = calls[1]
+    assert (kind, target, alerted_key) == ("failed", "testbench", None)
+    assert "SpecError" in summary
 
 
 @pytest.mark.integration
@@ -350,8 +361,8 @@ def test_fail_post_auth_then_fail_post_auth_alerts_exactly_twice_hook_skips(
     prefect_api, db, local_site, monkeypatch
 ) -> None:
     """Hookfix brief, regression test C. Both attempts fail post-authorisation, each posting its
-    own in-body alert and recording its own run_count. When the hook fires after the final
-    attempt, the recorded run_count matches the run_count of the attempt that actually failed
+    own in-body alert and recording its own run and attempt identity. When the hook fires after
+    the final attempt, the recorded identity matches the run and attempt that actually failed
     last, so the hook must skip -- exactly two alerts total, both in-body, no third from the
     hook."""
     calls: list[AlertCall] = []
@@ -371,3 +382,68 @@ def test_fail_post_auth_then_fail_post_auth_alerts_exactly_twice_hook_skips(
     assert len(calls) == 2
     kinds = [c[0] for c in calls]
     assert kinds == ["failed", "failed"]
+    # Both alerts carry the real run_key -- proof both came from the flow body's own
+    # post-authorisation branch, never from the hook (which never learns the run_key).
+    key = _bench_key()
+    assert [c[2] for c in calls] == [key, key]
+
+
+@pytest.mark.integration
+def test_a_second_flow_run_is_not_suppressed_by_the_first_runs_alert_flag(
+    prefect_api, db, local_site, monkeypatch
+) -> None:
+    """Hookfix brief, round 1, Important finding: Prefect 3.8.4 runs a *sync* flow body in the
+    caller's context with no `copy_context()` (flow_engine.py: call_with_parameters), so
+    `_ALERTED_IN_FLOW` is a ContextVar shared across sequential in-process flow runs, not scoped
+    to one flow run. Keying the flag on `run_count` alone is not enough: every flow run's single
+    (here, un-retried) attempt is run_count 1, so a value left behind by one flow run's in-body
+    alert can equal a *later, unrelated* flow run's `flow_run.run_count` and wrongly suppress
+    that later run's hook alert -- even though that later run's only attempt never reached the
+    in-body alert branch at all. This must go red if the flag is keyed on run_count alone (it did,
+    against the round-1-reviewed code: the reviewer's own probe showed a second in-process run's
+    hook seeing a leaked value and skipping).
+
+    Two sequential ONCE (no-retry) flow runs, same process, same event loop:
+    - Run 1 fails post-authorisation (StartPageError) -- alerts in-body, records
+      (run_1's flow_run.id, 1).
+    - Run 2 fails pre-authorisation (SpecError, before the in-body alert branch) -- run_count is
+      *also* 1 (a fresh flow run, not a retry), but its flow_run.id is different. The hook must
+      still alert for run 2: the stored identity from run 1 must not match run 2's."""
+    calls: list[AlertCall] = []
+    monkeypatch.setattr(
+        "selector_drift.orchestrate.flows.post_alert",
+        lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
+    )
+
+    async def always_fail_start_page(target: object) -> int:
+        raise StartPageError("synthetic post-auth failure, run 1")
+
+    real_load_spec = load_spec
+    stage = {"n": 1}
+
+    def routed_load_spec(path: Path):  # type: ignore[no-untyped-def]
+        if stage["n"] == 2:
+            raise SpecError("synthetic pre-auth failure, run 2")
+        return real_load_spec(path)
+
+    monkeypatch.setattr("selector_drift.orchestrate.flows.load_start_page", always_fail_start_page)
+    monkeypatch.setattr("selector_drift.orchestrate.flows.load_spec", routed_load_spec)
+
+    # Run 1: fails post-auth, alerts in-body, hook correctly skips (only 1 alert).
+    with pytest.raises(StartPageError):
+        ONCE("specs/testbench.yaml")
+    assert len(calls) == 1
+    assert calls[0][0] == "failed" and calls[0][2] == _bench_key()
+
+    # Run 2: a genuinely new flow run (new flow_run.id) whose only attempt is also run_count 1,
+    # but fails pre-auth -- it never touches _ALERTED_IN_FLOW itself. If the leaked value from
+    # run 1 is compared by run_count alone, the hook wrongly thinks *this* attempt already
+    # alerted and stays silent -- silent alert loss for an entirely different run.
+    calls.clear()
+    stage["n"] = 2
+    with pytest.raises(SpecError):
+        ONCE("specs/testbench.yaml")
+    assert len(calls) == 1
+    kind, target, alerted_key, summary = calls[0]
+    assert (kind, target, alerted_key) == ("failed", "testbench", None)
+    assert "SpecError" in summary
