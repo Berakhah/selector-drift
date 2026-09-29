@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Search{% endblock %}
+{% block content %}
+<h1>Search claims</h1>
+<form class="search" method="get" action="/results">
+  <label>Claim number <input name="claim_number" type="text" autocomplete="off"></label>
+  <label>Claimant <input name="claimant" type="text" autocomplete="off"></label>
+  <label>Status
+    <select name="status">
+      <option value="">Any</option>
+      {% for s in statuses %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Filed from <input name="filed_from" type="date"></label>
+  <label>Filed to <input name="filed_to" type="date"></label>
+  <button type="submit">Search</button>
+</form>
+{% endblock %}

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Claim {{ row.claim_number }}{% endblock %}
+{% block content %}
+<h1>Claim {{ row.claim_number }}</h1>
+<dl class="claim-detail">
+{% for key, label in columns %}
+  <dt>{{ label }}</dt><dd>{{ row[key] }}</dd>
+{% endfor %}
+</dl>
+<p><a href="/results">Back to results</a></p>
+{% endblock %}
