@@ -1,7 +1,8 @@
 """Fixtures for the orchestrate tests. Task 26A APPENDS its bench fixtures to this file.
 
-Nothing here is autouse: the unit tests in this directory (run keys, deployments) must not touch
-Postgres or start a Prefect server (M26).
+Nothing here is autouse except `_reset_alerted_in_flow`, below: the unit tests in this directory
+(run keys, deployments) must not touch Postgres or start a Prefect server (M26), and resetting a
+plain `ContextVar` does neither.
 
 `scope_record()` builds a fully concrete, synthetic scope record rather than reading the real
 `scopes/*.yaml` files -- those still carry unresolved `<UPPER-CASE>` placeholders (day-one values,
@@ -27,6 +28,7 @@ from sqlalchemy import text
 
 from selector_drift.config import get_settings
 from selector_drift.db.session import engine
+from selector_drift.orchestrate.flows import _ALERTED_IN_FLOW
 
 REPO = Path(__file__).resolve().parents[2]
 PAGE = (
@@ -76,6 +78,18 @@ def write_scope(directory: Path, rec: dict[str, object]) -> None:
     (directory / f"{rec['target']}.yaml").write_text(
         yaml.safe_dump(rec, sort_keys=False), encoding="utf-8"
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_alerted_in_flow() -> None:
+    """Hookfix brief, round 1, Important finding: `_ALERTED_IN_FLOW` is a `ContextVar` shared
+    across sequential in-process flow runs (Prefect 3.8.4 runs a sync flow body in the caller's
+    context, with no `copy_context()`), and it turns out that same sharing reaches across test
+    functions too -- pytest runs a module's tests in one process/thread, so a value one test
+    leaves set would otherwise leak into the next. Reset before every test, not just the
+    integration ones that call the flow, so a stray leak can never make one test's result depend
+    on what ran before it."""
+    _ALERTED_IN_FLOW.set(None)
 
 
 @pytest.fixture(scope="session")
