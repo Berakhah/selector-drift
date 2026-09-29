@@ -10,6 +10,7 @@ import logging
 from contextvars import ContextVar
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from prefect import flow
 from prefect.runtime import flow_run
@@ -41,22 +42,30 @@ RETRY_DELAY_SECONDS = 300
 
 _log = logging.getLogger(__name__)
 
-# Plus item (final review), keyed on the attempt identity (hookfix brief): set to the current
-# attempt's `run_count` just before the flow body's own `except Exception` branch posts its alert
-# and re-raises, so `alert_on_flow_failure` (the on_failure hook, below) can tell "the flow body
-# already alerted for *this exact attempt*" from "the flow failed before reaching that branch at
-# all" (a SpecError loading the spec, a DB outage during the heartbeat or authorisation
-# bookkeeping, an invalid run key) and only alert in the latter case. A ContextVar, not a plain
-# module global: Prefect gives each flow run its own copy of the current context, so concurrent
-# flow runs (three targets, each on its own schedule) never see each other's flag.
+# Plus item (final review), keyed on run identity plus attempt (hookfix brief, round 1): set to
+# the current attempt's `(flow_run.id, run_count)` just before the flow body's own
+# `except Exception` branch posts its alert and re-raises, so `alert_on_flow_failure` (the
+# on_failure hook, below) can tell "the flow body already alerted for *this exact attempt of this
+# exact flow run*" from "the flow failed before reaching that branch at all" (a SpecError
+# loading the spec, a DB outage during the heartbeat or authorisation bookkeeping, an invalid run
+# key) and only alert in the latter case.
 #
-# This must be the attempt's identity, not a bare bool: Prefect retries re-enter extraction_flow
-# in the same process/context, so a bool set True on one attempt stays True on a later attempt
-# that fails for a *different* reason before ever reaching this branch again -- silently
-# suppressing the hook's alert for the failure that actually ended the flow run. Comparing
-# run_count against the hook's own `flow_run.run_count` (the attempt that actually failed last)
-# closes that gap: the hook skips only when the two identify the same attempt.
-_ALERTED_IN_FLOW: ContextVar[int | None] = ContextVar("_ALERTED_IN_FLOW", default=None)
+# It must be keyed on run identity, not just the attempt number: Prefect 3.8.4 runs a *sync* flow
+# body in the caller's context, with no `copy_context()` (flow_engine.py: call_with_parameters) --
+# so this ContextVar is shared across sequential in-process flow runs in the same worker/process,
+# not scoped to one flow run the way a fresh `contextvars.Context` would be. A round-1 review
+# caught this: run_count alone repeats across separate flow runs (every run's first attempt is
+# run_count 1, its second is 2, ...), so a value set by one flow run's in-body alert can equal a
+# *later, unrelated* flow run's `flow_run.run_count` and wrongly suppress that later run's hook
+# alert, even though that later run's final attempt never reached the in-body alert branch at
+# all. Including `flow_run.id` closes that gap: two different flow runs never share an id, so the
+# hook skips only when both the run and the attempt match.
+#
+# `prefect.runtime.flow_run.id` is a `str`; the hook's `FlowRun.id` is a `uuid.UUID` -- equal in
+# value but not by `==` unless cast, so the body wraps it in `UUID(...)` before storing (verified
+# empirically: `str(uuid) == uuid` is False, since `UUID.__eq__` requires `isinstance(other,
+# UUID)`, so an uncast `str` would silently defeat this whole comparison).
+_ALERTED_IN_FLOW: ContextVar[tuple[UUID, int] | None] = ContextVar("_ALERTED_IN_FLOW", default=None)
 
 
 class StartPageError(RuntimeError):
@@ -91,18 +100,21 @@ def alert_on_flow_failure(flow: Flow[Any, Any], flow_run: FlowRun, state: State[
     Deferred Task 6 finding: on these paths, the only alert channel stayed silent, leaving a gap
     in the 90-day log with nobody told.
 
-    Skips alerting only when `_ALERTED_IN_FLOW` records the run_count of *this* attempt --
-    `flow_run.run_count`, the attempt that actually failed last: the flow body's own
-    post-authorisation `except Exception` branch already posted an alert for this exact attempt
-    before re-raising, and posting again here would be a second alert for one event (M-8 already
-    flags alert volume as a separate concern; this hook must not add to it for the common case).
-    Any other value -- None, or a different attempt's run_count -- means this attempt's failure
-    was never alerted in-body, so the hook must alert.
+    Skips alerting only when `_ALERTED_IN_FLOW` records `(flow_run.id, flow_run.run_count)` for
+    *this exact attempt of this exact flow run* -- the run and attempt that actually failed last:
+    the flow body's own post-authorisation `except Exception` branch already posted an alert for
+    this exact attempt before re-raising, and posting again here would be a second alert for one
+    event (M-8 already flags alert volume as a separate concern; this hook must not add to it for
+    the common case). Any other value -- None, a different attempt of this run, or an attempt of
+    a *different* flow run entirely -- means this attempt's failure was never alerted in-body, so
+    the hook must alert. The run identity matters because the flag is a ContextVar shared across
+    sequential in-process flow runs (see the comment above `_ALERTED_IN_FLOW`); run_count alone
+    repeats across runs and is not enough to tell them apart.
 
     Best-effort and defensive: this must never itself raise into Prefect's state machine, so
     any failure while building or sending the alert is only logged.
     """
-    if _ALERTED_IN_FLOW.get() == flow_run.run_count:
+    if _ALERTED_IN_FLOW.get() == (flow_run.id, flow_run.run_count):
         return
     spec_path = flow_run.parameters.get("spec_path")
     stem = target_of(spec_path) if isinstance(spec_path, str) and spec_path else "unknown"
@@ -172,10 +184,13 @@ def extraction_flow(spec_path: str) -> str:
         # runs.error, but the alert body carries only the sanitised summary. A Playwright locator
         # timeout's "Call log:" section routinely quotes DOM content.
         post_alert("failed", stem, key, sanitize_for_alert(exc))
-        # Records *this* attempt's run_count, verified empirically to agree with the hook's own
-        # flow_run.run_count for the final attempt (see hookfix-report.md) -- tells
-        # alert_on_flow_failure not to alert a second time for this same attempt.
-        _ALERTED_IN_FLOW.set(flow_run.run_count)
+        # Records this run and attempt's identity -- tells alert_on_flow_failure not to alert a
+        # second time for this same attempt of this same flow run. `flow_run.id` here is
+        # `prefect.runtime.flow_run.id`, a `str`; cast to `UUID` so it compares equal to the
+        # hook's `FlowRun.id`, which Prefect hands the hook as a `uuid.UUID` (same value, a
+        # different type -- verified empirically, not assumed: an uncast `str` never equals the
+        # hook's `UUID` even for the identical run).
+        _ALERTED_IN_FLOW.set((UUID(flow_run.id), flow_run.run_count))
         raise  # Prefect's retry policy applies
     record_attempt(key, attempt, "completed", None, target.record_sha256)
     record_run(key, target=stem, spec_version=spec.version, window=day, state="completed")
