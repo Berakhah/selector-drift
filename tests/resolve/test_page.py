@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from selector_drift.resolve.page import StaticPageSource
+from testbench.mutations.catalogue import CATALOGUE
 from tests.resolve.conftest import BenchPage
 
 SEMANTICS = """<!doctype html><html><head><title>Fixture</title><style>
@@ -150,3 +151,34 @@ def test_the_ax_tree_excludes_what_is_hidden_and_keeps_what_is_named(
     assert ("columnheader", "Claim Number") in {(n.role, n.name) for n in nodes}
     assert not any("aria hidden" in n.name or "styled away" in n.name for n in nodes)
     assert all(page.node(n.node_id) is not None for n in nodes)
+
+
+@pytest.mark.unit
+def test_a_custom_element_path_round_trips() -> None:
+    """Fix round 1 (F1): lxml's getpath emits custom-element tags such as app-root, which
+    FrameworkMarkup's angular dialect wraps the page in."""
+    page = StaticPageSource(
+        "<html><body><app-root><table><tr><td id=x>v</td></tr></table></app-root></body></html>"
+    )
+    el = page.query("#x")[0]
+    assert page.node_id(el) == "/html/body/app-root/table/tr/td"
+    assert page.node(page.node_id(el)) is el
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "injected", ["/html/body/td[1] | //*", "/html/body/td[1]|//*", "/html/body[1]/..//td"]
+)
+def test_an_injected_xpath_is_still_refused(bench: BenchPage, injected: str) -> None:
+    assert bench.source().node(injected) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", [e.name for e in CATALOGUE])
+def test_every_truth_cell_round_trips_under_every_mutation(bench: BenchPage, name: str) -> None:
+    """Fix round 1 (F1). Not vacuous: every catalogue entry leaves true cells to check."""
+    static = StaticPageSource(bench.mutated(name).marked)
+    marked = static.query("[data-sd-truth]")
+    assert marked, f"{name}: no data-sd-truth cell survived -- the check would be vacuous"
+    for el in marked:
+        assert static.node(static.node_id(el)) is el, (name, static.node_id(el))

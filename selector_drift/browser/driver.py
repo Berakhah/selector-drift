@@ -106,11 +106,6 @@ class PageHandle:
     def url(self) -> str:
         return self._page.url
 
-    @property
-    def raw(self) -> Page:
-        """browser/-internal. Nothing outside browser/ receives a Playwright page."""
-        return self._page
-
     async def content(self) -> str:
         self._ledger.raise_if_off_scope()
         return await self._page.content()
@@ -144,6 +139,15 @@ class PageHandle:
         resolved = _resolve_step_path(self._base, step.get("path"), self._target)
         await asyncio.to_thread(ratelimit.acquire, self._target)
         await _navigate(self._page, resolved, self._ledger)
+
+
+def _playwright_page(handle: PageHandle) -> Page:
+    """browser/-internal: the raw Playwright page behind a handle, for page_source.py's
+    read-only snapshot. Its goto()/click() would skip ratelimit.acquire() and
+    raise_if_off_scope(), so nothing outside browser/ may call this --
+    tests/test_playwright_page_boundary.py enforces that (fix round 1, S-I1)."""
+    handle._ledger.raise_if_off_scope()
+    return handle._page
 
 
 @dataclass(frozen=True)
