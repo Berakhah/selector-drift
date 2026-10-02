@@ -10,7 +10,8 @@ from selector_drift.resolve.grid import (
     grid_of,
     header_band,
     header_has_rowspan,
-    in_header_band,
+    is_value_row,
+    row_of,
 )
 from selector_drift.resolve.labels import expected_label, normalise
 from selector_drift.resolve.page import PageSource
@@ -87,13 +88,14 @@ def locate_by_name(page: PageSource, name: str) -> tuple[HtmlElement, str] | Mis
     want = normalise(name)
     hits: list[tuple[HtmlElement, str]] = []
     rowspan_header = False
-    bands: dict[int, list[HtmlElement]] = {}  # fix round 3: one header_band() per grid per call
+    # One header_band() per grid per call, keyed on the grid element itself (fix round 4): the
+    # dict holds the lxml proxy alive, whereas an id() key could be reused once a proxy is freed.
+    bands: dict[HtmlElement, list[HtmlElement]] = {}
 
     def band_of(grid: HtmlElement) -> list[HtmlElement]:
-        key = id(grid)
-        if key not in bands:
-            bands[key] = header_band(page, grid)
-        return bands[key]
+        if grid not in bands:
+            bands[grid] = header_band(page, grid)
+        return bands[grid]
 
     for node in page.ax().walk():
         if not want or normalise(node.name) != want:
@@ -124,10 +126,12 @@ def locate_by_name(page: PageSource, name: str) -> tuple[HtmlElement, str] | Mis
             continue  # I2: nor is the label's own text ever stood in for the value
         # `value` is always inside the same grid as `anchor` (cell_under/cell_right_of stay
         # within it; the VALUE_ROLES branch sets value = anchor), so the cached band applies.
-        if in_header_band(page, value, band if grid is not None else None):
-            continue  # I1 (fix round 3): a header-band cell is never a value, whichever
-            # path produced it -- cell_right_of walks a single row and does not go through
-            # data_rows(), so it is not otherwise stopped from handing back a band cell
+        row = row_of(page, value) if grid is not None else None
+        if row is not None and not is_value_row(page, row, band):
+            continue  # fix round 4: a value is never taken from the header band, nor from a
+            # row excluded from data (a repeated header, a section label, a span-only group
+            # row), whichever path produced it -- cell_right_of walks a single row and a
+            # directly named cell is its own value, so neither goes through data_rows()
         hits.append((value, node.name))
     values = unique([v for v, _ in hits])
     if not values:
