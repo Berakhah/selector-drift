@@ -504,7 +504,7 @@ def test_the_bench_sweep_never_returns_a_wrong_cell(bench: BenchPage) -> None:
 # immediately preceding sibling is a text-owning phrasing element declines; BELOW / WITHIN
 # values follow the anchor; a value is never (inside) a <label>, <dt> or <legend>.
 
-SPLIT_DETAIL = "label continues from a preceding phrase element"
+SPLIT_DETAIL = "label continues from preceding inline text"
 SPLIT = [
     '<div><span>Prior</span> <span>Amount</span> <span id="v">301.00</span></div>',
     '<div><span>Prior</span><span>Amount</span><span id="v">301.00</span></div>',
@@ -618,3 +618,155 @@ def test_r1_the_bench_sweep_over_every_relation_never_returns_a_wrong_cell(
     got = sweep_all_relations(bench)
     bad = {k: v for k, v in got.items() if k.startswith(("wrong", "other_record"))}
     assert bad == {}, got
+
+
+# -- fix round 2 -------------------------------------------------------------------------------
+#
+# Round 1's "immediately preceding phrasing sibling" rule was bypassed by anything between the
+# fragments (an empty span, an svg, a hidden input, a <wbr>), by unlisted phrasing tags, and by
+# a parent boundary. Ruling: an INLINE-CONTEXT check -- the visible rendered text before the box
+# inside its nearest block ancestor, back to a <br> or nested block, must be whitespace.
+
+BYPASS = [
+    "<div><span>Prior</span><span></span><span>Amount</span><span>9.00</span></div>",
+    "<div><span>Prior</span><span> </span><span>Amount</span><span>9.00</span></div>",
+    "<div><span>Prior</span><svg></svg><span>Amount</span><span>9.00</span></div>",
+    '<div><span>Prior</span><img alt=""><span>Amount</span><span>9.00</span></div>',
+    '<div><span>Prior</span><input type="hidden" value="x"><span>Amount</span>'
+    "<span>9.00</span></div>",
+    "<div><span>Prior</span><wbr><span>Amount</span><span>9.00</span></div>",
+    "<div><cite>Prior</cite> <span>Amount</span> <span>9.00</span></div>",
+    "<div><time>Prior</time> <span>Amount</span> <span>9.00</span></div>",
+    "<div><sup>Prior</sup> <span>Amount</span> <span>9.00</span></div>",
+    "<div><dfn>Prior</dfn> <span>Amount</span> <span>9.00</span></div>",
+    "<div><button>Prior</button> <span>Amount</span> <span>9.00</span></div>",
+    "<div><span>Prior</span> <span><span>Amount</span><span>9.00</span></span></div>",
+    "<div><x-frag>Prior</x-frag><x-label>Amount</x-label><span>9.00</span></div>",
+]
+BYPASS_IDS = [
+    "empty-span",
+    "whitespace-span",
+    "svg",
+    "img-empty-alt",
+    "hidden-input",
+    "wbr",
+    "cite",
+    "time",
+    "sup",
+    "dfn",
+    "button",
+    "parent-boundary",
+    "unknown-tags",
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("relation", [Relation.RIGHT_OF, Relation.BELOW, Relation.WITHIN])
+@pytest.mark.parametrize("body", BYPASS, ids=BYPASS_IDS)
+def test_r2_no_inline_text_before_the_label_lets_it_anchor(body: str, relation: Relation) -> None:
+    page = _page(body)
+    got = AnchorRung().attempt(page, AMOUNT.model_copy(update={"relation": relation}))
+    assert isinstance(got, Miss) and got.outcome == "no_match", got
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("relation", [Relation.RIGHT_OF, Relation.BELOW])
+@pytest.mark.parametrize("body", BYPASS[:-1], ids=BYPASS_IDS[:-1])
+def test_r2_the_split_phrase_detail_is_reported(body: str, relation: Relation) -> None:
+    got = AnchorRung().attempt(_page(body), AMOUNT.model_copy(update={"relation": relation}))
+    assert isinstance(got, Miss) and SPLIT_DETAIL in got.detail
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<div><span>Claim Number</span><dl><dt>Claimant</dt></dl></div>",
+        "<div><span>Claim Number</span><div><label>Claimant</label></div></div>",
+    ],
+    ids=["dl-of-a-term", "div-of-a-label"],
+)
+def test_r2_a_value_holding_only_labels_is_never_taken(body: str) -> None:
+    got = AnchorRung().attempt(_page(body), RIGHT_OF)
+    assert isinstance(got, Miss) and got.outcome == "no_match"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("target", "body", "ident"),
+    [
+        (
+            RIGHT_OF,
+            '<div><span>Claim Number</span><span id="v">AB12345678</span>'
+            "<span>Claimant</span><span>X</span></div>",
+            "#v",
+        ),
+        (RIGHT_OF, '<div><span>Claim Number</span><span id="v">AB12345678</span></div>', "#v"),
+        (
+            RIGHT_OF,
+            '<div><div>Ref</div><span>Claim Number</span><span id="v">AB12345678</span></div>',
+            "#v",
+        ),
+        (
+            RIGHT_OF,
+            '<div><span>Ref</span><br><span>Claim Number</span><span id="v">AB12345678</span>'
+            "</div>",
+            "#v",
+        ),
+        (
+            CLAIM_NUMBER.model_copy(update={"relation": Relation.BELOW}),
+            '<div><p>Claim Number</p></div><div><p id="v">AB12345678</p></div>',
+            "#v",
+        ),
+        (
+            CLAIM_NUMBER.model_copy(update={"relation": Relation.WITHIN}),
+            '<section><h2>Claim Number</h2><div><b id="v">AB12345678</b></div></section>',
+            "#v",
+        ),
+        (
+            CLAIM_NUMBER,
+            '<dl><dt>Ref</dt><dd>R</dd><dt>Claim Number</dt><dd id="v">AB</dd></dl>',
+            "#v",
+        ),
+        (
+            CLAIM_NUMBER,
+            '<label for="v">Claim Number</label><input id="v" value="AB12345678">',
+            "#v",
+        ),
+        (CLAIM_NUMBER, '<label>Claim Number <input id="v" value="AB12345678"></label>', "#v"),
+        (
+            CLAIM_NUMBER,
+            '<table><tr><th scope="row">Claim Number</th><td id="v">AB</td></tr></table>',
+            "#v",
+        ),
+        (
+            RIGHT_OF,
+            "<table><tr><th>Claim Number</th><th>Claimant</th></tr>"
+            '<tr><td id="v">AB12345678</td><td>X</td></tr></table>',
+            "#v",
+        ),
+        (
+            RIGHT_OF,
+            "<table><tr><td>Ref</td><td>R</td></tr><tr><td>Claim Number</td>"
+            '<td id="v">AB12345678</td></tr></table>',
+            "#v",
+        ),
+    ],
+    ids=[
+        "flat-span-first-pair",
+        "span-beside-span",
+        "after-a-block-div",
+        "after-a-br",
+        "p-below",
+        "h2-within",
+        "dt-dd",
+        "label-for",
+        "wrapping-label",
+        "th-scope-row",
+        "column-header-right-of",
+        "td-cells-right-of",
+    ],
+)
+def test_r2_these_still_resolve(target: object, body: str, ident: str) -> None:
+    page = _page(body)
+    assert _is(page, AnchorRung().attempt(page, target), ident)  # type: ignore[arg-type]
