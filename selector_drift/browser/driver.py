@@ -111,12 +111,6 @@ class PageHandle:
         self._ledger.raise_if_off_scope()
         return await self._page.content()
 
-    async def screenshot(self) -> bytes:
-        """Raw bytes. CLIENT_CONFIDENTIAL until `heallog` redacts them (never-rule 6); nothing
-        here stores or transmits them."""
-        self._ledger.raise_if_off_scope()
-        return await self._page.screenshot(full_page=True)
-
     async def click(self, selector: str) -> None:
         """A click may navigate, so it takes a rate-limit token first; if it tried to leave the
         authorised origins, this raises `OffScopeNavigation`."""
