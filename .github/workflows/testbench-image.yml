@@ -1,0 +1,29 @@
+name: testbench-image
+on:
+  push:
+    paths: [ "testbench/**", "pyproject.toml", "uv.lock", ".github/workflows/testbench-image.yml" ]
+  pull_request:
+    paths: [ "testbench/**", "pyproject.toml", "uv.lock", ".github/workflows/testbench-image.yml" ]
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build for linux/arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: testbench/Dockerfile
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: selector-drift-testbench:ci
+      - name: Smoke-test the arm64 image under emulation
+        run: |
+          docker run -d --platform linux/arm64 --name bench --read-only --tmpfs /tmp \
+            --cap-drop ALL --security-opt no-new-privileges:true -p 8080:8080 selector-drift-testbench:ci
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/healthz && exit 0; sleep 2; done
+          docker logs bench; exit 1
