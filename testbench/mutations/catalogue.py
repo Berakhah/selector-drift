@@ -7,6 +7,7 @@ records what was actually applied.
 
 from __future__ import annotations
 
+from testbench.mutations.adversarial.decoy_column import DecoyColumn
 from testbench.mutations.base import CatalogueEntry, entry
 from testbench.mutations.class_rename import ClassRename
 from testbench.mutations.column_reorder import ColumnReorder
@@ -31,4 +32,5 @@ CATALOGUE: tuple[CatalogueEntry, ...] = (
             Pagination,
         )
     ),
+    *(entry(c, adversarial=True) for c in (DecoyColumn,)),
 )
