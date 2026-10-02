@@ -377,3 +377,131 @@ def test_a_row_header_whose_value_cell_spans_still_resolves() -> None:
     )
     el = AxTreeRung().resolve(page, CLAIM_NUMBER)
     assert el is not None and el.node_id == page.node_id(page.query("td")[0])
+
+
+# -- fix round 4 -----------------------------------------------------------------------------
+#
+# Round 3's band ran from the top through the LAST columnheader row, so a header row repeated
+# mid-table swept every data row above it into the band and CLAIM_NUMBER silently resolved to
+# a different record. The band now ends at the end of the FIRST contiguous run of columnheader
+# rows; below it, a row carrying a columnheader (a repeated header, a <tbody> section label) or
+# one in which every cell spans more than one column (a group / sub-header / divider row) is
+# excluded, never data.
+
+
+@pytest.mark.unit
+def test_a_header_row_repeated_mid_table_does_not_skip_the_first_record() -> None:
+    page = StaticPageSource(
+        "<html><body><table>"
+        "<tr><th>Claim Number</th><th>Amount</th></tr>"
+        '<tr><td id="cn">AB12345678</td><td>1.00</td></tr>'
+        "<tr><th>Claim Number</th><th>Amount</th></tr>"
+        '<tr><td id="cn2">CD87654321</td><td>2.00</td></tr>'
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, ResolvedElement)
+    assert got.node_id == page.node_id(page.query("#cn")[0])
+
+
+@pytest.mark.unit
+def test_a_spanning_group_row_below_the_headers_is_never_data() -> None:
+    page = StaticPageSource(
+        "<html><body><table>"
+        "<tr><th>Claim Number</th><th>Amount</th><th>B</th><th>C</th></tr>"
+        '<tr><td colspan="2">Group X</td><td colspan="2">Group Y</td></tr>'
+        '<tr><td id="cn">AB12345678</td><td>1.00</td><td>b</td><td>c</td></tr>'
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, ResolvedElement)
+    assert got.node_id == page.node_id(page.query("#cn")[0])
+
+
+@pytest.mark.unit
+def test_a_title_row_above_the_headers_stays_in_the_band() -> None:
+    page = StaticPageSource(
+        "<html><body><table>"
+        '<tr><td colspan="2">Open claims</td></tr>'
+        "<tr><th>Claim Number</th><th>Amount</th></tr>"
+        '<tr><td id="cn">AB12345678</td><td id="am">1.00</td></tr>'
+        "</table></body></html>"
+    )
+    for target, ident in ((CLAIM_NUMBER, "#cn"), (AMOUNT, "#am")):
+        got = AxTreeRung().attempt(page, target)
+        assert isinstance(got, ResolvedElement)
+        assert got.node_id == page.node_id(page.query(ident)[0])
+
+
+@pytest.mark.unit
+def test_a_tbody_section_label_row_is_never_the_value() -> None:
+    """A <th colspan> section label opening the <tbody>: never resolved to. (It declines today
+    via column_header()'s last-all-columnheader-row verification, which is out of scope.)"""
+    page = StaticPageSource(
+        "<html><body><table>"
+        "<thead><tr><th>Claim Number</th><th>Amount</th></tr></thead>"
+        '<tbody><tr><th colspan="2">Open claims</th></tr>'
+        '<tr><td id="cn">AB12345678</td><td>1.00</td></tr></tbody>'
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    if isinstance(got, ResolvedElement):
+        assert got.node_id == page.node_id(page.query("#cn")[0])
+    else:
+        assert isinstance(got, Miss)
+
+
+@pytest.mark.unit
+def test_a_reordered_repeated_header_never_heals_onto_the_adjacent_column() -> None:
+    """A repeated header row with its columns in a different order sits outside the band, so
+    it may not serve as an anchor: verifying against it lined CLAIM_NUMBER up with the Amount
+    cell of the first record -- the adjacent-column failure. Verification uses band headers."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        "<tr><th>Claim Number</th><th>Amount</th></tr>"
+        '<tr><td id="cn">AB12345678</td><td id="am">1.00</td></tr>'
+        "<tr><th>Amount</th><th>Claim Number</th></tr>"
+        "<tr><td>2.00</td><td>CD87654321</td></tr>"
+        "</table></body></html>"
+    )
+    for target, ident in ((CLAIM_NUMBER, "#cn"), (AMOUNT, "#am")):
+        got = AxTreeRung().attempt(page, target)
+        assert isinstance(got, ResolvedElement)
+        assert got.node_id == page.node_id(page.query(ident)[0])
+
+
+@pytest.mark.unit
+def test_a_grouping_row_rowspanned_into_a_later_header_row_is_band_not_data() -> None:
+    """A grouping row between two columnheader rows whose corner rowspans down into the second
+    one is header structure, not a record: taking it as data resolved CLAIM_NUMBER to the
+    corner cell's text. It belongs to the band, whose rowspan then declines (rule 3)."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        '<tr><th>Claim Number</th><th colspan="2">Money</th></tr>'
+        '<tr><td rowspan="2">corner</td><td>g1</td><td>g2</td></tr>'
+        "<tr><th>Amount</th><th>Prior Amount</th></tr>"
+        '<tr><td id="cn">AB12345678</td><td id="am">1.00</td><td>2.00</td></tr>'
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss)
+    assert got.outcome == "anchor_mismatch"
+    assert "rowspan" in got.detail
+
+
+@pytest.mark.unit
+def test_a_rowspanned_data_row_above_a_repeated_header_is_still_data() -> None:
+    """Non-regression for the rule above: a grouped line item whose rowspan ends before the
+    repeated header is an ordinary record (B2's shape) and still resolves."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        "<tr><th>Claim Number</th><th>Amount</th></tr>"
+        '<tr><td id="cn" rowspan="2">AB12345678</td><td id="am">100.00</td></tr>'
+        "<tr><td>200.00</td></tr>"
+        "<tr><th>Claim Number</th><th>Amount</th></tr>"
+        '<tr><td id="cn2">CD87654321</td><td>2.00</td></tr>'
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, ResolvedElement)
+    assert got.node_id == page.node_id(page.query("#cn")[0])
