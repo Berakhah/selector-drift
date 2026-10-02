@@ -13,7 +13,7 @@ from __future__ import annotations
 import random
 import string
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from typing import Self
 
 from testbench.mutations.base import MutationBase, parse, serialise
@@ -29,7 +29,7 @@ from testbench.mutations.grid import (
     text_of,
 )
 from testbench.mutations.vocabulary import find_column
-from testbench.portal.data import CENT, MAX_MONEY, MIN_MONEY
+from testbench.portal.data import CENT, MIN_MONEY
 
 DECOY_LABELS = ("Prior Amount", "Previous Amount", "Original Amount")
 _SALT_ALPHABET = string.ascii_lowercase + string.digits
@@ -55,16 +55,36 @@ class DecoyColumn(MutationBase):
         return cls(label=rng.choice(DECOY_LABELS), salt="".join(rng.choices(_SALT_ALPHABET, k=6)))
 
     def decoy_value(self, real: str, row: int) -> str:
-        """A plausible amount near `real`, never equal to it. Unparseable text is copied."""
+        """A plausible amount 80-97% of `real`, never equal to it. Unparseable text is copied.
+
+        Clamping the dollar value to MIN_MONEY (as a first draft did) can push the *ratio* above
+        `self.high`, or even above 1, for `real` near MIN_MONEY -- a decoy greater than the real
+        amount. Clamp the ratio instead: raise the effective floor to whatever ratio keeps the
+        result at or above MIN_MONEY, and only fall back to MIN_MONEY itself when no ratio in
+        [low, high] can reach it. At real == MIN_MONEY exactly there is no plausible value
+        strictly below it, so the decoy is MIN_MONEY + one cent -- the single documented
+        out-of-band case, because plausibility outranks the band.
+        """
         try:
             amount = Decimal(real.replace(",", ""))
         except InvalidOperation:
             return real
+        if amount <= MIN_MONEY:
+            decoy = MIN_MONEY + CENT if amount == MIN_MONEY else MIN_MONEY
+            return f"{decoy:,.2f}"
+        low_eff = max(self.low, MIN_MONEY / amount)
+        if low_eff > self.high:
+            return f"{MIN_MONEY:,.2f}"  # no ratio in [low, high] keeps the result >= MIN_MONEY
         fraction = Decimal(digest(self.salt, str(row), real) % 10_000) / Decimal(10_000)
-        ratio = self.low + (self.high - self.low) * fraction
-        decoy = min(max((amount * ratio).quantize(CENT), MIN_MONEY), MAX_MONEY)
-        if decoy == amount:
-            decoy = amount + Decimal("1.00") if amount < MAX_MONEY else amount - Decimal("1.00")
+        ratio = low_eff + (self.high - low_eff) * fraction
+        decoy = (amount * ratio).quantize(CENT)
+        # Rounding at the quantize step can tip the result just outside the band or under
+        # MIN_MONEY; nudge it back to the nearest interior cent.
+        floor = max(MIN_MONEY, (amount * low_eff).quantize(CENT, rounding=ROUND_CEILING))
+        ceiling = min((amount * self.high).quantize(CENT, rounding=ROUND_FLOOR), amount - CENT)
+        if floor > ceiling:  # low_eff and high rounded to the same cent at this boundary
+            floor = ceiling
+        decoy = min(max(decoy, floor), ceiling)
         return f"{decoy:,.2f}"
 
     def apply(self, html: str) -> str:

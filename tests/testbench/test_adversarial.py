@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import random
+from decimal import Decimal
 
 import pytest
 
 from testbench.mutations.adversarial.decoy_column import DecoyColumn
-from testbench.mutations.base import MutationBase
+from testbench.mutations.base import MutationBase, parse, serialise
 from testbench.mutations.column_reorder import ColumnReorder
 from testbench.mutations.dom_restructure import DomRestructure
 from testbench.mutations.label_reword import LabelReword
 from testbench.mutations.table_to_div import TableToDiv
-from testbench.portal.data import COLUMNS
-from testbench.portal.render import PAGE_SIZE, render_results
+from testbench.portal.data import COLUMNS, dataset_for
+from testbench.portal.render import PAGE_SIZE, render_detail, render_login, render_results
 from tests.testbench.helpers import FIXTURE_DAY, column, headers, is_plausible_amount, root, rows
 
 LABELS = [label for _, label in COLUMNS]
@@ -89,3 +90,51 @@ def test_decoy_values_and_label_vary_with_the_rng() -> None:
     pages = {m.apply(BEFORE) for m in drawn}
     assert len(pages) == len(drawn)
     assert {m.label for m in drawn} == {"Prior Amount", "Previous Amount", "Original Amount"}
+
+
+# --- Fix round 1: the ratio band must hold even near MIN_MONEY (controller's ruling) ---------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "real", ["103.10", "104.00", "125.00", "1000.00", "249999.99", "250000.00"]
+)
+def test_decoy_value_stays_in_the_ratio_band(real: str) -> None:
+    mutation = DecoyColumn()
+    for row in range(50):
+        decoy = mutation.decoy_value(real, row)
+        assert is_plausible_amount(decoy)
+        ratio = Decimal(decoy.replace(",", "")) / Decimal(real.replace(",", ""))
+        assert Decimal("0.80") <= ratio <= Decimal("0.97"), (real, row, decoy, ratio)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("real", ["100.01", "101.00", "103.00"])
+def test_decoy_value_below_the_feasible_floor_clamps_to_min_money(real: str) -> None:
+    """Below MIN_MONEY / high (~103.09) the 80-97% band would fall under MIN_MONEY -- the
+    nearest plausible value strictly below `real` is MIN_MONEY itself."""
+    mutation = DecoyColumn()
+    for row in range(5):
+        decoy = mutation.decoy_value(real, row)
+        assert decoy == "100.00"
+        assert Decimal(decoy) < Decimal(real)
+
+
+@pytest.mark.unit
+def test_decoy_value_at_the_floor_is_one_cent_above() -> None:
+    """At real == MIN_MONEY exactly there is no plausible value strictly below it; plausibility
+    outranks the band, so this is the single documented out-of-band case."""
+    mutation = DecoyColumn()
+    decoy = mutation.decoy_value("100.00", 0)
+    assert decoy == "100.01"
+    assert decoy != "100.00"
+    assert is_plausible_amount(decoy)
+
+
+@pytest.mark.unit
+def test_decoy_column_is_a_no_op_on_pages_without_a_results_grid() -> None:
+    login_html = render_login()
+    assert DecoyColumn().apply(login_html) == serialise(parse(login_html))
+    detail_html = render_detail(FIXTURE_DAY, dataset_for(FIXTURE_DAY)[0].claim_number)
+    assert detail_html is not None
+    assert DecoyColumn().apply(detail_html) == serialise(parse(detail_html))
