@@ -1,11 +1,19 @@
 """Tables and grids by role, so a native <table> and TableToDiv's role="table" divs are one model.
 
-Column positions count colspan (aria-colspan on divs). A header row with a cell that spans
-multiple rows (`rowspan`/`aria-rowspan` > 1) cannot be trusted to line up with the data row
-beneath it by colspan position alone -- without it, two header rows' cells land on overlapping
-column indices and a header's "position" can silently point at a neighbouring column's data
-(fix round 1, I1). `header_has_rowspan()` flags any such grid; callers that trust column
-position (`cell_under`) decline rather than guess, and the rung above records why.
+Column positions count colspan (aria-colspan on divs). A multi-level header's grouping row
+(the one with "Money" spanning "Amount"/"Reserve") routinely has a plain, unlabelled corner
+cell that is not itself a columnheader -- a membership test that required EVERY cell in a row
+to be a columnheader (`is_header_row`) let that row slip through as "data" and the corner cell
+got returned as a value (fix round 2, I1). `header_band()` is the real boundary: every row
+from the top, up to and including the last row that still looks like header -- it carries a
+columnheader cell, or any cell whose colspan/rowspan (or the aria-* equivalent) is greater than
+one -- stopping at the first row with neither. `data_rows()`/`first_data_row()` start after the
+band, so no rung can be handed a band cell as a data value; and a cell with `rowspan`/
+`aria-rowspan` > 1 anywhere in the band (`header_has_rowspan()`) means colspan-only column
+position cannot be trusted to line up at all, so `cell_under()` declines outright rather than
+guess. `in_header_band()` is the belt-and-suspenders check for a path -- `cell_right_of()`,
+walking a single row -- that does not go through `data_rows()` and so would not otherwise be
+stopped from handing back a band cell.
 """
 
 from __future__ import annotations
@@ -91,13 +99,47 @@ def header_rows(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
     return [r for r in rows(page, grid) if is_header_row(page, r)]
 
 
+def _has_span(cell: HtmlElement) -> bool:
+    colspan = cell.get("colspan") or cell.get("aria-colspan") or "1"
+    rowspan = cell.get("rowspan") or cell.get("aria-rowspan") or "1"
+    wide = colspan.isdigit() and int(colspan) > 1
+    tall = rowspan.isdigit() and int(rowspan) > 1
+    return wide or tall
+
+
+def _looks_like_header(page: PageSource, row: HtmlElement) -> bool:
+    cs = cells(page, row)
+    return any(page.role(c) == "columnheader" for c in cs) or any(_has_span(c) for c in cs)
+
+
+def header_band(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
+    """Every row from the top, up to and including the last row that still looks like header
+    (fix round 2, I1): it carries a columnheader cell, or any cell whose colspan/rowspan is
+    greater than one. Stops at the first row with neither -- a row-header data row (a
+    `<th scope=row>` beside plain `<td>`s, no spans) is correctly not part of the band."""
+    band: list[HtmlElement] = []
+    for r in rows(page, grid):
+        if _looks_like_header(page, r):
+            band.append(r)
+        else:
+            break
+    return band
+
+
+def in_header_band(page: PageSource, cell: HtmlElement) -> bool:
+    grid, row = grid_of(page, cell), row_of(page, cell)
+    if grid is None or row is None:
+        return False
+    return any(row is b for b in header_band(page, grid))
+
+
 def header_has_rowspan(page: PageSource, grid: HtmlElement) -> bool:
-    """True when any header row's cell spans multiple rows (fix round 1, I1). `column_of` and
-    `cell_at` count colspan only, so a rowspanned cell in one header row desynchronises column
-    indices between header rows -- and between a header row and the data row -- and position
-    alone can no longer be trusted to verify a header."""
-    for hr in header_rows(page, grid):
-        for c in cells(page, hr):
+    """True when any cell anywhere in the header band spans multiple rows (fix round 2, I1).
+    `column_of` and `cell_at` count colspan only, so a rowspanned cell desynchronises column
+    indices between rows of the band -- and between the band and the data row beneath it --
+    and position alone can no longer be trusted to verify a header."""
+    for r in header_band(page, grid):
+        for c in cells(page, r):
             raw = c.get("rowspan") or c.get("aria-rowspan") or "1"
             if raw.isdigit() and int(raw) > 1:
                 return True
@@ -106,13 +148,17 @@ def header_has_rowspan(page: PageSource, grid: HtmlElement) -> bool:
 
 def data_rows(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
     """Visible rows holding data. A single cell spanning a multi-column grid is a pager or a
-    footer, not data (Pagination mutation)."""
+    footer, not data (Pagination mutation). Rows in the header band (fix round 2, I1) never
+    count as data, whatever role their own cells carry."""
     all_rows = rows(page, grid)
+    band = header_band(page, grid)
     columns = max((width(page, r) for r in all_rows), default=0)
     out = []
     for r in all_rows:
+        if any(r is b for b in band) or is_header_row(page, r) or not page.visible(r):
+            continue
         cs = cells(page, r)
-        if not cs or is_header_row(page, r) or not page.visible(r):
+        if not cs:
             continue
         if not any(page.role(c) in DATA_CELL_ROLES for c in cs):
             continue
@@ -209,9 +255,11 @@ __all__ = [
     "data_rows",
     "first_data_row",
     "grid_of",
+    "header_band",
     "header_has_rowspan",
     "header_rows",
     "headers_named",
+    "in_header_band",
     "is_header_row",
     "nearest",
     "row_header",

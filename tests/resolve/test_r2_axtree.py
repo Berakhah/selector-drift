@@ -148,19 +148,20 @@ def test_a_rowspan_free_multi_row_header_still_resolves() -> None:
 @pytest.mark.unit
 def test_a_label_cell_is_never_resolved_as_its_own_value() -> None:
     """I2 repro (a). A plain <td> whose content is the label text itself (no header relation,
-    no author name) must never be taken as the value it names."""
+    no author name) must never be taken as the value it names. With no other element named
+    'claim number' anywhere on the page, the exact outcome is a clean no_match."""
     page = StaticPageSource(
         "<html><body><table><tr><td>Claim Number</td><td>AB12345678</td></tr></table></body></html>"
     )
     got = AxTreeRung().attempt(page, CLAIM_NUMBER)
-    label_cell = page.node_id(page.query("td")[0])
-    assert isinstance(got, Miss) or (isinstance(got, ResolvedElement) and got.node_id != label_cell)
+    assert isinstance(got, Miss) and got.outcome == "no_match"
 
 
 @pytest.mark.unit
 def test_a_td_header_row_never_resolves_to_its_own_header_text() -> None:
     """I2 repro (b). A header row authored with <td> instead of <th> must never be mistaken for
-    the value it labels, even though it still carries a columnheader-shaped relationship."""
+    the value it labels, even though it still carries a columnheader-shaped relationship. No
+    td here is a columnheader role, so the exact outcome is a clean no_match."""
     page = StaticPageSource(
         "<html><body><table>"
         "<tr><td>Claim Number</td><td>Amount</td></tr>"
@@ -168,10 +169,7 @@ def test_a_td_header_row_never_resolves_to_its_own_header_text() -> None:
         "</table></body></html>"
     )
     got = AxTreeRung().attempt(page, CLAIM_NUMBER)
-    header_cell = page.node_id(page.query("td")[0])
-    assert isinstance(got, Miss) or (
-        isinstance(got, ResolvedElement) and got.node_id != header_cell
-    )
+    assert isinstance(got, Miss) and got.outcome == "no_match"
 
 
 @pytest.mark.unit
@@ -205,3 +203,115 @@ def test_a_hidden_decoy_alongside_a_visible_real_cell_still_resolves() -> None:
     page = StaticPageSource(TABLE.format(decoy=DECOYS[0]))
     el = AxTreeRung().resolve(page, CLAIM_NUMBER)
     assert el is not None and el.node_id == page.node_id(page.query("#real")[0])
+
+
+# -- fix round 2 -----------------------------------------------------------------------------
+#
+# header_has_rowspan (round 1) only scanned rows where is_header_row was true, which requires
+# every cell in the row to be a columnheader. The commonest real multi-level header has a
+# plain, unlabelled corner <td> -- not itself a columnheader -- so that row was "not a header
+# row", fell through to first_data_row, and position verification passed against the second
+# header row by recomputing the same (wrong) position it was handed. header_band() widens the
+# rule to any row carrying a columnheader OR a spanning cell, from the top down.
+
+
+def _corner_money_table(corner: str) -> str:
+    return (
+        "<html><body><table>"
+        f'<tr>{corner}<th colspan="2">Money</th></tr>'
+        "<tr><th>Amount</th><th>Prior Amount</th></tr>"
+        '<tr><td id="cn">CN</td><td id="am">1.00</td><td>2.00</td></tr>'
+        "</table></body></html>"
+    )
+
+
+@pytest.mark.unit
+def test_probe_1_an_unlabelled_rowspanned_corner_never_yields_the_corner_cell() -> None:
+    page = StaticPageSource(_corner_money_table('<td rowspan="2"></td>'))
+    got = AxTreeRung().attempt(page, AMOUNT)
+    assert isinstance(got, Miss)
+    assert got.outcome == "anchor_mismatch"
+    assert "rowspan" in got.detail
+
+
+@pytest.mark.unit
+def test_probe_2_a_labelled_rowspanned_corner_never_yields_the_corner_cell() -> None:
+    page = StaticPageSource(_corner_money_table('<td rowspan="2">Claim Number</td>'))
+    got = AxTreeRung().attempt(page, AMOUNT)
+    assert isinstance(got, Miss)
+    assert got.outcome == "anchor_mismatch"
+    assert "rowspan" in got.detail
+
+
+@pytest.mark.unit
+def test_probe_3_the_same_structure_inside_thead_still_declines() -> None:
+    page = StaticPageSource(
+        "<html><body><table><thead>"
+        '<tr><td rowspan="2"></td><th colspan="2">Money</th></tr>'
+        "<tr><th>Amount</th><th>Prior Amount</th></tr>"
+        "</thead><tbody>"
+        '<tr><td id="cn">CN</td><td id="am">1.00</td><td>2.00</td></tr>'
+        "</tbody></table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, AMOUNT)
+    assert isinstance(got, Miss)
+    assert got.outcome == "anchor_mismatch"
+    assert "rowspan" in got.detail
+
+
+@pytest.mark.unit
+def test_probe_4_an_all_td_group_row_never_yields_the_group_cell() -> None:
+    """The group row carries no <th> at all -- neither cell is a columnheader -- yet the
+    rowspanned corner still has to pull the whole row into the header band."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        '<tr><td rowspan="2">Claim Number</td><td colspan="2">Money</td></tr>'
+        "<tr><th>Amount</th><th>Prior Amount</th></tr>"
+        '<tr><td id="cn">CN</td><td id="am">1.00</td><td>2.00</td></tr>'
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, AMOUNT)
+    assert isinstance(got, Miss)
+    assert got.outcome == "anchor_mismatch"
+    assert "rowspan" in got.detail
+
+
+@pytest.mark.unit
+def test_probe_5_a_mixed_row_headers_right_of_path_never_yields_a_band_cell() -> None:
+    """A row mixing a rowheader-shaped <th> with a plain-content <td> ('Money') still pulls
+    cell_right_of's candidate into the header band -- that path does not go through
+    data_rows(), so it needs its own band check (in_header_band)."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        '<tr><th rowspan="2">Claim Number</th><td colspan="2">Money</td></tr>'
+        "<tr><th>Amount</th><th>Prior Amount</th></tr>"
+        '<tr><td id="cn">CN</td><td id="am">1.00</td><td>2.00</td></tr>'
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss)
+
+
+@pytest.mark.unit
+def test_a_plain_single_row_header_still_resolves() -> None:
+    """Non-regression: an ordinary single-row <th> header is unaffected by header_band."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        "<tr><th>Claim Number</th><th>Amount</th></tr>"
+        '<tr><td id="cn">AB12345678</td><td>100.00</td></tr>'
+        "</table></body></html>"
+    )
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#cn")[0])
+
+
+@pytest.mark.unit
+def test_a_row_header_layout_still_resolves() -> None:
+    """Non-regression: a data row whose first cell is a rowheader beside plain <td>s, with no
+    spans, must not be swept into the header band."""
+    page = StaticPageSource(
+        '<html><body><table><tr><th scope="row">Claim Number</th>'
+        "<td>AB12345678</td></tr></table></body></html>"
+    )
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("td")[0])

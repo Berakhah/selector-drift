@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from lxml.html import HtmlElement
 
-from selector_drift.resolve.grid import cell_right_of, cell_under, grid_of, header_has_rowspan
+from selector_drift.resolve.grid import (
+    cell_right_of,
+    cell_under,
+    grid_of,
+    header_has_rowspan,
+    in_header_band,
+)
 from selector_drift.resolve.labels import expected_label, normalise
 from selector_drift.resolve.page import PageSource
 from selector_drift.resolve.rungs.base import (
@@ -106,6 +112,10 @@ def locate_by_name(page: PageSource, name: str) -> tuple[HtmlElement, str] | Mis
             continue
         if normalise(text_of(value)) == want:
             continue  # I2: nor is the label's own text ever stood in for the value
+        if in_header_band(page, value):
+            continue  # I1 (fix round 2): a header-band cell is never a value, whichever
+            # path produced it -- cell_right_of walks a single row and does not go through
+            # data_rows(), so it is not otherwise stopped from handing back a band cell
         hits.append((value, node.name))
     values = unique([v for v, _ in hits])
     if not values:
