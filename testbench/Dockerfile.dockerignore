@@ -4,3 +4,9 @@
 !testbench
 !testbench/**
 testbench/**/__pycache__
+# S-I6: the answer key is ground truth for the scorer and tests only (testbench/README.md), not
+# something the deployed, publicly-reachable container should carry on disk. The import-linter
+# answer-key-isolation contract only keeps selector_drift from importing it in Python; it says
+# nothing about what ships inside the image's filesystem, so it is re-excluded here explicitly,
+# after the `!testbench/**` re-include above. The portal (testbench.portal) never imports it.
+testbench/answers/

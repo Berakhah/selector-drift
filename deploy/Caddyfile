@@ -1,3 +1,14 @@
 {$BENCH_HOST} {
+	# S-I5: the single public-facing edge for the demo portal. No CSP here -- VirtualisedRows
+	# (testbench/mutations/adversarial/virtualised_rows.py) is the one bench mutation that
+	# injects an inline <script>, and a CSP strict enough to matter would need an exception for
+	# it, which would make the header depend on which mutation ran -- worse than no CSP for a
+	# bench whose entire design already carries no real session worth protecting.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
 	reverse_proxy testbench:8080
 }
