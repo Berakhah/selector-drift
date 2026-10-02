@@ -8,6 +8,12 @@ records what was actually applied.
 from __future__ import annotations
 
 from testbench.mutations.adversarial.decoy_column import DecoyColumn
+from testbench.mutations.adversarial.duplicate_label import DuplicateLabel
+from testbench.mutations.adversarial.hidden_decoy import HiddenDecoy
+from testbench.mutations.adversarial.image_header import ImageHeader
+from testbench.mutations.adversarial.locale_flip import LocaleFlip
+from testbench.mutations.adversarial.value_swap import ValueSwap
+from testbench.mutations.adversarial.virtualised_rows import VirtualisedRows
 from testbench.mutations.base import CatalogueEntry, entry
 from testbench.mutations.class_rename import ClassRename
 from testbench.mutations.column_reorder import ColumnReorder
@@ -32,5 +38,16 @@ CATALOGUE: tuple[CatalogueEntry, ...] = (
             Pagination,
         )
     ),
-    *(entry(c, adversarial=True) for c in (DecoyColumn,)),
+    *(
+        entry(c, adversarial=True)
+        for c in (
+            DecoyColumn,
+            HiddenDecoy,
+            DuplicateLabel,
+            ValueSwap,
+            LocaleFlip,
+            VirtualisedRows,
+            ImageHeader,
+        )
+    ),
 )
