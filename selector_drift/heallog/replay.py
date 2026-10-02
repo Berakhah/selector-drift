@@ -7,8 +7,11 @@ ran under (run_key=None would bind portal "" and spec_version None).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from lxml.html import HtmlElement
 
 from selector_drift.heallog.bundle import (
     AFTER_HTML,
@@ -20,7 +23,7 @@ from selector_drift.heallog.capture import Evidence, dom_sha256
 from selector_drift.resolve.cache import CachedSelector, CacheReader
 from selector_drift.resolve.cascade import parse_run_key, resolve_cascade
 from selector_drift.resolve.escalation import EscalateToHuman
-from selector_drift.resolve.page import StaticPageSource
+from selector_drift.resolve.page import NODE_ATTR, StaticPageSource
 from selector_drift.resolve.trace import CascadeTrace, ResolvedElement
 from selector_drift.spec.schema import FieldTarget
 
@@ -33,6 +36,11 @@ __all__ = [
     "replay",
     "replay_bundle",
 ]
+
+
+# LivePageSource's node id shape (browser/page_source.py _LIVE_ID). heallog may not import
+# browser/, so the shape is restated here; a live heal's ExpectedHeal.node_id is one of these.
+_LIVE_TOKEN = re.compile(r"^n\d{1,7}$")
 
 
 class NotReproducible(Exception):
@@ -65,13 +73,31 @@ def _checked_run_key(run_key: str) -> str:
     return run_key
 
 
+def _page(dom: str) -> StaticPageSource:
+    try:
+        return StaticPageSource(dom)
+    except ValueError as exc:
+        raise EvidenceCorrupted("the stored DOM is empty") from exc
+
+
+def _expected_path(page: StaticPageSource, node_id: str) -> str:
+    """R1. A live heal names its cell by data-sd-node token; replay names it by lxml path.
+    Translate the token through the stored DOM -- exactly one element must carry it."""
+    if not _LIVE_TOKEN.fullmatch(node_id):
+        return node_id
+    hits = page.root().xpath(f"//*[@{NODE_ATTR}=$n]", n=node_id)
+    elements = [h for h in hits if isinstance(h, HtmlElement)] if isinstance(hits, list) else []
+    if len(elements) != 1:
+        raise EvidenceCorrupted(
+            f"the heal's node id matches {len(elements)} elements in the stored DOM, not one"
+        )
+    return page.node_id(elements[0])
+
+
 def _run(
     dom: str, run_key: str, target: FieldTarget, cache: CacheReader
 ) -> tuple[ResolvedElement, CascadeTrace]:
-    try:
-        page = StaticPageSource(dom)
-    except ValueError as exc:
-        raise EvidenceCorrupted("the stored DOM is empty") from exc
+    page = _page(dom)
     try:
         return resolve_cascade(page, target, cache, record=False, run_key=run_key)
     except EscalateToHuman as exc:
@@ -96,11 +122,12 @@ def replay_bundle(
     except UnicodeDecodeError as exc:
         raise EvidenceCorrupted(f"{AFTER_HTML} is not UTF-8") from exc
     run_key = _checked_run_key(manifest.after.run_key)
+    expected_path = _expected_path(_page(dom), expected.node_id)
     element, trace = _run(dom, run_key, target, cache)
     if trace.winner != expected.winning_rung:
         raise NotReproducible(
             f"rung {trace.winner} won on replay; rung {expected.winning_rung} won live"
         )
-    if element.node_id != expected.node_id:
+    if element.node_id != expected_path:
         raise NotReproducible("replay resolved a different element")
     return element, trace

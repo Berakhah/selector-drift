@@ -5,10 +5,13 @@ because pytest-playwright's sync fixtures pin a running loop on the main thread.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import struct
 import threading
 import zlib
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, ClassVar, cast
 
 import pytest
@@ -20,7 +23,9 @@ from selector_drift.browser.driver import _playwright_page
 from selector_drift.browser.live_capture import LiveCapture
 from selector_drift.browser.page_source import LivePageSource
 from selector_drift.heallog.capture import BBox, CaptureError, capture
-from selector_drift.scope.record import AuthorisedTarget
+from selector_drift.scope.gate import authorise
+from selector_drift.scope.record import AuthorisedTarget, Basis, RateLimit, ScopeRecord
+from tests.browser.conftest import TARGET
 
 SECRET = "S3CRET-canary-live-91c2"
 
@@ -108,10 +113,10 @@ def test_live_capture_records_a_real_box_at_the_fixed_viewport() -> None:
             await page.set_content(
                 '<table><tr><td data-sd-node="n1" style="width:120px">AB12345678</td></tr></table>'
             )
-            cap = LiveCapture(page, await page.content())
+            cap = LiveCapture(page, await page.content(), sensitivity=Sensitivity.SYNTHETIC)
             box = await cap.bbox("n1")
             missing = await cap.bbox("n2")
-            shot = await cap.screenshot(mask_node_ids=frozenset({"n1"}))
+            shot = await cap.masked_screenshot(mask_node_ids=frozenset({"n1"}))
             await b.close()
             return cap.viewport, box, missing, shot
 
@@ -146,7 +151,7 @@ def test_a_live_capture_masks_a_password_in_the_screenshot_and_drops_it_from_the
             password = page.locator("input[type=password]")
             node_id = await password.get_attribute("data-sd-node")
             assert node_id is not None
-            cap = LiveCapture(page, source.dom())
+            cap = LiveCapture(page, source.dom(), sensitivity=Sensitivity.SYNTHETIC)
             ev = await capture(
                 cap,
                 run_key="testbench:1:2026-09-07",
@@ -163,6 +168,7 @@ def test_a_live_capture_masks_a_password_in_the_screenshot_and_drops_it_from_the
     assert SECRET not in ev.dom.value
     assert "AB12345678" in ev.dom.value
     assert ev.screenshot.sensitivity is Sensitivity.CLIENT_CONFIDENTIAL
+    assert ev.dom.sensitivity is Sensitivity.CLIENT_CONFIDENTIAL  # raised by the caller
     assert len(ev.masked_node_ids) == 1
     assert _region_colours(masked, box) == {(0, 0, 0)}
     assert _region_colours(unmasked, box) != {(0, 0, 0)}  # the mask, not the page, is black
@@ -176,11 +182,11 @@ def test_live_capture_refuses_an_unminted_node_id_before_touching_the_page() -> 
         def __getattr__(self, name: str) -> object:
             raise AssertionError(f"the page was touched: {name}")
 
-    cap = LiveCapture(cast(Page, Untouchable()), "<html></html>")
+    cap = LiveCapture(cast(Page, Untouchable()), "<html></html>", sensitivity=Sensitivity.SYNTHETIC)
     with pytest.raises(CaptureError):
         asyncio.run(cap.bbox('"] , script'))
     with pytest.raises(CaptureError):
-        asyncio.run(cap.screenshot(mask_node_ids=frozenset({"n1", "x'] *"})))
+        asyncio.run(cap.masked_screenshot(mask_node_ids=frozenset({"n1", "x'] *"})))
 
 
 @pytest.mark.e2e
@@ -193,3 +199,177 @@ def test_the_driver_opens_every_context_at_the_fixed_viewport(
             return raw.viewport_size, await raw.evaluate("window.devicePixelRatio")
 
     assert _in_thread(go) == ({"width": 1280, "height": 900}, 1)
+
+
+# -- fix round 1, R4: the screenshot floor fails closed (S-I1) ---------------------------------
+
+MAGENTA = (255, 0, 255)
+PAINT = "background:#ff00ff;color:#ff00ff;border:0;width:300px;height:60px;display:block"
+CC = Sensitivity.CLIENT_CONFIDENTIAL
+
+
+def _magenta(png: bytes) -> int:
+    _, _, bpp, rows = _png_pixels(png)
+    return sum(
+        1
+        for row in rows
+        for i in range(0, len(row), bpp)
+        if (row[i], row[i + 1], row[i + 2]) == MAGENTA
+    )
+
+
+async def _scenario(
+    html: str, after_snapshot: str | None, sensitivity: Sensitivity = CC
+) -> tuple[bytes, bytes]:
+    """Snapshot (stamping data-sd-node), run `after_snapshot` on the live page, then capture.
+    Returns (stored screenshot, an unmasked screenshot of the same page for the baseline)."""
+    async with async_playwright() as p:
+        b = await p.chromium.launch()
+        try:
+            page = await b.new_page(viewport={"width": 1280, "height": 900})
+            await page.set_content(html)
+            await page.wait_for_load_state("load")
+            source = await LivePageSource.from_playwright(page)
+            if after_snapshot:
+                await page.evaluate(after_snapshot)
+            cap = LiveCapture(page, source.dom(), sensitivity=sensitivity)
+            ev = await capture(cap, run_key="testbench:1:2026-09-07", masker=lambda d: frozenset())
+            unmasked = await page.screenshot(full_page=True, type="png")
+            return ev.screenshot.value, unmasked
+        finally:
+            await b.close()
+
+
+def _field(kind: str = 'name="code"') -> str:
+    return f'<input {kind} value="123456" style="{PAINT}">'
+
+
+def _shadow(mode: str) -> str:
+    inner = _field().replace('"', '\\"')
+    return (
+        '<html><body style="margin:0"><div id="host"></div><script>'
+        f"document.getElementById('host').attachShadow({{mode: '{mode}'}}).innerHTML = "
+        f'"{inner}";'
+        "</script></body></html>"
+    )
+
+
+_SRCDOC = ('<body style="margin:0">' + _field() + "</body>").replace('"', "&quot;")
+_STRIP_STAMPS = (
+    "(() => { const w = document.getElementById('w');"
+    ' w.innerHTML = w.innerHTML.replace(/ data-sd-node="[^"]*"/g, \'\'); })()'
+)
+_MODAL = (
+    "(() => { const d = document.createElement('div'); d.setAttribute('role', 'dialog');"
+    " d.innerHTML = " + repr(_field('type="password"')) + "; document.body.appendChild(d); })()"
+)
+
+SCENARIOS: dict[str, tuple[str, str | None]] = {
+    "open-shadow-root": (_shadow("open"), None),
+    "closed-shadow-root": (_shadow("closed"), None),
+    "same-origin-iframe": (
+        '<html><body style="margin:0"><iframe style="width:400px;height:120px;border:0" '
+        f'srcdoc="{_SRCDOC}"></iframe></body></html>',
+        None,
+    ),
+    "re-rendered-after-snapshot": (
+        f'<html><body style="margin:0"><div id="w">{_field()}</div></body></html>',
+        _STRIP_STAMPS,
+    ),
+    "modal-after-snapshot": ('<html><body style="margin:0"><p>claims</p></body></html>', _MODAL),
+}
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("name", list(SCENARIOS))
+def test_a_client_confidential_screenshot_masks_what_the_snapshot_never_saw(name: str) -> None:
+    html, after = SCENARIOS[name]
+    stored, unmasked = _in_thread(lambda: _scenario(html, after))
+    print(f"{name}: magenta unmasked={_magenta(unmasked)} stored={_magenta(stored)}")
+    assert _magenta(unmasked) > 5_000, f"{name}: the field never rendered -- vacuous"
+    assert _magenta(stored) == 0, f"{name}: {_magenta(stored)} magenta pixels survived"
+
+
+@pytest.mark.e2e
+def test_a_cross_origin_iframe_is_masked_wholesale(bench: Any) -> None:
+    html = (
+        '<html><body style="margin:0"><iframe '
+        f'src="{bench.base_url}" style="width:400px;height:160px;'
+        'border:12px solid #ff00ff;background:#ff00ff"></iframe></body></html>'
+    )
+    stored, unmasked = _in_thread(lambda: _scenario(html, None))
+    print(f"cross-origin-iframe: magenta unmasked={_magenta(unmasked)} stored={_magenta(stored)}")
+    assert _magenta(unmasked) > 5_000
+    assert _magenta(stored) == 0
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("sensitivity", [CC, Sensitivity.SYNTHETIC], ids=str)
+def test_a_stale_mask_id_refuses_the_capture(sensitivity: Sensitivity) -> None:
+    """R4.1: a credential the snapshot named, re-rendered since, would be masked by nothing."""
+    html = (
+        f'<html><body style="margin:0"><div id="w">{_field('type="password"')}</div></body></html>'
+    )
+    with pytest.raises(CaptureError, match="exactly one"):
+        _in_thread(lambda: _scenario(html, _STRIP_STAMPS, sensitivity))
+
+
+@pytest.mark.e2e
+def test_the_live_pass_refuses_past_its_node_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    from selector_drift.browser import live_capture
+
+    monkeypatch.setattr(live_capture, "LIVE_MAX_NODES", 3)
+    html = "<html><body>" + "<p>x</p>" * 10 + "</body></html>"
+    with pytest.raises(CaptureError, match="ceiling"):
+        _in_thread(lambda: _scenario(html, None))
+
+
+# -- fix round 1, R3: the label comes from the scope record (S-I5) ------------------------------
+
+
+@pytest.fixture
+def authorised_client(
+    bench: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> AuthorisedTarget:
+    """The driver fixture's target, authorised as a CLIENT portal -- so CLIENT_CONFIDENTIAL."""
+    doc = tmp_path / "authorisation.pdf"
+    doc.write_bytes(b"countersigned")
+    today = datetime.now(UTC).date()
+    record = ScopeRecord(
+        target=TARGET,
+        basis=Basis.CLIENT_AUTHORISED,
+        authorising_party="selector-drift test suite",
+        authorised_on=today - timedelta(days=1),
+        expires_on=today + timedelta(days=365),
+        evidence_uri=doc.as_uri(),
+        evidence_sha256=hashlib.sha256(b"countersigned").hexdigest(),
+        origins=[bench.origin],
+        rate_limit=RateLimit(requests=1, per_seconds=30),
+        user_agent_contact="https://example.invalid/contact",
+        first_heal_policy="required",
+        legal_review="self_drafted",
+        evidence_retention_days=90,
+    )
+    monkeypatch.setattr("selector_drift.browser.registry.url_for", lambda _t: bench.base_url)
+    return authorise(record, today=today)
+
+
+@pytest.mark.e2e
+def test_a_client_target_captured_as_public_stores_client_confidential(
+    authorised_client: AuthorisedTarget,
+) -> None:
+    assert authorised_client.sensitivity is CC
+
+    async def go() -> Any:
+        async with browser.driver.open(authorised_client) as session:
+            source = await LivePageSource.snapshot(session.page)
+            cap = LiveCapture.of(session.page, source.dom())
+            return await capture(
+                cap,
+                run_key="driver-fixture:1:2026-09-07",
+                sensitivity=Sensitivity.PUBLIC,
+                masker=lambda d: frozenset(),
+            )
+
+    ev = _in_thread(go)
+    assert ev.dom.sensitivity is CC and ev.screenshot.sensitivity is CC
