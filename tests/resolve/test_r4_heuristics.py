@@ -102,7 +102,7 @@ def test_a_test_id_contradicting_a_verified_header_is_ambiguous() -> None:
 
 _DECOY_TABLE = (
     "<table><tr><th>Claim Number</th><th>Prior Amount</th><th>Amount</th></tr>"
-    "<tr><td>AB12345678</td><td {decoy}>90.00</td><td id=\"real\">100.00</td></tr></table>"
+    '<tr><td>AB12345678</td><td {decoy}>90.00</td><td id="real">100.00</td></tr></table>'
 )
 
 
