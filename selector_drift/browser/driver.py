@@ -106,6 +106,11 @@ class PageHandle:
     def url(self) -> str:
         return self._page.url
 
+    @property
+    def raw(self) -> Page:
+        """browser/-internal. Nothing outside browser/ receives a Playwright page."""
+        return self._page
+
     async def content(self) -> str:
         self._ledger.raise_if_off_scope()
         return await self._page.content()
