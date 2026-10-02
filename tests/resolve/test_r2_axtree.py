@@ -106,3 +106,102 @@ def test_the_selector_it_mints_names_exactly_that_element(bench: BenchPage) -> N
     el = AxTreeRung().resolve(page, CLAIM_NUMBER)
     assert el is not None
     assert [page.node_id(e) for e in page.query(el.selector)] == [el.node_id]
+
+
+# -- fix round 1 -----------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_rowspanned_header_declines_rather_than_heal_the_adjacent_column() -> None:
+    """I1. column_of/cell_at count colspan only, so a rowspanned 'Claim Number' header above a
+    colspan=2 'Money' group desynchronises column indices: 'Amount' in the second header row
+    lands at index 0 in its own row, which is also index 0 of the data row -- Claim Number's
+    own cell. Rung 2 must fail closed, never silently heal Amount onto the wrong column."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        '<tr><th rowspan="2">Claim Number</th><th colspan="2">Money</th></tr>'
+        "<tr><th>Amount</th><th>Prior Amount</th></tr>"
+        '<tr><td id="cn">AB12345678</td><td>100.00</td><td>50.00</td></tr>'
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, AMOUNT)
+    assert isinstance(got, Miss)
+    assert got.outcome == "anchor_mismatch"
+    assert "rowspan" in got.detail
+
+
+@pytest.mark.unit
+def test_a_rowspan_free_multi_row_header_still_resolves() -> None:
+    """Non-regression: a grouping header row with colspan but no rowspan must not over-decline."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        '<tr><th colspan="2">Money</th></tr>'
+        "<tr><th>Claim Number</th><th>Amount</th></tr>"
+        '<tr><td id="cn">AB12345678</td><td>100.00</td></tr>'
+        "</table></body></html>"
+    )
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#cn")[0])
+    assert el.anchor.accessible_name == "Claim Number"
+
+
+@pytest.mark.unit
+def test_a_label_cell_is_never_resolved_as_its_own_value() -> None:
+    """I2 repro (a). A plain <td> whose content is the label text itself (no header relation,
+    no author name) must never be taken as the value it names."""
+    page = StaticPageSource(
+        "<html><body><table><tr><td>Claim Number</td><td>AB12345678</td></tr></table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    label_cell = page.node_id(page.query("td")[0])
+    assert isinstance(got, Miss) or (isinstance(got, ResolvedElement) and got.node_id != label_cell)
+
+
+@pytest.mark.unit
+def test_a_td_header_row_never_resolves_to_its_own_header_text() -> None:
+    """I2 repro (b). A header row authored with <td> instead of <th> must never be mistaken for
+    the value it labels, even though it still carries a columnheader-shaped relationship."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        "<tr><td>Claim Number</td><td>Amount</td></tr>"
+        "<tr><td>AB12345678</td><td>100.00</td></tr>"
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    header_cell = page.node_id(page.query("td")[0])
+    assert isinstance(got, Miss) or (
+        isinstance(got, ResolvedElement) and got.node_id != header_cell
+    )
+
+
+@pytest.mark.unit
+def test_an_author_named_cell_whose_text_is_a_value_still_resolves() -> None:
+    """A cell explicitly labelled by its author (aria-label), as opposed to one merely
+    containing the label text, is still allowed to be its own value."""
+    page = StaticPageSource(
+        '<html><body><table><tr><td aria-label="Claim Number">AB12345678</td>'
+        "</tr></table></body></html>"
+    )
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("td")[0])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "decoy", DECOYS, ids=["aria-hidden", "display-none-ancestor", "off-screen", "hidden-attribute"]
+)
+def test_a_hidden_only_page_reports_not_visible(decoy: str) -> None:
+    """I3. The ax tree prunes aria-hidden/display:none/[hidden] subtrees outright (Task 13), so
+    when the only candidate is hidden that way the outcome must still say not_visible, never
+    the no_match a genuinely unlabelled page would get."""
+    page = StaticPageSource(f"<html><body>{decoy}</body></html>")
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "not_visible"
+
+
+@pytest.mark.unit
+def test_a_hidden_decoy_alongside_a_visible_real_cell_still_resolves() -> None:
+    """Non-regression: the not_visible scan must never shadow a real, visible resolution."""
+    page = StaticPageSource(TABLE.format(decoy=DECOYS[0]))
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#real")[0])

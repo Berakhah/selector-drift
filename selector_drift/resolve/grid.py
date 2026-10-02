@@ -1,7 +1,11 @@
 """Tables and grids by role, so a native <table> and TableToDiv's role="table" divs are one model.
 
-Column positions count colspan (aria-colspan on divs); rowspan is not modelled -- a header
-that relies on rowspan fails header verification and the rung declines rather than guessing.
+Column positions count colspan (aria-colspan on divs). A header row with a cell that spans
+multiple rows (`rowspan`/`aria-rowspan` > 1) cannot be trusted to line up with the data row
+beneath it by colspan position alone -- without it, two header rows' cells land on overlapping
+column indices and a header's "position" can silently point at a neighbouring column's data
+(fix round 1, I1). `header_has_rowspan()` flags any such grid; callers that trust column
+position (`cell_under`) decline rather than guess, and the rung above records why.
 """
 
 from __future__ import annotations
@@ -87,6 +91,19 @@ def header_rows(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
     return [r for r in rows(page, grid) if is_header_row(page, r)]
 
 
+def header_has_rowspan(page: PageSource, grid: HtmlElement) -> bool:
+    """True when any header row's cell spans multiple rows (fix round 1, I1). `column_of` and
+    `cell_at` count colspan only, so a rowspanned cell in one header row desynchronises column
+    indices between header rows -- and between a header row and the data row -- and position
+    alone can no longer be trusted to verify a header."""
+    for hr in header_rows(page, grid):
+        for c in cells(page, hr):
+            raw = c.get("rowspan") or c.get("aria-rowspan") or "1"
+            if raw.isdigit() and int(raw) > 1:
+                return True
+    return False
+
+
 def data_rows(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
     """Visible rows holding data. A single cell spanning a multi-column grid is a pager or a
     footer, not data (Pagination mutation)."""
@@ -142,9 +159,12 @@ def row_header(page: PageSource, cell: HtmlElement) -> HtmlElement | None:
 
 def cell_under(page: PageSource, header: HtmlElement) -> HtmlElement | None:
     """The first data row's cell in this header's column -- header-verified: the cell's own
-    header, recomputed from the cell's position, must be this header."""
+    header, recomputed from the cell's position, must be this header. Declines outright
+    (fix round 1, I1) when the grid has a rowspanned header cell anywhere: column position by
+    colspan alone cannot be trusted to line up, and the verification below would only agree
+    with the same miscounted position it computed the value from."""
     grid, index = grid_of(page, header), column_of(page, header)
-    if grid is None or index is None:
+    if grid is None or index is None or header_has_rowspan(page, grid):
         return None
     row = first_data_row(page, grid)
     if row is None:
@@ -189,6 +209,7 @@ __all__ = [
     "data_rows",
     "first_data_row",
     "grid_of",
+    "header_has_rowspan",
     "header_rows",
     "headers_named",
     "is_header_row",
