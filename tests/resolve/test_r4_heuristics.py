@@ -726,3 +726,68 @@ def test_rung_four_is_registered_after_rung_three() -> None:
     ids = [r.rung_id for r in cascade.REGISTERED_RUNGS]
     assert 4 in ids and ids == sorted(set(ids))
     assert isinstance(next(r for r in cascade.REGISTERED_RUNGS if r.rung_id == 4), HeuristicRung)
+
+
+# -- fix round 2 -------------------------------------------------------------------------------
+#
+# Round 1 let the attribute stand whenever the header strategy missed for any reason other than
+# `ambiguous`. A header that names the field but cannot be verified is a reason to decline, not
+# to trust a class that may sit on the decoy column: the attribute stands ONLY when no header
+# names the field at all.
+
+_HEAD = "<tr><th>Claim Number</th><th>Prior Amount</th><th>Amount</th></tr>"
+_DECOY = '<td class="col-amount">90.00</td>'
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("html", "outcome"),
+    [
+        (
+            '<table><tr><td rowspan="2"></td><th colspan="2">Money</th></tr>'
+            "<tr><th>Amount</th><th>Prior Amount</th></tr>"
+            '<tr><td>CN</td><td>1.00</td><td class="col-amount">2.00</td></tr></table>',
+            "anchor_mismatch",
+        ),
+        (
+            f'<table>{_HEAD}<tr><td>AB12345678</td>{_DECOY}<td style="display:none">100.00</td>'
+            "</tr></table>",
+            "not_visible",
+        ),
+        (
+            "<table><tr><th>Claim Number</th><th>Prior Amount</th><th>Other</th><th>Amount</th>"
+            f'</tr><tr><td>AB12345678</td>{_DECOY}<td colspan="2">x</td></tr></table>',
+            "anchor_mismatch",
+        ),
+        (
+            f"<table>{_HEAD}<tr><td>AB12345678</td>{_DECOY}<td>Amount</td></tr></table>",
+            "no_match",
+        ),
+    ],
+    ids=["rowspanned-band", "hidden-cell", "colspan-row", "label-only-cell"],
+)
+def test_an_unverifiable_header_for_the_field_declines_rather_than_trust_the_class(
+    html: str, outcome: str
+) -> None:
+    got = HeuristicRung().attempt(_page(html), AMOUNT)
+    assert isinstance(got, Miss) and got.outcome == outcome
+
+
+@pytest.mark.unit
+def test_an_attribute_wrapping_the_whole_grid_is_never_the_value() -> None:
+    page = _page(
+        '<div data-testid="amount"><table><tr><th>Claim Number</th><th>Amount</th></tr>'
+        '<tr><td>AB12345678</td><td id="real">100.00</td></tr></table></div>'
+    )
+    el = HeuristicRung().resolve(page, AMOUNT)
+    assert el is not None and el.node_id == _by_id(page, "real")
+
+
+@pytest.mark.unit
+def test_label_reword_still_heals_by_class_when_no_header_names_the_field(
+    bench: BenchPage,
+) -> None:
+    page = bench.mutated("LabelReword")
+    for target, field in ((CLAIM_NUMBER, "claim_number"), (AMOUNT, "amount")):
+        el = HeuristicRung().resolve(page.source(), target)
+        assert el is not None and el.node_id in page.truth(field)
