@@ -435,8 +435,8 @@ def test_a_title_row_above_the_headers_stays_in_the_band() -> None:
 
 @pytest.mark.unit
 def test_a_tbody_section_label_row_is_never_the_value() -> None:
-    """A <th colspan> section label opening the <tbody>: never resolved to. (It declines today
-    via column_header()'s last-all-columnheader-row verification, which is out of scope.)"""
+    """A <th colspan> section label opening the <tbody>: never resolved to. It joins the first
+    header run, so column_header() verifies against it and the rung declines (no_match)."""
     page = StaticPageSource(
         "<html><body><table>"
         "<thead><tr><th>Claim Number</th><th>Amount</th></tr></thead>"
@@ -444,11 +444,10 @@ def test_a_tbody_section_label_row_is_never_the_value() -> None:
         '<tr><td id="cn">AB12345678</td><td>1.00</td></tr></tbody>'
         "</table></body></html>"
     )
-    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
-    if isinstance(got, ResolvedElement):
-        assert got.node_id == page.node_id(page.query("#cn")[0])
-    else:
+    for target in (CLAIM_NUMBER, AMOUNT):
+        got = AxTreeRung().attempt(page, target)
         assert isinstance(got, Miss)
+        assert got.outcome == "no_match"
 
 
 @pytest.mark.unit
@@ -505,3 +504,79 @@ def test_a_rowspanned_data_row_above_a_repeated_header_is_still_data() -> None:
     got = AxTreeRung().attempt(page, CLAIM_NUMBER)
     assert isinstance(got, ResolvedElement)
     assert got.node_id == page.node_id(page.query("#cn")[0])
+
+
+# -- fix round 5 -----------------------------------------------------------------------------
+#
+# Round 4 applied the data-row exclusions to a directly author-named element too, so a labelled
+# control in a full-width (all-cells-span) row stopped resolving. The exclusions apply only to
+# cell-derived values (cell_under, cell_right_of); a directly named element gets only the
+# header-band check. And a <tfoot> row is never data, whatever its source order.
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "where",
+    [
+        '<table><tr><td>Name</td><td><input aria-label="Name"></td></tr>'
+        '<tr><td colspan="2">{input}</td></tr></table>',
+        "<table><tr><td>Name</td><td>{input}</td></tr></table>",
+        "<div>{input}</div>",
+    ],
+    ids=["full-width-row", "plain-cell", "outside-a-table"],
+)
+def test_a_directly_named_control_resolves_wherever_its_row_sits(where: str) -> None:
+    control = '<input id="cn" aria-label="Claim Number" value="AB12345678">'
+    page = StaticPageSource("<html><body>" + where.format(input=control) + "</body></html>")
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, ResolvedElement)
+    assert got.node_id == page.node_id(page.query("#cn")[0])
+
+
+@pytest.mark.unit
+def test_a_directly_named_control_inside_the_header_band_never_resolves() -> None:
+    page = StaticPageSource(
+        "<html><body><table>"
+        '<tr><td colspan="2"><input aria-label="Claim Number" value="AB12345678"></td></tr>'
+        "<tr><th>Ref</th><th>Amount</th></tr>"
+        "<tr><td>x</td><td>1.00</td></tr>"
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss)
+
+
+def _footed_table(foot_first: bool) -> str:
+    foot = '<tfoot><tr><td id="tot">Total</td><td id="sum">301.00</td></tr></tfoot>'
+    body = (
+        '<tbody><tr><td id="cn">AB12345678</td><td id="am">100.00</td></tr>'
+        "<tr><td>CD87654321</td><td>201.00</td></tr></tbody>"
+    )
+    return (
+        "<html><body><table><thead><tr><th>Claim Number</th><th>Amount</th></tr></thead>"
+        + (foot + body if foot_first else body + foot)
+        + "</table></body></html>"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("foot_first", [True, False], ids=["tfoot-first", "tfoot-last"])
+def test_a_tfoot_row_is_never_the_first_record(foot_first: bool) -> None:
+    page = StaticPageSource(_footed_table(foot_first))
+    for target, ident in ((CLAIM_NUMBER, "#cn"), (AMOUNT, "#am")):
+        got = AxTreeRung().attempt(page, target)
+        assert isinstance(got, ResolvedElement)
+        assert got.node_id == page.node_id(page.query(ident)[0])
+
+
+@pytest.mark.unit
+def test_a_tfoot_row_header_never_yields_a_footer_cell() -> None:
+    """cell_right_of from a rowheader inside <tfoot> is cell-derived: never a value."""
+    page = StaticPageSource(
+        "<html><body><table><tbody>"
+        '<tr><th scope="row">Reference</th><td>R-1</td></tr></tbody>'
+        '<tfoot><tr><th scope="row">Amount</th><td>301.00</td></tr></tfoot>'
+        "</table></body></html>"
+    )
+    got = AxTreeRung().attempt(page, AMOUNT)
+    assert isinstance(got, Miss)
