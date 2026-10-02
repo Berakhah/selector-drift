@@ -11,7 +11,8 @@ from selector_drift.resolve.page import StaticPageSource
 from selector_drift.resolve.rungs.base import css_path
 from selector_drift.resolve.rungs.r1_cache import CacheRung
 from selector_drift.resolve.trace import AnchorEvidence, Family, Miss, ResolvedElement
-from selector_drift.spec.schema import matches
+from selector_drift.spec.schema import FieldTarget, matches
+from testbench.mutations.adversarial.hidden_decoy import HiddenDecoy
 from tests.resolve.conftest import AMOUNT, CLAIM_NUMBER, RESERVE, BenchPage
 
 
@@ -147,11 +148,13 @@ def test_a_header_text_anchor_must_be_unique_among_the_headers(bench: BenchPage)
     second header now reads the same -- rung 1 must refuse, so a heal happens and the gate
     judges it, instead of a silent hit on whichever column the selector happens to name."""
     reworded = bench.mutated("LabelReword")
-    cache = warm(reworded.html, "claim_number")       # header_text anchor, set by rung 4
+    cache = warm(reworded.html, "claim_number")  # header_text anchor, set by rung 4
     cached = cache.get("testbench", "claim_number", 2)
-    assert cached is not None and (header := cached.anchor.header_text) is not None
+    assert cached is not None
+    header = cached.anchor.header_text
+    assert header is not None
     twice = StaticPageSource(reworded.html.replace("</tr>", f"<th>{header}</th></tr>", 1))
-    [el] = twice.query(cached.selector)                 # the selector still names one cell
+    [_el] = twice.query(cached.selector)  # the selector still names one cell
     got = rung(cache).attempt(twice, CLAIM_NUMBER)
     assert isinstance(got, Miss) and got.outcome == "anchor_mismatch" and "uniquely" in got.detail
 
@@ -228,3 +231,190 @@ def test_the_cascade_binds_rung_one_to_the_runs_cache_and_version(
         bench.source(), CLAIM_NUMBER, spy, record=False, run_key="testbench:2:2026-10-01"
     )
     assert calls == [("testbench", "claim_number", 2)] and trace.winner == 1
+
+
+# --- The adversarial checklist (Task 17 dispatch): rung 1 must never return a wrong element. ---
+
+ROW1 = "html > body > main > table > tbody > tr:nth-of-type(1)"
+
+
+def entry(field: str, selector: str, anchor: AnchorEvidence, by: int = 2) -> DictCache:
+    return DictCache({("testbench", field, 2): CachedSelector(selector, anchor, by)})
+
+
+def truth_or_inside(page: StaticPageSource, node_id: str, field: str) -> bool:
+    """The resolved node is the truth cell, or an element inside it (the claim-number <a>)."""
+    node = page.node(node_id)
+    assert node is not None
+    return any((n.get("data-sd-truth") or "") == field for n in [node, *node.iterancestors()])
+
+
+@pytest.mark.unit
+def test_a_decoy_column_makes_a_cloned_class_selector_ambiguous(bench: BenchPage) -> None:
+    """DecoyColumn clones the real column's class: the cached class selector now matches two."""
+    cache = entry("amount", f"{ROW1} > td.col-amount", AnchorEvidence(accessible_name="Amount"))
+    assert rung(cache).resolve(bench.source(), AMOUNT) is not None  # one match before
+    got = rung(cache).attempt(bench.mutated("DecoyColumn").source(), AMOUNT)
+    assert isinstance(got, Miss) and got.outcome == "ambiguous"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "anchor",
+    [AnchorEvidence(accessible_name="Amount"), AnchorEvidence(header_text="Amount")],
+    ids=["accessible_name", "header_text"],
+)
+def test_a_positional_selector_landing_on_the_decoy_column_misses(
+    bench: BenchPage, anchor: AnchorEvidence
+) -> None:
+    """The decoy is inserted before Amount, so `td:nth-of-type(3)` now names the decoy cell,
+    whose value passes the amount format. Only the anchor can object -- and does."""
+    cache = entry("amount", f"{ROW1} > td:nth-of-type(3)", anchor, by=4)
+    assert rung(cache).resolve(bench.source(), AMOUNT) is not None
+    decoyed = bench.mutated("DecoyColumn")
+    page = decoyed.source()
+    [cell] = page.query(f"{ROW1} > td:nth-of-type(3)")
+    assert matches(AMOUNT, " ".join(cell.text_content().split()))
+    assert page.node_id(cell) not in decoyed.truth("amount")
+    got = rung(cache).attempt(page, AMOUNT)
+    assert isinstance(got, Miss) and got.outcome == "anchor_mismatch"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("variant", ["aria-hidden", "display-none"])
+@pytest.mark.parametrize(
+    "anchor",
+    [AnchorEvidence(accessible_name="Claim Number"), AnchorEvidence(header_text="Claim Number")],
+    ids=["accessible_name", "header_text"],
+)
+def test_a_hidden_decoy_is_never_a_hit(
+    bench: BenchPage, variant: str, anchor: AnchorEvidence
+) -> None:
+    """Every hidden element on a HiddenDecoy page, cached under a claim-number anchor: none
+    is a hit, and the visible truth cell still is."""
+    decoyed = bench.mutated_by(HiddenDecoy(variant=variant))
+    page = decoyed.source()
+    [body] = page.query("body")
+    hidden = [e for e in body.iter() if isinstance(e.tag, str) and not page.visible(e)]
+    assert hidden
+    for el in hidden:
+        got = rung(entry("claim_number", css_path(el), anchor)).attempt(page, CLAIM_NUMBER)
+        assert isinstance(got, Miss), css_path(el)
+    [cell] = page.query(decoyed.truth("claim_number")[0])
+    hit = rung(entry("claim_number", css_path(cell), anchor)).attempt(page, CLAIM_NUMBER)
+    assert isinstance(hit, ResolvedElement)
+
+
+@pytest.mark.unit
+def test_value_swap_is_a_hit_on_the_original_node_and_left_to_the_gate(
+    bench: BenchPage, warm_cache: DictCache
+) -> None:
+    """ValueSwap: markup untouched, Amount and Reserve text exchanged. Rung 1 rightly returns
+    the Amount cell -- it judges position and format, not the number; the gate's
+    RowKeyContinuity check (Task 22) owns this one."""
+    swapped = bench.mutated("ValueSwap")
+    page = swapped.source()
+    got = rung(warm_cache).attempt(page, AMOUNT)
+    assert isinstance(got, ResolvedElement) and got.node_id == swapped.truth("amount")[0]
+    [was_reserve] = bench.source().query(bench.truth("reserve")[0])
+    node = page.node(got.node_id)
+    assert node is not None and node.text_content().strip() == was_reserve.text_content().strip()
+
+
+@pytest.mark.unit
+def test_a_locale_flip_fails_the_format_and_misses(bench: BenchPage, warm_cache: DictCache) -> None:
+    got = rung(warm_cache).attempt(bench.mutated("LocaleFlip").source(), AMOUNT)
+    assert isinstance(got, Miss) and got.outcome == "no_match" and "format" in got.detail
+
+
+@pytest.mark.unit
+def test_a_label_reword_misses_rung_one_and_rung_four_heals_correctly(
+    bench: BenchPage, warm_cache: DictCache
+) -> None:
+    reworded = bench.mutated("LabelReword")
+    page = reworded.source()
+    for field in (CLAIM_NUMBER, AMOUNT, RESERVE):
+        got = rung(warm_cache).attempt(page, field)
+        assert isinstance(got, Miss) and got.outcome == "anchor_mismatch", field.name
+        el, trace = resolve_cascade(
+            page, field, warm_cache, record=False, run_key="testbench:2:2026-10-01"
+        )
+        assert trace.winner == 4 and trace.healed
+        assert el.node_id == reworded.truth(field.name)[0]
+
+
+HAND = """<html><body><main><table>
+<thead>{band}</thead>
+{tfoot}
+<tbody>
+<tr><td>AB12345678</td><td>1,000.00</td></tr>
+<tr><th>Claim Number</th><th>Amount</th></tr>
+<tr><td>CD12345678</td><td>2,000.00</td></tr>
+</tbody>
+</table></main></body></html>"""
+BAND = "<tr><th>Claim Number</th><th>Amount</th></tr>"
+ROWSPAN_BAND = '<tr><th rowspan="2">Claim Number</th><th>Money</th></tr><tr><th>Amount</th></tr>'
+TFOOT = "<tfoot><tr><td>ZZ99999999</td><td>3,000.00</td></tr></tfoot>"
+FIRST = "html > body > main > table > tbody > tr:nth-of-type(1) > td:nth-of-type(1)"
+
+
+def hand(band: str = BAND, tfoot: str = "") -> StaticPageSource:
+    return StaticPageSource(HAND.format(band=band, tfoot=tfoot))
+
+
+ANCHORS = [
+    AnchorEvidence(accessible_name="Claim Number"),
+    AnchorEvidence(label_text="Claim Number"),
+    AnchorEvidence(header_text="Claim Number"),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("anchor", ANCHORS, ids=["name", "label", "header"])
+def test_a_cached_selector_hits_only_the_first_record_cell(anchor: AnchorEvidence) -> None:
+    """A repeated mid-table header, a later record, a <tfoot> placed first, a band header:
+    a cached selector naming any of them is never a hit; the first record's cell is."""
+    page = hand(tfoot=TFOOT)
+    hit = rung(entry("claim_number", FIRST, anchor)).attempt(page, CLAIM_NUMBER)
+    assert isinstance(hit, ResolvedElement), hit
+    for wrong in (
+        "html > body > main > table > thead > tr > th:nth-of-type(1)",  # the band header
+        "html > body > main > table > tbody > tr:nth-of-type(2) > th:nth-of-type(1)",  # repeat
+        "html > body > main > table > tbody > tr:nth-of-type(3) > td:nth-of-type(1)",  # record 2
+        "html > body > main > table > tfoot > tr > td:nth-of-type(1)",  # totals, first in source
+    ):
+        got = rung(entry("claim_number", wrong, anchor)).attempt(page, CLAIM_NUMBER)
+        assert isinstance(got, Miss), (anchor, wrong)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("anchor", ANCHORS[::2], ids=["name", "header"])
+def test_a_rowspan_header_band_never_hits(anchor: AnchorEvidence) -> None:
+    """Column position cannot be trusted under a rowspanned band: rung 1 declines."""
+    got = rung(entry("claim_number", FIRST, anchor)).attempt(hand(band=ROWSPAN_BAND), CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "anchor_mismatch"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["ColumnReorder", "DecoyColumn", "DuplicateLabel", "ValueSwap"])
+@pytest.mark.parametrize(
+    ("field", "anchor"),
+    [
+        (CLAIM_NUMBER, AnchorEvidence(accessible_name="Claim Number")),
+        (CLAIM_NUMBER, AnchorEvidence(header_text="Claim Number")),
+        (AMOUNT, AnchorEvidence(accessible_name="Amount")),
+        (AMOUNT, AnchorEvidence(header_text="Amount")),
+    ],
+    ids=["claim-name", "claim-header", "amount-name", "amount-header"],
+)
+def test_no_cached_selector_on_the_page_hits_anything_but_the_truth(
+    bench: BenchPage, name: str, field: FieldTarget, anchor: AnchorEvidence
+) -> None:
+    """Exhaustive: EVERY element in the body, cached as the selector under a true anchor, on
+    an adversarially mutated page. Any hit must be the truth cell (or inside it)."""
+    page = StaticPageSource(bench.mutated(name).marked)
+    [body] = page.query("body")
+    for el in [e for e in body.iter() if isinstance(e.tag, str)]:
+        got = rung(entry(field.name, css_path(el), anchor)).attempt(page, field)
+        if isinstance(got, ResolvedElement):
+            assert truth_or_inside(page, got.node_id, field.name), (name, css_path(el))
