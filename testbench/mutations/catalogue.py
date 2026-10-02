@@ -11,11 +11,24 @@ from testbench.mutations.base import CatalogueEntry, entry
 from testbench.mutations.class_rename import ClassRename
 from testbench.mutations.column_reorder import ColumnReorder
 from testbench.mutations.dom_restructure import DomRestructure
+from testbench.mutations.framework_markup import FrameworkMarkup
+from testbench.mutations.id_churn import IdChurn
+from testbench.mutations.label_reword import LabelReword
+from testbench.mutations.pagination import Pagination
 from testbench.mutations.table_to_div import TableToDiv
 
 CATALOGUE: tuple[CatalogueEntry, ...] = (
     *(
         entry(c, adversarial=False)
-        for c in (ClassRename, DomRestructure, ColumnReorder, TableToDiv)
+        for c in (
+            ClassRename,
+            DomRestructure,
+            ColumnReorder,
+            TableToDiv,
+            LabelReword,
+            IdChurn,
+            FrameworkMarkup,
+            Pagination,
+        )
     ),
 )
