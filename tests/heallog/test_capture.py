@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
-from bok_core.boundary.sensitivity import Sensitivity
+from bok_core.boundary.sensitivity import Labelled, Sensitivity
 
 from selector_drift.heallog import replay as replay_mod
 from selector_drift.heallog.bundle import NodeBox, read_heal_manifest
@@ -49,6 +49,7 @@ CREDENTIAL_SHAPES_HTML = f"""<html><body><form>
 class FakePage:
     html: str
     size: tuple[int, int] = VIEWPORT
+    sensitivity: Sensitivity = Sensitivity.SYNTHETIC
     boxes: dict[str, BBox] = field(default_factory=dict)
     masks_seen: list[frozenset[str]] = field(default_factory=list)
     bbox_calls: list[str] = field(default_factory=list)
@@ -60,7 +61,7 @@ class FakePage:
     def dom(self) -> str:
         return self.html
 
-    async def screenshot(self, *, mask_node_ids: frozenset[str]) -> bytes:
+    async def masked_screenshot(self, *, mask_node_ids: frozenset[str]) -> bytes:
         self.masks_seen.append(mask_node_ids)
         return b"\x89PNG-fake"
 
@@ -106,7 +107,7 @@ def test_a_credential_value_never_reaches_the_stored_dom_whatever_the_masker_say
         capture(
             page,
             run_key=RUN_KEY,
-            sensitivity=Sensitivity.CLIENT_CONFIDENTIAL,
+            sensitivity=Sensitivity.SYNTHETIC,
             masker=_names_nothing,
         )
     )
@@ -117,6 +118,16 @@ def test_a_credential_value_never_reaches_the_stored_dom_whatever_the_masker_say
     assert 'value="demo"' in ev.dom.value and "Test Person One" in ev.dom.value
     assert ev.sha256 == hashlib.sha256(ev.dom.value.encode("utf-8")).hexdigest()
     assert "hunter2" not in repr(ev) and "hunter2" not in str(ev)
+
+
+@pytest.mark.unit
+def test_a_client_confidential_capture_drops_every_form_value() -> None:
+    """R5: default-deny. Even the username, which no heuristic calls a credential."""
+    page = FakePage(LOGIN_HTML, sensitivity=Sensitivity.CLIENT_CONFIDENTIAL)
+    ev = asyncio.run(capture(page, run_key=RUN_KEY, masker=_names_nothing))
+    for value in ("hunter2", "tok-123", "demo"):
+        assert value not in ev.dom.value
+    assert "Test Person One" in ev.dom.value and 'data-sd-node="n1"' in ev.dom.value
 
 
 @pytest.mark.unit
@@ -222,3 +233,87 @@ def test_a_node_id_that_could_break_out_of_a_selector_is_refused(
 def test_from_static_hashes_the_dom_it_carries() -> None:
     ev = Evidence.from_static("<html></html>", run_key=RUN_KEY, sensitivity=Sensitivity.SYNTHETIC)
     assert ev.sha256 == hashlib.sha256(b"<html></html>").hexdigest()
+
+
+# -- fix round 1 ------------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_the_caller_may_raise_the_label_never_lower_it() -> None:
+    """R3 / S-I5. The page's label comes from the scope record; a caller's request is a floor."""
+    confidential = FakePage(LOGIN_HTML, sensitivity=Sensitivity.CLIENT_CONFIDENTIAL)
+    ev = asyncio.run(
+        capture(confidential, run_key=RUN_KEY, sensitivity=Sensitivity.PUBLIC, masker=_names_n4)
+    )
+    assert ev.dom.sensitivity is Sensitivity.CLIENT_CONFIDENTIAL
+    assert ev.screenshot.sensitivity is Sensitivity.CLIENT_CONFIDENTIAL
+
+    synthetic = FakePage(LOGIN_HTML, sensitivity=Sensitivity.SYNTHETIC)
+    raised = asyncio.run(
+        capture(
+            synthetic,
+            run_key=RUN_KEY,
+            sensitivity=Sensitivity.CLIENT_CONFIDENTIAL,
+            masker=_names_n4,
+        )
+    )
+    assert raised.dom.sensitivity is Sensitivity.CLIENT_CONFIDENTIAL
+    plain = asyncio.run(capture(FakePage(LOGIN_HTML), run_key=RUN_KEY, masker=_names_n4))
+    assert plain.dom.sensitivity is Sensitivity.SYNTHETIC
+
+
+@pytest.mark.unit
+def test_evidence_refuses_halves_with_different_labels() -> None:
+    ev = Evidence.from_static("<html></html>", run_key=RUN_KEY, sensitivity=Sensitivity.SYNTHETIC)
+    with pytest.raises(ValueError, match="sensitivity"):
+        replace(ev, screenshot=Labelled(b"\x89PNG", Sensitivity.CLIENT_CONFIDENTIAL))
+
+
+@pytest.mark.unit
+def test_a_failing_masker_becomes_a_capture_error_without_its_text() -> None:
+    """R6 / S-M1. The masker sees the raw DOM; its message must not reach an alert."""
+
+    def leaky(dom: str) -> frozenset[str]:
+        raise ValueError(f"masker saw {dom}")
+
+    with pytest.raises(CaptureError) as caught:
+        asyncio.run(capture(FakePage(LOGIN_HTML), run_key=RUN_KEY, masker=leaky))
+    assert "hunter2" not in str(caught.value) and "masker saw" not in str(caught.value)
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+
+
+@pytest.mark.unit
+def test_from_static_refuses_client_confidential() -> None:
+    """R6 / S-M3. from_static cannot have masked a real screenshot, so it may not claim to."""
+    with pytest.raises(CaptureError, match="CLIENT_CONFIDENTIAL"):
+        Evidence.from_static(
+            "<html></html>", run_key=RUN_KEY, sensitivity=Sensitivity.CLIENT_CONFIDENTIAL
+        )
+
+
+@pytest.mark.unit
+def test_from_static_takes_a_real_screenshot_only_when_synthetic() -> None:
+    with pytest.raises(CaptureError, match="BLANK_PNG"):
+        Evidence.from_static(
+            "<html></html>",
+            run_key=RUN_KEY,
+            sensitivity=Sensitivity.PUBLIC,
+            screenshot=b"\x89PNG-real",
+        )
+    ev = Evidence.from_static(
+        "<html></html>",
+        run_key=RUN_KEY,
+        sensitivity=Sensitivity.SYNTHETIC,
+        screenshot=b"\x89PNG-real",
+    )
+    assert ev.screenshot.value == b"\x89PNG-real"
+
+
+@pytest.mark.unit
+def test_from_static_refuses_a_credential_input_it_could_not_mask() -> None:
+    with pytest.raises(CaptureError, match="credential"):
+        Evidence.from_static(
+            '<html><body><input type="password" value="hunter2"></body></html>',
+            run_key=RUN_KEY,
+            sensitivity=Sensitivity.SYNTHETIC,
+        )

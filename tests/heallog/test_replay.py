@@ -276,3 +276,68 @@ def test_heallog_cannot_import_browser() -> None:
         text=True,
     )
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# -- fix round 1, R1: a live heal's node id is a data-sd-node token, replay's is an lxml path --
+
+
+def _stamped(html: str, token_on: str, *, twice: bool = False) -> str:
+    """Every element stamped the way LivePageSource stamps a live page, with `n17` on the
+    element at lxml path `token_on` (and, with twice=True, on its next cell as well)."""
+    import lxml.html
+
+    root = lxml.html.document_fromstring(html)
+    tree = root.getroottree()
+    for i, el in enumerate(root.iter()):
+        if isinstance(el.tag, str):
+            el.set("data-sd-node", f"n{100 + i}")
+    target = root.xpath(token_on)[0]
+    target.set("data-sd-node", "n17")
+    if twice:
+        target.getnext().set("data-sd-node", "n17")
+    assert tree.getpath(target) == token_on
+    return lxml.html.tostring(root, encoding="unicode", doctype="<!doctype html>")
+
+
+@pytest.mark.unit
+def test_a_live_token_resolving_to_the_replayed_cell_reproduces(
+    captured_heal: CapturedHeal, tmp_path: Path
+) -> None:
+    html = _stamped(captured_heal.evidence.dom.value, captured_heal.node_id)
+    bundle = write_test_bundle(tmp_path / "heals" / "7", html)
+    el, trace = replay_bundle(
+        bundle, CLAIM_NUMBER, captured_heal.cache, ExpectedHeal(captured_heal.winning_rung, "n17")
+    )
+    assert trace.winner == captured_heal.winning_rung and el.node_id == captured_heal.node_id
+
+
+@pytest.mark.unit
+def test_a_live_token_on_a_different_cell_is_not_reproducible(
+    captured_heal: CapturedHeal, tmp_path: Path
+) -> None:
+    neighbour = captured_heal.node_id.replace("td[1]", "td[2]")
+    html = _stamped(captured_heal.evidence.dom.value, neighbour)
+    bundle = write_test_bundle(tmp_path / "heals" / "7", html)
+    with pytest.raises(NotReproducible, match="different element"):
+        replay_bundle(
+            bundle,
+            CLAIM_NUMBER,
+            captured_heal.cache,
+            ExpectedHeal(captured_heal.winning_rung, "n17"),
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("token", ["n99999", "n17-twice"])
+def test_a_live_token_absent_or_duplicated_in_the_stored_dom_is_corrupted(
+    captured_heal: CapturedHeal, tmp_path: Path, token: str
+) -> None:
+    html = _stamped(captured_heal.evidence.dom.value, captured_heal.node_id, twice=True)
+    bundle = write_test_bundle(tmp_path / "heals" / "7", html)
+    with pytest.raises(EvidenceCorrupted):
+        replay_bundle(
+            bundle,
+            CLAIM_NUMBER,
+            captured_heal.cache,
+            ExpectedHeal(captured_heal.winning_rung, token.removesuffix("-twice")),
+        )
