@@ -82,12 +82,87 @@ def test_header_verification_honours_the_headers_attribute() -> None:
 
 
 @pytest.mark.unit
-def test_a_test_id_beats_a_class_and_a_header() -> None:
+def test_a_test_id_and_an_agreeing_header_resolve() -> None:
+    """Fix round 1 (controller ruling): replaces the brief's test-id-beats-a-header test."""
+    page = _page("""<table><tr><th>Other</th><th>Claim Number</th></tr>
+<tr><td>x</td><td data-testid="claim-number" id="v">CD23456789</td></tr></table>""")
+    el = HeuristicRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#v")[0])
+    assert el.anchor.header_text == "Claim Number"
+
+
+@pytest.mark.unit
+def test_a_test_id_contradicting_a_verified_header_is_ambiguous() -> None:
     page = _page("""<table><tr><th>Claim Number</th><th>Other</th></tr>
 <tr><td class="col-claim_number">AB12345678</td>
 <td data-testid="claim-number" id="v">CD23456789</td></tr></table>""")
+    got = HeuristicRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "ambiguous"
+
+
+_DECOY_TABLE = (
+    "<table><tr><th>Claim Number</th><th>Prior Amount</th><th>Amount</th></tr>"
+    "<tr><td>AB12345678</td><td {decoy}>90.00</td><td id=\"real\">100.00</td></tr></table>"
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "decoy", ['data-testid="amount"', 'class="col-amount"'], ids=["test-id", "class"]
+)
+def test_an_attribute_on_the_adjacent_decoy_never_beats_the_verified_header(decoy: str) -> None:
+    """Fix round 1 probes 1-2: the attribute names the decoy column, the verified header the
+    real one. Neither wins: a disagreement is ambiguous."""
+    page = _page(_DECOY_TABLE.format(decoy=decoy))
+    got = HeuristicRung().attempt(page, AMOUNT)
+    assert isinstance(got, Miss) and got.outcome == "ambiguous"
+
+
+@pytest.mark.unit
+def test_a_search_box_named_for_the_field_never_beats_the_results_header() -> None:
+    """Fix round 1 probe 3: a search input's query value is not the first record."""
+    page = _page(
+        '<form><input name="claim_number" value="CD87654321"></form>'
+        "<table><tr><th>Claim Number</th><th>Amount</th></tr>"
+        '<tr><td id="cn">AB12345678</td><td>100.00</td></tr></table>'
+    )
+    got = HeuristicRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "ambiguous"
+
+
+@pytest.mark.unit
+def test_an_attribute_inside_the_verified_cell_agrees_with_it() -> None:
+    page = _page(
+        "<table><tr><th>Claim Number</th></tr>"
+        '<tr><td><span id="v" class="claim-number">AB12345678</span></td></tr></table>'
+    )
     el = HeuristicRung().resolve(page, CLAIM_NUMBER)
-    assert el is not None and el.node_id == page.node_id(page.query("#v")[0])
+    assert el is not None and el.node_id == _by_id(page, "v")
+
+
+@pytest.mark.unit
+def test_two_headers_for_the_field_never_let_an_attribute_pick_one() -> None:
+    page = _page(
+        "<table><tr><th>Claim Number</th><th>Claim Number</th></tr>"
+        '<tr><td>AB12345678</td><td class="claim-number">CD87654321</td></tr></table>'
+    )
+    got = HeuristicRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got, Miss) and got.outcome == "ambiguous"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<div data-testid="claim-number"><span>Claim Number</span><span>AB12345678</span></div>',
+        '<div class="claim-number"><label>Ref</label><span>AB12345678</span></div>',
+        '<p id="claim-number">Claim Number: AB12345678</p>',
+    ],
+    ids=["label-span", "label-element", "label-prefix"],
+)
+def test_an_attribute_element_holding_its_label_is_never_a_value(body: str) -> None:
+    """Fix round 1 (reviewer Minor 2): the whole div would read 'Claim NumberAB12345678'."""
+    assert HeuristicRung().resolve(_page(body), CLAIM_NUMBER) is None
 
 
 @pytest.mark.unit
