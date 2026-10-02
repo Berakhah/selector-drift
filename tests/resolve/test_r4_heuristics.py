@@ -243,7 +243,11 @@ def test_the_bench_hidden_decoy_never_wins(bench: BenchPage) -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "wrapper",
-    ['<div aria-hidden="true">{}</div>', '<div style="display:none">{}</div>', "<div hidden>{}</div>"],
+    [
+        '<div aria-hidden="true">{}</div>',
+        '<div style="display:none">{}</div>',
+        "<div hidden>{}</div>",
+    ],
 )
 def test_a_hidden_only_match_reports_not_visible(wrapper: str) -> None:
     page = _page(wrapper.format('<span class="claim-number">AB12345678</span>'))
@@ -494,17 +498,13 @@ def test_value_swap_resolves_the_original_amount_node(bench: BenchPage) -> None:
 
 @pytest.mark.unit
 def test_a_class_on_a_header_cell_is_never_a_value() -> None:
-    page = _page(
-        '<table><tr><th class="col-amount">Sum</th></tr><tr><td>1.00</td></tr></table>'
-    )
+    page = _page('<table><tr><th class="col-amount">Sum</th></tr><tr><td>1.00</td></tr></table>')
     assert HeuristicRung().resolve(page, AMOUNT) is None
 
 
 @pytest.mark.unit
 def test_a_class_on_a_td_header_like_row_is_never_a_value() -> None:
-    page = _page(
-        '<table><tr><td class="col-amount">Amount</td></tr><tr><td>1.00</td></tr></table>'
-    )
+    page = _page('<table><tr><td class="col-amount">Amount</td></tr><tr><td>1.00</td></tr></table>')
     assert HeuristicRung().resolve(page, AMOUNT) is None
 
 
@@ -540,8 +540,7 @@ def test_a_dd_beside_a_classed_dt_resolves_to_the_dd() -> None:
 @pytest.mark.unit
 def test_a_classed_row_is_never_a_value() -> None:
     page = _page(
-        "<table><tr><th>Ref</th></tr>"
-        '<tr class="claim-number"><td>AB12345678</td></tr></table>'
+        '<table><tr><th>Ref</th></tr><tr class="claim-number"><td>AB12345678</td></tr></table>'
     )
     assert HeuristicRung().resolve(page, CLAIM_NUMBER) is None
 
@@ -555,9 +554,7 @@ def test_two_loose_matches_are_ambiguous() -> None:
 
 @pytest.mark.unit
 def test_a_match_in_two_grids_is_ambiguous() -> None:
-    table = (
-        '<table><tr><th>Ref</th></tr><tr><td class="claim-number">{}</td></tr></table>'
-    )
+    table = '<table><tr><th>Ref</th></tr><tr><td class="claim-number">{}</td></tr></table>'
     page = _page(table.format("AB12345678") + table.format("CD87654321"))
     got = HeuristicRung().attempt(page, CLAIM_NUMBER)
     assert isinstance(got, Miss) and got.outcome == "ambiguous"
@@ -614,40 +611,43 @@ def test_header_holds_is_false_outside_a_grid_and_under_a_rowspanned_band() -> N
 # -- the bench sweep ---------------------------------------------------------------------------
 
 
-def _sweep() -> Counter[str]:
-    from testbench.portal.render import render_results
-    from tests.testbench.helpers import FIXTURE_DAY
-
-    base = BenchPage(render_results(FIXTURE_DAY), render_results(FIXTURE_DAY, mark_truth=True))
+def _sweep(base: BenchPage, name: str) -> Counter[str]:
+    """One mutation class x seeds 0-2 x the six spec fields, judged against the answer key.
+    Rung 4 never reads data-sd-*, so resolving on the marked page is resolving on the page."""
+    entry = next(e for e in CATALOGUE if e.name == name)
     out: Counter[str] = Counter()
-    for entry in CATALOGUE:
-        for seed in range(3):
-            page = base.mutated_by(entry.build(random.Random(seed)))
-            source = StaticPageSource(page.marked)
-            for target in SPEC.targets:
-                got = HeuristicRung().attempt(source, target)
-                if isinstance(got, Miss):
-                    out[f"{entry.name}:{got.outcome}"] += 1
-                    out[f"total:{got.outcome}"] += 1
-                    continue
-                truth = page.truth(target.name)
-                kind = (
-                    "correct"
-                    if truth and got.node_id == truth[0]
-                    else "other_record"
-                    if got.node_id in truth
-                    else "WRONG"
-                )
-                out[f"{entry.name}:{kind}"] += 1
-                out[f"total:{kind}"] += 1
+    for seed in range(3):
+        page = base.mutated_by(entry.build(random.Random(seed)))
+        source = StaticPageSource(page.marked)
+        for target in SPEC.targets:
+            got = HeuristicRung().attempt(source, target)
+            if isinstance(got, Miss):
+                out[got.outcome] += 1
+                continue
+            truth = page.truth(target.name)
+            if truth and got.node_id == truth[0]:
+                out["correct"] += 1
+            else:
+                out["other_record" if got.node_id in truth else "WRONG"] += 1
     return out
 
 
 @pytest.mark.unit
-def test_bench_sweep_rung_four_alone_never_returns_a_wrong_cell() -> None:
+@pytest.mark.parametrize("name", [e.name for e in CATALOGUE])
+def test_bench_sweep_rung_four_alone_never_returns_a_wrong_cell(
+    name: str, bench: BenchPage
+) -> None:
     """Every CATALOGUE mutation x seeds 0-2 x the six spec fields: rung 4 either returns the
-    true cell of the first record or declines."""
-    counts = _sweep()
-    assert counts["total:WRONG"] == 0, counts
-    assert counts["total:other_record"] == 0, counts
-    assert counts["total:correct"] > 0, counts
+    true cell of the FIRST record or declines -- never another column, never another record."""
+    counts = _sweep(bench, name)
+    assert counts["WRONG"] == 0 and counts["other_record"] == 0, counts
+    assert counts["correct"] > 0, counts
+
+
+@pytest.mark.unit
+def test_rung_four_is_registered_after_rung_three() -> None:
+    from selector_drift.resolve import cascade
+
+    ids = [r.rung_id for r in cascade.REGISTERED_RUNGS]
+    assert 4 in ids and ids == sorted(set(ids))
+    assert isinstance(next(r for r in cascade.REGISTERED_RUNGS if r.rung_id == 4), HeuristicRung)
