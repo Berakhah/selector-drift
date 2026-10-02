@@ -7,6 +7,15 @@ records what was actually applied.
 
 from __future__ import annotations
 
-from testbench.mutations.base import CatalogueEntry
+from testbench.mutations.base import CatalogueEntry, entry
+from testbench.mutations.class_rename import ClassRename
+from testbench.mutations.column_reorder import ColumnReorder
+from testbench.mutations.dom_restructure import DomRestructure
+from testbench.mutations.table_to_div import TableToDiv
 
-CATALOGUE: tuple[CatalogueEntry, ...] = ()
+CATALOGUE: tuple[CatalogueEntry, ...] = (
+    *(
+        entry(c, adversarial=False)
+        for c in (ClassRename, DomRestructure, ColumnReorder, TableToDiv)
+    ),
+)
