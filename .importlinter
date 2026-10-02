@@ -43,10 +43,32 @@ forbidden_modules = selector_drift.resolve.rungs
 # Concrete rungs are constructed in orchestrate/ and injected; validate/ sees only Rung + Family.
 
 [importlinter:contract:answer-key-isolation]
-name = The resolver cannot see the answer key
+name = The product cannot see the bench -- the answer key or anything else in testbench
 type = forbidden
 source_modules = selector_drift
-forbidden_modules = testbench.answers
+forbidden_modules = testbench
+# Widened 2026-09-26 from testbench.answers (bench spec §2): the product must not know it is
+# being tested. Contract id unchanged so Task 1's test still finds it.
+
+[importlinter:contract:bench-stands-alone]
+name = The portal, the engine and the schedule do not import the product
+type = forbidden
+source_modules =
+    testbench.portal
+    testbench.mutations
+    testbench.schedule
+forbidden_modules = selector_drift
+
+[importlinter:contract:only-the-scorer-reads-the-product]
+name = Only testbench.score may import selector_drift.db
+type = forbidden
+source_modules = testbench
+forbidden_modules = selector_drift.db
+ignore_imports =
+    testbench.score -> selector_drift.db
+    testbench.score -> selector_drift.db.**
+# testbench.score does not exist yet; without this the ignore lines fail as unmatched.
+unmatched_ignore_imports_alerting = none
 
 [importlinter:contract:only-the-gate-mints]
 name = Only scope.gate may reach the mint token

@@ -54,6 +54,17 @@ def override_secret() -> str:
 
 @pytest.fixture(scope="session")
 def bench_server(override_secret: str) -> Iterator[str]:
+    """The portal with NO mutations, for tests of the portal's own behaviour (Task 7). Those
+    tests must not start failing the day the schedule draws TableToDiv or VirtualisedRows."""
+    with pytest.MonkeyPatch.context() as mp:
+        _bench_env(mp, override_secret)
+        app = create_app(catalogue=())
+    yield from _serve(app)
+
+
+@pytest.fixture(scope="session")
+def mutating_bench_server(override_secret: str) -> Iterator[str]:
+    """The portal exactly as deployed: the production CATALOGUE, the real clock."""
     with pytest.MonkeyPatch.context() as mp:
         _bench_env(mp, override_secret)
         app = create_app()
@@ -67,6 +78,7 @@ def client_factory(
     _bench_env(monkeypatch, override_secret)
 
     def make(**kwargs: Any) -> TestClient:
+        kwargs.setdefault("catalogue", ())
         return TestClient(create_app(**kwargs), follow_redirects=False)
 
     return make

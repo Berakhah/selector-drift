@@ -8,14 +8,18 @@ then img alt, then text content -- which is what ImageHeader (Task 11A) needs.
 from __future__ import annotations
 
 import datetime as dt
+import random
 import re
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 
 import lxml.html
 from playwright.sync_api import Browser, Page
 from starlette.testclient import TestClient
 
+from testbench.mutations.base import CatalogueEntry, Mutation, MutationBase, parse, serialise
 from testbench.portal.day import sign
+from testbench.schedule import scheduled_names
 
 FIXTURE_DAY = dt.date(2026, 9, 9)
 CLAIM_NUMBER = re.compile(r"^[A-Z]{2}\d{8}$")
@@ -113,3 +117,72 @@ def logged_in_page(
     page.locator("form button[type=submit]").click()
     page.wait_for_url("**/search")
     return page
+
+
+class TagBody(MutationBase):
+    """A test-only mutation: marks <body> with one attribute. Visible, harmless, and distinct
+    per instance, so schedules can be told apart."""
+
+    def __init__(self, tag: str) -> None:
+        self._tag = tag
+
+    @property
+    def name(self) -> str:
+        return f"TagBody{self._tag}"
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        body = doc.find("body")
+        assert body is not None
+        body.set(f"data-test-{self._tag.lower()}", "1")
+        return serialise(doc)
+
+
+class WrapTable(MutationBase):
+    """A test-only structural mutation: wraps every <table> in a <div>, moving every cell's path."""
+
+    def apply(self, html: str) -> str:
+        doc = parse(html)
+        for table in doc.xpath("//table"):
+            parent = table.getparent()
+            assert parent is not None
+            wrapper = doc.makeelement("div", {"class": "sd-test-wrap"})
+            parent.replace(table, wrapper)
+            wrapper.append(table)
+        return serialise(doc)
+
+
+def _builder(tag: str) -> Callable[[random.Random], Mutation]:
+    def build(rng: random.Random) -> Mutation:
+        return TagBody(tag)
+
+    return build
+
+
+def bench_catalogue() -> tuple[CatalogueEntry, ...]:
+    benign = [CatalogueEntry(f"TagBody{t}", _builder(t), adversarial=False) for t in "ABCDEF"]
+    hostile = [CatalogueEntry(f"TagBody{t}", _builder(t), adversarial=True) for t in "XY"]
+    return (*benign, *hostile)
+
+
+WRAP_TABLE = (CatalogueEntry("WrapTable", WrapTable.from_rng, adversarial=False),)
+
+
+def first_day_scheduling(
+    name: str, start: dt.date, *, target: str = "testbench", horizon: int = 3650
+) -> dt.date:
+    for offset in range(horizon):
+        day = start + dt.timedelta(days=offset)
+        if name in scheduled_names(day, target):
+            return day
+    raise LookupError(f"{name} is never scheduled within {horizon} days of {start}")
+
+
+def render_in_browser(browser: Browser, html: str) -> str:
+    """The DOM a browser builds from `html` after load -- scripts run, exactly as on the bench."""
+    context = browser.new_context()
+    page = context.new_page()
+    page.set_content(html, wait_until="load")
+    dom = str(page.evaluate("document.documentElement.outerHTML"))
+    context.close()
+    return dom
