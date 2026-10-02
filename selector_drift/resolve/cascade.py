@@ -14,6 +14,7 @@ from selector_drift.resolve.rungs.r1_cache import CacheRung
 from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
 from selector_drift.resolve.rungs.r3_anchors import AnchorRung
 from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
+from selector_drift.resolve.rungs.r5_visual import VisualRung
 from selector_drift.resolve.trace import (
     AttemptOutcome,
     CascadeTrace,
@@ -27,7 +28,13 @@ from selector_drift.spec.schema import FieldTarget
 
 # Tasks 14-18 each add one import above and one entry here, cheapest rung first.
 # CacheRung() holds NO_CACHE here; resolve_cascade rebuilds it per call via .bind() (CacheBound).
-REGISTERED_RUNGS: list[Rung] = [CacheRung(), AxTreeRung(), AnchorRung(), HeuristicRung()]
+REGISTERED_RUNGS: list[Rung] = [
+    CacheRung(),
+    AxTreeRung(),
+    AnchorRung(),
+    HeuristicRung(),
+    VisualRung(),
+]
 
 
 @runtime_checkable
