@@ -1,0 +1,6 @@
+*
+!pyproject.toml
+!uv.lock
+!testbench
+!testbench/**
+testbench/**/__pycache__
