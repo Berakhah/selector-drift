@@ -494,3 +494,127 @@ def test_the_bench_sweep_never_returns_a_wrong_cell(bench: BenchPage) -> None:
     bad = {k: v for k, v in got.items() if k.startswith(("wrong", "other_record"))}
     assert bad == {}, got
     assert got["correct"] > 0
+
+
+# -- fix round 1 -------------------------------------------------------------------------------
+#
+# I1: a label phrase split across sibling ELEMENTS ("<span>Prior</span> <span>Amount</span>")
+# anchored on its last word, because _stands_alone only looked at the parent's loose text.
+# I2: WITHIN returned the other half of a split label. Ruling: in the free-text path a box whose
+# immediately preceding sibling is a text-owning phrasing element declines; BELOW / WITHIN
+# values follow the anchor; a value is never (inside) a <label>, <dt> or <legend>.
+
+SPLIT_DETAIL = "label continues from a preceding phrase element"
+SPLIT = [
+    '<div><span>Prior</span> <span>Amount</span> <span id="v">301.00</span></div>',
+    '<div><span>Prior</span><span>Amount</span><span id="v">301.00</span></div>',
+    '<div><span>Prior</span>&nbsp;<span>Amount</span>&nbsp;<span id="v">301.00</span></div>',
+    '<p><b>Prior</b> <b>Amount</b> <span id="v">9.00</span></p>',
+    '<div><span>Prior</span> <span><i>Amount</i></span><span id="v">9.00</span></div>',
+    "<table><tr><th>Ref</th></tr><tr><td><span>Prior</span> <span>Amount</span>"
+    '<span id="v">9.00</span></td></tr></table>',
+]
+SPLIT_IDS = ["spaced", "no-space", "nbsp", "bold", "wrapped-italic", "in-a-data-cell"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("relation", [Relation.RIGHT_OF, Relation.BELOW, Relation.WITHIN])
+@pytest.mark.parametrize("body", SPLIT, ids=SPLIT_IDS)
+def test_r1_a_split_label_phrase_never_anchors_on_its_last_word(
+    body: str, relation: Relation
+) -> None:
+    page = _page(body)
+    got = AnchorRung().attempt(page, AMOUNT.model_copy(update={"relation": relation}))
+    assert isinstance(got, Miss) and got.outcome == "no_match"
+    assert SPLIT_DETAIL in got.detail
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<div class="f"><span>Prior</span> <span>Amount</span></div><div>9.00</div>',
+        "<table><tr><th>Ref</th></tr><tr><td><span>Prior</span> <span>Amount</span></td>"
+        "</tr></table>",
+    ],
+    ids=["div", "data-cell"],
+)
+def test_r1_within_never_returns_the_other_half_of_a_split_label(body: str) -> None:
+    page = _page(body)
+    got = AnchorRung().attempt(page, AMOUNT.model_copy(update={"relation": Relation.WITHIN}))
+    assert isinstance(got, Miss) and got.outcome == "no_match"
+
+
+@pytest.mark.unit
+def test_r1_within_never_returns_a_value_that_precedes_the_label() -> None:
+    page = _page('<div class="f"><b>9.00</b><span>Amount</span></div>')
+    got = AnchorRung().attempt(page, AMOUNT.model_copy(update={"relation": Relation.WITHIN}))
+    assert isinstance(got, Miss) and got.outcome == "no_match"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "neighbour",
+    ["<label>Claimant</label>", "<dt>Claimant</dt>", "<legend>Claimant</legend>"],
+    ids=["label", "dt", "legend"],
+)
+def test_r1_a_value_is_never_a_label_term_or_legend(neighbour: str) -> None:
+    page = _page(f"<div><span>Claim Number</span>{neighbour}</div>")
+    got = AnchorRung().attempt(page, RIGHT_OF)
+    assert isinstance(got, Miss) and got.outcome == "no_match"
+
+
+@pytest.mark.unit
+def test_r1_a_value_inside_a_label_is_never_taken() -> None:
+    page = _page("<div><span>Claim Number</span><label><b>Claimant</b></label></div>")
+    target = CLAIM_NUMBER.model_copy(update={"relation": Relation.BELOW})
+    got = AnchorRung().attempt(page, target)
+    assert isinstance(got, Miss) and got.outcome == "no_match"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<div><span>Claim Number</span><span id="v">AB12345678</span>'
+        "<span>Claimant</span><span>Test Person</span></div>",
+        '<div><span>Claim Number</span> <span id="v">AB12345678</span></div>',
+        '<div><div>Ref</div><span>Claim Number</span><span id="v">AB12345678</span></div>',
+    ],
+    ids=["first-pair", "spaced", "block-before"],
+)
+def test_r1_a_span_pair_with_nothing_phrase_like_before_it_still_resolves(body: str) -> None:
+    page = _page(body)
+    assert _is(page, AnchorRung().attempt(page, RIGHT_OF), "#v")
+
+
+def sweep_all_relations(bench: BenchPage) -> Counter[str]:
+    out: Counter[str] = Counter()
+    for entry in CATALOGUE:
+        for seed in range(3):
+            page = bench.mutated_by(entry.build(random.Random(seed)))
+            source = page.source()
+            for base in SPEC.targets:
+                for rel in ("spec", *Relation):
+                    target = base if rel == "spec" else base.model_copy(update={"relation": rel})
+                    got = AnchorRung().attempt(source, target)
+                    if isinstance(got, Miss):
+                        out[got.outcome] += 1
+                        continue
+                    truth = page.truth(base.name)
+                    if truth and got.node_id == truth[0]:
+                        out["correct"] += 1
+                    elif got.node_id in truth:
+                        out[f"other_record:{entry.name}:{base.name}:{rel}"] += 1
+                    else:
+                        out[f"wrong:{entry.name}:{base.name}:{rel}"] += 1
+    return out
+
+
+@pytest.mark.unit
+def test_r1_the_bench_sweep_over_every_relation_never_returns_a_wrong_cell(
+    bench: BenchPage,
+) -> None:
+    got = sweep_all_relations(bench)
+    bad = {k: v for k, v in got.items() if k.startswith(("wrong", "other_record"))}
+    assert bad == {}, got

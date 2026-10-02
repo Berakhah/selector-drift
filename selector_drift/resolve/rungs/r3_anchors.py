@@ -22,6 +22,13 @@ relations stay inside one row of a grid: RIGHT_OF is the immediately adjacent ce
 skipping an empty one onto the next column), and BELOW / WITHIN across grid cells decline --
 column position is rung 2's and rung 4's job, with header verification. When a rung cannot
 verify, it declines.
+
+Fix round 1: a label phrase split across sibling elements ("<span>Prior</span>
+<span>Amount</span>") never anchors on its last word -- in the free-text path a box whose
+immediately preceding sibling (whitespace and &nbsp; skipped, <br> not) is a text-owning
+phrasing element declines with no_match, SPLIT_PHRASE. BELOW and WITHIN values must follow the
+anchor in document order. A value is never, nor inside, a <label>, <dt> or <legend> (except a
+<label>'s own control).
 """
 
 from __future__ import annotations
@@ -66,6 +73,14 @@ _HEADER_ROLES = frozenset({"columnheader", "rowheader"})
 _ROW_LEVEL_ROLES = frozenset({"row", "rowgroup"}) | TABLE_ROLES
 _SKIP_SIBLINGS = NON_RENDERED | {"br", "wbr"}
 _TOP = frozenset({"body", "html"})
+# Fix round 1 (I1): a free-text label box directly after one of these, when it owns text, is
+# the tail of a longer phrase ("<span>Prior</span> <span>Amount</span>"), not a label.
+_PHRASING = frozenset(
+    {"span", "b", "strong", "i", "em", "a", "font", "small", "label", "u", "mark", "abbr", "code"}
+)
+# Fix round 1 (c): a value is never, nor inside, one of these -- they are labels themselves.
+_LABEL_TAGS = frozenset({"label", "dt", "legend"})
+SPLIT_PHRASE = "label continues from a preceding phrase element"
 
 
 def _rendered(el: HtmlElement) -> bool:
@@ -107,6 +122,19 @@ def _stands_alone(box: HtmlElement) -> bool:
         return True
     loose = [parent.text or ""] + [c.tail or "" for c in parent]
     return not "".join(loose).strip()
+
+
+def _continues_a_phrase(box: HtmlElement) -> bool:
+    """The box's immediately preceding sibling -- skipping comments and whitespace-only text
+    (str.strip() treats &nbsp; as whitespace), but never a <br> -- is a rendered phrasing
+    element that owns text. The box is already the outermost wrapper holding only the label,
+    so "<span>Prior</span> <span><i>Amount</i></span>" is checked at the outer span."""
+    prev = box.getprevious()
+    while prev is not None and not isinstance(prev.tag, str):
+        prev = prev.getprevious()  # a comment or processing instruction
+    if not isinstance(prev, HtmlElement) or not _rendered(prev):
+        return False
+    return tag_of(prev) in _PHRASING and bool(text_of(prev))
 
 
 def _container(box: HtmlElement, tag: str) -> HtmlElement | None:
@@ -164,21 +192,31 @@ def _free_relation(
             and not any(a is box for a in ancestors(e))
         ]
         owners = _text_owners(inside)
-        return owners[0] if len(owners) == 1 else None  # more than one value: not a relation
+        if len(owners) != 1:
+            return None  # more than one value: not a relation
+        # Fix round 1 (b): a value never precedes its label.
+        after = box.xpath("following::*")
+        return owners[0] if isinstance(after, list) and any(e is owners[0] for e in after) else None
     return None
 
 
 class _Found:
     """value_for's verdict: the value, or why there is none."""
 
-    __slots__ = ("direct", "rowspan", "value")
+    __slots__ = ("direct", "rowspan", "split", "value")
 
     def __init__(
-        self, value: HtmlElement | None, *, direct: bool = False, rowspan: bool = False
+        self,
+        value: HtmlElement | None,
+        *,
+        direct: bool = False,
+        rowspan: bool = False,
+        split: bool = False,
     ) -> None:
         self.value = value
         self.direct = direct  # a <label>'s control: band check only, like rung 2's named controls
         self.rowspan = rowspan
+        self.split = split  # the free-text box is the tail of a longer phrase (fix round 1)
 
 
 _NONE = _Found(None)
@@ -230,6 +268,8 @@ def _relate(page: PageSource, label: HtmlElement, relation: Relation | None) -> 
         controls = [d for d in lab.iterdescendants() if isinstance(d, HtmlElement)]
         controls = [d for d in controls if tag_of(d) in _CONTROLS]
         return _Found(controls[0], direct=True) if len(controls) == 1 else _NONE
+    if _continues_a_phrase(box):
+        return _Found(None, split=True)  # "<span>Prior</span> <span>Amount</span>"
     return _Found(_free_relation(page, box, relation))
 
 
@@ -242,6 +282,8 @@ def _acceptable(page: PageSource, found: _Found, want: str) -> bool:
         return False  # a header is never a value
     if normalise(text_of(value)) == want:
         return False  # nor is the label's own text ever stood in for the value
+    if not found.direct and any(tag_of(a) in _LABEL_TAGS for a in [value, *ancestors(value)]):
+        return False  # a <label>, <dt> or <legend> is another label, never a value (round 1)
     grid = grid_of(page, value)
     if grid is None:
         return True
@@ -273,12 +315,14 @@ def locate_by_label(
     hits: list[tuple[HtmlElement, str]] = []
     saw_hidden = False
     rowspan_header = False
+    split = False
     for lab in _label_elements(page, want):
         if not page.visible(lab):
             saw_hidden = True  # H9: a hidden label anchors nothing
             continue
         found = _relate(page, lab, relation)
         rowspan_header = rowspan_header or found.rowspan
+        split = split or found.split
         value = found.value
         if value is None or not _acceptable(page, found, want):
             continue
@@ -290,6 +334,8 @@ def locate_by_label(
     if not values:
         if rowspan_header:
             return Miss("anchor_mismatch", f"rowspan header: cannot verify column for {label!r}")
+        if split:
+            return Miss("no_match", f"{SPLIT_PHRASE}: {label!r}")
         return Miss(
             "not_visible" if saw_hidden else "no_match",
             f"no visible value is anchored by the text {label!r}",
