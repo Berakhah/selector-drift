@@ -27,14 +27,28 @@ Grid rules are grid.py's, reused, never re-implemented (see its module docstring
 * `header_text` is the resolved cell's band header, whichever strategy won -- or None when the
   band has a rowspan and the cell carries no headers="" (position cannot be trusted there).
 
-Deliberate: a test id outranks a class and a header (the brief's order), and an ambiguous
-attribute strategy still lets the independently verified header strategy speak.
+* A value is never an element whose text BEGINS with the label, nor one holding a label-like
+  element: `<div data-testid="claim-number"><span>Claim Number</span><span>AB..</span></div>`
+  would otherwise read "Claim NumberAB.." (fix round 1).
+
+Attribute versus header (fix round 1, controller ruling -- overrules the brief's "a test id
+beats a header"). Both strategies always run. An attribute match stands alone only when no
+band header names the field (LabelReword: the header was reworded, the class survived). When
+the verified header strategy yields a cell that is neither the attribute element nor its
+ancestor/descendant -- an attribute on the adjacent decoy column, a search box named
+`claim_number` above the results -- the rung declines `ambiguous`; so too when several band
+headers name the field. An ambiguous attribute strategy still lets the independently verified
+header strategy speak.
+
+Residual hand-off, by design: an attribute cell under a header that names a DIFFERENT field,
+with no header for this field anywhere (`class="col-amount"` under "Reserve"), is
+indistinguishable at rung 4 from a LabelReword. Rung 1's `header_holds` (the stored
+header_text must still read) and the gate's distributional check own that case.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 
 from lxml.html import HtmlElement
 
@@ -130,6 +144,13 @@ def _label_like(el: HtmlElement) -> bool:
     return bool(inside) and not (tag_of(el) in _CONTROLS and tag_of(inside[0]) == "label")
 
 
+def _holds_label_element(el: HtmlElement) -> bool:
+    return any(
+        isinstance(d, HtmlElement) and isinstance(d.tag, str) and tag_of(d) in _LABEL_TAGS
+        for d in el.iterdescendants()
+    )
+
+
 def _innermost(found: list[HtmlElement]) -> list[HtmlElement]:
     """Drop any match that contains another match: the inner one is the more specific."""
     out: list[HtmlElement] = []
@@ -157,8 +178,8 @@ def _pick(
     for el in _innermost(visible):
         if _label_like(el) or page.role(el) in _HEADER_ROLES:
             continue
-        if normalise(text_of(el)) == want:
-            continue  # a label's own text is never its value
+        if (want and normalise(text_of(el)).startswith(want)) or _holds_label_element(el):
+            continue  # a label, or a label-plus-value container, is never the value
         grid, row = grid_of(page, el), row_of(page, el)
         if grid is None or row is None:
             if grid is None:
@@ -262,27 +283,36 @@ def _by_header(page: PageSource, target: FieldTarget, grids: _Grids) -> HtmlElem
     return cell
 
 
-_Strategy = Callable[[PageSource, FieldTarget, _Grids], HtmlElement | Miss | None]
-_STRATEGIES: tuple[_Strategy, ...] = (_by_attributes, _by_header)
-
-
 class HeuristicRung(RungBase):
     rung_id: int = 4
     family: Family = Family.STRUCTURAL
 
     def attempt(self, page: PageSource, target: FieldTarget) -> ResolvedElement | Miss:
         grids = _Grids(page)
-        refusal: Miss | None = None
-        for strategy in _STRATEGIES:
-            got = strategy(page, target, grids)
-            if isinstance(got, Miss):
-                refusal = refusal or got
-                continue
-            if got is not None:
-                header = grids.header_of(got)
-                text = page.name(header).strip() if header is not None else None
-                return self.found(page, got, AnchorEvidence(header_text=text or None))
-        return refusal or Miss("no_match", f"no structural signal names {target.name!r}")
+        by_attr = _by_attributes(page, target, grids)
+        by_head = _by_header(page, target, grids)
+        if isinstance(by_attr, HtmlElement):
+            # Fix round 1 (controller ruling): an attribute never outranks a verified header
+            # that points elsewhere -- the adjacent decoy column, a search box's query value.
+            if isinstance(by_head, HtmlElement) and not _related(by_attr, by_head):
+                return Miss("ambiguous", "attribute and verified header disagree")
+            if isinstance(by_head, Miss) and by_head.outcome == "ambiguous":
+                return Miss(
+                    "ambiguous", f"attribute names one of several headers: {by_head.detail}"
+                )
+            winner: HtmlElement = by_attr
+        elif isinstance(by_head, HtmlElement):
+            winner = by_head
+        else:
+            refusal = by_attr if isinstance(by_attr, Miss) else by_head
+            return refusal or Miss("no_match", f"no structural signal names {target.name!r}")
+        header = grids.header_of(winner)
+        text = page.name(header).strip() if header is not None else None
+        return self.found(page, winner, AnchorEvidence(header_text=text or None))
+
+
+def _related(a: HtmlElement, b: HtmlElement) -> bool:
+    return a is b or any(x is a for x in ancestors(b)) or any(x is b for x in ancestors(a))
 
 
 def header_holds(page: PageSource, el: HtmlElement, header_text: str) -> bool:
