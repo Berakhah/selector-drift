@@ -29,16 +29,24 @@ Grid rules are grid.py's, reused, never re-implemented (see its module docstring
 
 * A value is never an element whose text BEGINS with the label, nor one holding a label-like
   element: `<div data-testid="claim-number"><span>Claim Number</span><span>AB..</span></div>`
-  would otherwise read "Claim NumberAB.." (fix round 1).
+  would otherwise read "Claim NumberAB.." (fix round 1); nor one holding a grid (fix round 2).
 
-Attribute versus header (fix round 1, controller ruling -- overrules the brief's "a test id
-beats a header"). Both strategies always run. An attribute match stands alone only when no
-band header names the field (LabelReword: the header was reworded, the class survived). When
-the verified header strategy yields a cell that is neither the attribute element nor its
-ancestor/descendant -- an attribute on the adjacent decoy column, a search box named
-`claim_number` above the results -- the rung declines `ambiguous`; so too when several band
-headers name the field. An ambiguous attribute strategy still lets the independently verified
-header strategy speak.
+Attribute versus header (fix rounds 1-2, controller rulings -- overrule the brief's "a test id
+beats a header"). Both strategies always run. When the attribute strategy resolves an element:
+
+* the header strategy finds NO header naming the field (it returns None -- LabelReword: the
+  header was reworded, the class survived) -> the attribute result stands;
+* the header strategy returns ANY Miss -- a header naming the field exists but cannot be
+  verified (several band headers name it, a rowspanned band, the cell under it is hidden, sits
+  under another header, or holds only the label) -> rung 4 declines with that Miss, its
+  outcome and detail unchanged;
+* the header strategy yields a verified cell that is neither the attribute element nor its
+  ancestor/descendant (an attribute on the adjacent decoy column, a search box named
+  `claim_number` above the results) -> `Miss("ambiguous")`;
+* they are related -> the deeper of the two is returned, never an outer wrapper. An attribute
+  element that contains a whole grid is never a candidate at all.
+
+When the attribute strategy returns nothing or a Miss, the header strategy's result stands.
 
 Residual hand-off, by design: an attribute cell under a header that names a DIFFERENT field,
 with no header for this field anywhere (`class="col-amount"` under "Reserve"), is
@@ -52,7 +60,7 @@ import re
 
 from lxml.html import HtmlElement
 
-from selector_drift.resolve.aria import CELL_ROLES, DATA_CELL_ROLES, ancestors, tag_of
+from selector_drift.resolve.aria import CELL_ROLES, DATA_CELL_ROLES, TABLE_ROLES, ancestors, tag_of
 from selector_drift.resolve.grid import (
     cell_at,
     column_header,
@@ -151,6 +159,13 @@ def _holds_label_element(el: HtmlElement) -> bool:
     )
 
 
+def _holds_grid(page: PageSource, el: HtmlElement) -> bool:
+    return any(
+        isinstance(d, HtmlElement) and isinstance(d.tag, str) and page.role(d) in TABLE_ROLES
+        for d in el.iterdescendants()
+    )
+
+
 def _innermost(found: list[HtmlElement]) -> list[HtmlElement]:
     """Drop any match that contains another match: the inner one is the more specific."""
     out: list[HtmlElement] = []
@@ -178,6 +193,8 @@ def _pick(
     for el in _innermost(visible):
         if _label_like(el) or page.role(el) in _HEADER_ROLES:
             continue
+        if _holds_grid(page, el):
+            continue  # a wrapper around a whole table is never one value (fix round 2)
         if (want and normalise(text_of(el)).startswith(want)) or _holds_label_element(el):
             continue  # a label, or a label-plus-value container, is never the value
         grid, row = grid_of(page, el), row_of(page, el)
@@ -261,7 +278,7 @@ def _by_header(page: PageSource, target: FieldTarget, grids: _Grids) -> HtmlElem
     header = headers[0]
     grid, index = grid_of(page, header), column_of(page, header)
     if grid is None or index is None:
-        return None
+        return Miss("anchor_mismatch", f"cannot place the header {want!r} in its grid")
     band = grids.band(grid)
     if header_has_rowspan(page, grid, band):
         return Miss("anchor_mismatch", f"rowspan header: cannot verify column for {want!r}")
@@ -292,15 +309,18 @@ class HeuristicRung(RungBase):
         by_attr = _by_attributes(page, target, grids)
         by_head = _by_header(page, target, grids)
         if isinstance(by_attr, HtmlElement):
-            # Fix round 1 (controller ruling): an attribute never outranks a verified header
-            # that points elsewhere -- the adjacent decoy column, a search box's query value.
-            if isinstance(by_head, HtmlElement) and not _related(by_attr, by_head):
+            # Fix rounds 1-2 (controller rulings): the attribute stands alone ONLY when no
+            # header names the field (by_head is None). A header that names it but cannot be
+            # verified declines with its own Miss; a verified header pointing elsewhere (the
+            # adjacent decoy column, a search box's query value) is a disagreement.
+            if isinstance(by_head, Miss):
+                return by_head
+            if by_head is None:
+                winner: HtmlElement = by_attr
+            elif not _related(by_attr, by_head):
                 return Miss("ambiguous", "attribute and verified header disagree")
-            if isinstance(by_head, Miss) and by_head.outcome == "ambiguous":
-                return Miss(
-                    "ambiguous", f"attribute names one of several headers: {by_head.detail}"
-                )
-            winner: HtmlElement = by_attr
+            else:
+                winner = _deeper(by_attr, by_head)
         elif isinstance(by_head, HtmlElement):
             winner = by_head
         else:
@@ -313,6 +333,11 @@ class HeuristicRung(RungBase):
 
 def _related(a: HtmlElement, b: HtmlElement) -> bool:
     return a is b or any(x is a for x in ancestors(b)) or any(x is b for x in ancestors(a))
+
+
+def _deeper(a: HtmlElement, b: HtmlElement) -> HtmlElement:
+    """Of two related elements, the descendant: never an outer wrapper's whole text."""
+    return a if any(x is b for x in ancestors(a)) else b
 
 
 def header_holds(page: PageSource, el: HtmlElement, header_text: str) -> bool:
