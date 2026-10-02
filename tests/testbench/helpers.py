@@ -178,6 +178,15 @@ def first_day_scheduling(
     raise LookupError(f"{name} is never scheduled within {horizon} days of {start}")
 
 
+def skeleton(html: str) -> str:
+    """The page with every text node removed: what is left is markup alone (Task 11A)."""
+    doc = parse(html)
+    for node in doc.iter():
+        node.text = None
+        node.tail = None
+    return serialise(doc)
+
+
 def render_in_browser(browser: Browser, html: str) -> str:
     """The DOM a browser builds from `html` after load -- scripts run, exactly as on the bench."""
     context = browser.new_context()
