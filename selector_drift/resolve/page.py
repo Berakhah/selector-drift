@@ -35,7 +35,10 @@ from selector_drift.resolve.aria import (
 )
 
 NODE_ATTR = "data-sd-node"
-_STATIC_ID = re.compile(r"^(?:/[a-z][a-z0-9]*(?:\[\d+\])?)+$")
+# A path getpath() could have minted, and nothing else: anchored, so it still refuses XPath
+# injection ("| //*", "..", predicates). Tag segments allow '-', '.' and '_' because getpath
+# emits custom-element tags verbatim (FrameworkMarkup's angular dialect wraps in <app-root>).
+_STATIC_ID = re.compile(r"^(?:/[a-z][a-z0-9._-]*(?:\[\d+\])?)+$")
 _PX = re.compile(r"^(-?\d+(?:\.\d+)?)px$")
 _COMMENT = re.compile(r"/\*.*?\*/", re.S)
 
