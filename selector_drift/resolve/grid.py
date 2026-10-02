@@ -13,12 +13,17 @@ is decided here, once, by three rules (fix round 4):
    `columnheader` anywhere on the grid -> an empty band (a row-header table is not swept in by
    a span).
 2. DATA ROWS (`data_rows()`) are rows below the band, EXCLUDING (i) any row that contains a
-   `columnheader` (a header row repeated mid-table, a `<tbody>` `<th colspan>` section label)
-   and (ii) any row in which every cell spans more than one column (a group, sub-header or
-   divider row; this generalises the full-width pager skip). `first_data_row()` is the first
-   row passing both. A value is never taken from an excluded row or from the band
-   (`is_value_row()` is the per-row check for paths -- `cell_right_of()`, a directly named
-   cell -- that do not go through `data_rows()`).
+   `columnheader` (a header row repeated mid-table, a `<tbody>` `<th colspan>` section label),
+   (ii) any row in which every cell spans more than one column (a group, sub-header or
+   divider row; this generalises the full-width pager skip), and (iii) any row inside a
+   `<tfoot>` (totals), whatever its source order -- `<tfoot>` may legally precede `<tbody>`,
+   and document order would otherwise make the totals row the first record (fix round 5).
+   `first_data_row()` is the first row passing all three. A CELL-DERIVED value
+   (`cell_under()`, `cell_right_of()`) is never taken from the band or an excluded row;
+   `is_value_row()` is the per-row check for `cell_right_of()`, which walks a single row and
+   does not go through `data_rows()`. A directly author-named element (aria-label /
+   aria-labelledby) is its own value, not read off a row's position, so it gets only the band
+   check (`in_header_band()`): a labelled control in a full-width form row still resolves.
 3. `header_has_rowspan()` scans only the band: a `rowspan`/`aria-rowspan` > 1 there means
    colspan-only column position cannot be trusted to line up, so `cell_under()` declines
    (rung 2 reports `Miss("anchor_mismatch", "rowspan header ...")`). A rowspan in a data row
@@ -157,15 +162,25 @@ def header_band(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
     return all_rows[: end + 1]
 
 
+def in_tfoot(page: PageSource, row: HtmlElement) -> bool:
+    """True when the row sits inside a `<tfoot>` of its own grid (rule 2 (iii))."""
+    for node in ancestors(row):
+        if page.role(node) in TABLE_ROLES:
+            return False
+        if node.tag == "tfoot":
+            return True
+    return False
+
+
 def is_value_row(page: PageSource, row: HtmlElement, band: list[HtmlElement] | None = None) -> bool:
     """False for a band row and for a row excluded from data by rule 2: one that contains a
-    columnheader, or one in which every cell spans more than one column."""
+    columnheader, one in which every cell spans more than one column, or one in a `<tfoot>`."""
     if band is None:
         grid = grid_of(page, row)
         band = header_band(page, grid) if grid is not None else []
     if any(row is b for b in band):
         return False
-    return not _has_columnheader(page, row) and not is_span_only_row(page, row)
+    return not (_has_columnheader(page, row) or is_span_only_row(page, row) or in_tfoot(page, row))
 
 
 def in_header_band(
@@ -324,6 +339,7 @@ __all__ = [
     "header_rows",
     "headers_named",
     "in_header_band",
+    "in_tfoot",
     "is_header_row",
     "is_span_only_row",
     "is_value_row",

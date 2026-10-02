@@ -10,6 +10,7 @@ from selector_drift.resolve.grid import (
     grid_of,
     header_band,
     header_has_rowspan,
+    in_header_band,
     is_value_row,
     row_of,
 )
@@ -126,12 +127,21 @@ def locate_by_name(page: PageSource, name: str) -> tuple[HtmlElement, str] | Mis
             continue  # I2: nor is the label's own text ever stood in for the value
         # `value` is always inside the same grid as `anchor` (cell_under/cell_right_of stay
         # within it; the VALUE_ROLES branch sets value = anchor), so the cached band applies.
-        row = row_of(page, value) if grid is not None else None
-        if row is not None and not is_value_row(page, row, band):
-            continue  # fix round 4: a value is never taken from the header band, nor from a
-            # row excluded from data (a repeated header, a section label, a span-only group
-            # row), whichever path produced it -- cell_right_of walks a single row and a
-            # directly named cell is its own value, so neither goes through data_rows()
+        if grid is not None:
+            if value is anchor:
+                # A directly author-named element is its own value, not read off a row's
+                # position: only the band check applies (fix round 5) -- a labelled control in
+                # a full-width form row is still a value, but never one inside the header band.
+                if in_header_band(page, value, band):
+                    continue
+            else:
+                # A cell-derived value (cell_under / cell_right_of) is never taken from the
+                # band, a repeated header, a section label, a span-only group row or a <tfoot>
+                # row (fix rounds 4-5); cell_right_of walks a single row and does not go
+                # through data_rows(), so it needs this per-row check.
+                row = row_of(page, value)
+                if row is not None and not is_value_row(page, row, band):
+                    continue
         hits.append((value, node.name))
     values = unique([v for v, _ in hits])
     if not values:
