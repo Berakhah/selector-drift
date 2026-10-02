@@ -315,3 +315,65 @@ def test_a_row_header_layout_still_resolves() -> None:
     )
     el = AxTreeRung().resolve(page, CLAIM_NUMBER)
     assert el is not None and el.node_id == page.node_id(page.query("td")[0])
+
+
+# -- fix round 3 -----------------------------------------------------------------------------
+#
+# Round 2's header_band keyed membership on spans as well as columnheader role, so it swept in
+# rows that were never header: a second data row with a merged cell (B1), or a grouped
+# line-item's rowspanned first cell (B2). Membership is now keyed on columnheader alone -- the
+# band is every row from the top through the LAST columnheader row, inclusive; a row above that
+# line is in the band by position even with no columnheader of its own (keeps P4's grouping row
+# in); a row below it is never swept in by a span on its own cells (fixes B1 and B2); and with
+# no columnheader anywhere the band is empty.
+
+
+@pytest.mark.unit
+def test_b1_a_merged_cell_in_the_second_data_row_does_not_pull_it_into_the_band() -> None:
+    """B1. round 2's span-keyed band pulled row 2 in (its colspan=2 cell), so first_data_row
+    became row 3 and CLAIM_NUMBER silently resolved to a different record (#cn2) -- a wrong
+    record, not even a wrong column, with nothing in the trace to say so."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        "<tr><th>Claim Number</th><th>Amount</th><th>Prior</th></tr>"
+        '<tr><td id="cn">AB12345678</td><td colspan="2">100.00</td></tr>'
+        '<tr><td id="cn2">CD87654321</td><td>1.00</td><td>2.00</td></tr>'
+        "</table></body></html>"
+    )
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("#cn")[0])
+
+
+@pytest.mark.unit
+def test_b2_a_rowspanned_first_data_row_is_not_swept_into_the_band() -> None:
+    """B2. round 2's span-keyed band pulled the first (and only) data row in because its own
+    cell has rowspan=2, tripping header_has_rowspan and declining a perfectly good resolution
+    -- a regression against round 1, which resolved this. Grouped line-item tables (one cell
+    spanning several line items) are a common, legitimate data-row shape."""
+    page = StaticPageSource(
+        "<html><body><table>"
+        "<tr><th>Claim Number</th><th>Amount</th></tr>"
+        '<tr><td id="cn" rowspan="2">AB12345678</td><td id="am">100.00</td></tr>'
+        "<tr><td>200.00</td></tr>"
+        "</table></body></html>"
+    )
+    got_amount = AxTreeRung().attempt(page, AMOUNT)
+    assert isinstance(got_amount, ResolvedElement)
+    assert got_amount.node_id == page.node_id(page.query("#am")[0])
+    got_claim = AxTreeRung().attempt(page, CLAIM_NUMBER)
+    assert isinstance(got_claim, ResolvedElement)
+    assert got_claim.node_id == page.node_id(page.query("#cn")[0])
+
+
+@pytest.mark.unit
+def test_a_row_header_whose_value_cell_spans_still_resolves() -> None:
+    """A detail row with no columnheader anywhere on the page: the band is empty regardless of
+    spans, so a rowheader's value cell spanning multiple columns (a full-width detail value) is
+    not swept into a band that doesn't exist, and cell_right_of's relationship still holds --
+    this is the brief's rung-2 rowheader relationship working as intended, not a special case."""
+    page = StaticPageSource(
+        '<html><body><table><tr><th scope="row">Claim Number</th>'
+        '<td colspan="3">AB12345678</td></tr></table></body></html>'
+    )
+    el = AxTreeRung().resolve(page, CLAIM_NUMBER)
+    assert el is not None and el.node_id == page.node_id(page.query("td")[0])

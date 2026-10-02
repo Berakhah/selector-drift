@@ -8,6 +8,7 @@ from selector_drift.resolve.grid import (
     cell_right_of,
     cell_under,
     grid_of,
+    header_band,
     header_has_rowspan,
     in_header_band,
 )
@@ -86,6 +87,14 @@ def locate_by_name(page: PageSource, name: str) -> tuple[HtmlElement, str] | Mis
     want = normalise(name)
     hits: list[tuple[HtmlElement, str]] = []
     rowspan_header = False
+    bands: dict[int, list[HtmlElement]] = {}  # fix round 3: one header_band() per grid per call
+
+    def band_of(grid: HtmlElement) -> list[HtmlElement]:
+        key = id(grid)
+        if key not in bands:
+            bands[key] = header_band(page, grid)
+        return bands[key]
+
     for node in page.ax().walk():
         if not want or normalise(node.name) != want:
             continue
@@ -96,12 +105,13 @@ def locate_by_name(page: PageSource, name: str) -> tuple[HtmlElement, str] | Mis
             continue  # H9 -- a genuinely hidden-only page is diagnosed below (I3)
         if node.role in _CONTENT_NAMED_VALUE_ROLES and not _author_name(anchor, page):
             continue  # I2: a label cell is never taken as its own value
+        grid = grid_of(page, anchor)
+        band = band_of(grid) if grid is not None else []
         if node.role == "columnheader":
-            grid = grid_of(page, anchor)
-            if grid is not None and header_has_rowspan(page, grid):
+            if grid is not None and header_has_rowspan(page, grid, band):
                 rowspan_header = True  # I1: column position can't be trusted -- decline
                 continue
-            value = cell_under(page, anchor)
+            value = cell_under(page, anchor, band)
         elif node.role == "rowheader":
             value = cell_right_of(page, anchor)
         elif node.role in VALUE_ROLES:
@@ -112,8 +122,10 @@ def locate_by_name(page: PageSource, name: str) -> tuple[HtmlElement, str] | Mis
             continue
         if normalise(text_of(value)) == want:
             continue  # I2: nor is the label's own text ever stood in for the value
-        if in_header_band(page, value):
-            continue  # I1 (fix round 2): a header-band cell is never a value, whichever
+        # `value` is always inside the same grid as `anchor` (cell_under/cell_right_of stay
+        # within it; the VALUE_ROLES branch sets value = anchor), so the cached band applies.
+        if in_header_band(page, value, band if grid is not None else None):
+            continue  # I1 (fix round 3): a header-band cell is never a value, whichever
             # path produced it -- cell_right_of walks a single row and does not go through
             # data_rows(), so it is not otherwise stopped from handing back a band cell
         hits.append((value, node.name))
