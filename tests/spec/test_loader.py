@@ -68,6 +68,22 @@ def test_every_spec_declares_a_natural_key_that_exists_in_its_schema() -> None:
 
 
 @pytest.mark.unit
+def test_the_bench_spec_extracts_all_six_columns_with_no_amount_reserve_relation() -> None:
+    spec = load_spec(Path("specs/testbench.yaml"))
+    assert spec.version == 2
+    assert [t.name for t in spec.targets] == [
+        "claim_number",
+        "claimant",
+        "amount",
+        "reserve",
+        "status",
+        "filed",
+    ]
+    assert not any(a.type == "cross_field" for t in spec.targets for a in t.assertions)
+    assert all(t.relation is None for t in spec.targets)  # the table's markup relation wins
+
+
+@pytest.mark.unit
 def test_the_loader_refuses_a_yaml_tag_that_would_construct_an_object() -> None:
     """R13/H5. yaml.safe_load, always. A task spec is config; config must never be code."""
     with pytest.raises(yaml.YAMLError):

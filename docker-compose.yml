@@ -86,6 +86,45 @@ services:
       postgres: { condition: service_healthy }
       prefect-server: { condition: service_healthy }
 
+  # The mutating claims portal (Tasks 7-11A) -- the treatment arm of the ninety-day log and the
+  # artifact a buyer checks the claims against. Built on the P-4 VM, where linux/arm64 is
+  # native (the free Oracle shape is Ampere); CI proves the arm64 build under QEMU on every
+  # change (.github/workflows/testbench-image.yml). Not published directly: Caddy is the one
+  # TLS-terminating front door for the bench's single scope origin (Task 12).
+  testbench:
+    build:
+      context: .
+      dockerfile: testbench/Dockerfile
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ ALL ]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs: [ "/tmp" ]
+    mem_limit: 256m
+    pids_limit: 128
+    environment:
+      TESTBENCH_SESSION_SECRET: ${TESTBENCH_SESSION_SECRET:-}
+      TESTBENCH_OVERRIDE_SECRET: ${TESTBENCH_OVERRIDE_SECRET:-}
+    expose: [ "8080" ]
+    restart: unless-stopped
+
+  # One reverse proxy, one origin, for both the bench and (Task 34) the API -- the bench's scope
+  # record lists exactly one origin, so the browser's allowlist (Task 4, H2) names a single host.
+  caddy:
+    image: caddy:2.8
+    ports: [ "80:80", "443:443" ]
+    environment:
+      BENCH_HOST: ${BENCH_HOST:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [ testbench ]
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   sd_data:
+  caddy-data:
+  caddy-config:

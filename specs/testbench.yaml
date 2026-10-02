@@ -1,4 +1,4 @@
-version: 1
+version: 2
 scope_ref: scopes/testbench.yaml
 schedule: "12 4 * * *"                 # UTC. The mutation seed, the run window and the
                                        # expiry check must all agree on one calendar (M20)
@@ -6,6 +6,11 @@ row_scope: each row of the results table
 natural_key: [ claim_number ]
 expected_schema:
   claim_number: string
+  claimant: string
+  amount: decimal
+  reserve: decimal
+  status: string
+  filed: date
 navigate:
   - { step: goto, path: /login }
   - { step: fill, field: username, value_from: credentials.username }
@@ -15,6 +20,30 @@ navigate:
 targets:
   - name: claim_number
     description: the claim number cell in the results table
-    relation: right_of
     assertions:
       - { type: format, pattern: '^[A-Z]{2}\d{8}$' }
+  - name: claimant
+    description: the claimant's name in the same row
+    assertions:
+      - { type: format, pattern: '^\S.{0,79}$' }
+  - name: amount
+    description: the claimed amount in the same row
+    distributional: true
+    assertions:
+      - { type: format, pattern: '^\d{1,3}(,\d{3})*\.\d{2}$' }
+      - { type: domain, rule: { min: 100.00, max: 250000.00 } }
+  - name: reserve
+    description: the reserve amount in the same row
+    distributional: true
+    assertions:
+      - { type: format, pattern: '^\d{1,3}(,\d{3})*\.\d{2}$' }
+      - { type: domain, rule: { min: 100.00, max: 250000.00 } }
+  - name: status
+    description: the claim status in the same row
+    assertions:
+      - { type: domain, rule: { enum: [ Open, Pending, Paid, Closed ] } }
+  - name: filed
+    description: the date the claim was filed, in the same row
+    assertions:
+      - { type: format, pattern: '^\d{4}-\d{2}-\d{2}$' }
+      - { type: domain, rule: { date_after: '2023-01-01' } }

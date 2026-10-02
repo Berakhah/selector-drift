@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Final
 
 _URLS: Final[dict[str, str]] = {
-    "testbench": "https://<BENCH-HOST>/",
+    # Task 12: the exact origin in scopes/testbench.yaml, no path -- the registry test pins
+    # the two together. Still the day-one placeholder, resolved when P-4 fixes BENCH_HOST.
+    "testbench": "https://<BENCH-HOST>",
     "agent-perimeter": "https://<CONTROL-1-HOST>/",
     "ledger-sense": "https://<CONTROL-2-HOST>/",
 }
