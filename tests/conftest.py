@@ -11,14 +11,28 @@ ever changes.
 
 Unit tests (`@pytest.mark.unit`) never touch Postgres and are exempt -- they must not need a
 database at all.
+
+Parallel runs (`-n auto`): each xdist worker gets its own freshly migrated database,
+`<base>_gw<N>_test`, provisioned in `pytest_configure` before anything imports
+`selector_drift.db.session` (whose engine is built at import time). One shared database let the
+orchestrate `db` fixture's TRUNCATE in one worker delete rows another worker's test was using.
 """
 
 from __future__ import annotations
 
 import os
+import re
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+
+REPO = Path(__file__).resolve().parents[1]
+_XDIST_WORKER = re.compile(r"gw\d+")
+_DATABASE_NAME = re.compile(r"[a-z0-9_]+")
 
 
 class NotATestDatabaseError(RuntimeError):
@@ -46,6 +60,79 @@ def require_test_database_url(url: str) -> None:
             "SD_DATABASE_URL must name a database ending in '_test' so a test run can never "
             "write into the development or log database -- see .env.example."
         )
+
+
+def worker_database_url(url: str, worker: str) -> str:
+    """The database URL one xdist worker should use: `<base>_gw<N>_test` in place of
+    `<base>_test`, everything else unchanged. A serial run (`worker` empty or `"master"`) keeps
+    `url` as-is. The base must already pass the `_test` guard, and the worker id must be xdist's
+    `gw<N>` shape, and the base must be a plain lower-case identifier -- the derived name is
+    interpolated into CREATE/DROP DATABASE, and ending in `_test` says nothing about the rest."""
+    require_test_database_url(url)
+    if worker in ("", "master"):
+        return url
+    if not _XDIST_WORKER.fullmatch(worker):
+        raise ValueError(f"Unexpected xdist worker id {worker!r}; expected 'gw<N>'.")
+    parsed = make_url(url)
+    database = parsed.database or ""
+    if not _DATABASE_NAME.fullmatch(database):
+        raise ValueError(f"Database name {database!r} must match {_DATABASE_NAME.pattern!r}.")
+    base = database.removesuffix("_test")
+    return parsed.set(database=f"{base}_{worker}_test").render_as_string(hide_password=False)
+
+
+def _provision_worker_database(url: str) -> None:
+    """Drop and recreate the worker's database, then migrate it to head. Recreated every run so
+    no state survives from a previous one."""
+    parsed = make_url(url)
+    admin = create_engine(parsed.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{parsed.database}" WITH (FORCE)'))
+            c.execute(text(f'CREATE DATABASE "{parsed.database}"'))
+    finally:
+        admin.dispose()
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=REPO,
+        env={**os.environ, "SD_DATABASE_URL": url},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"alembic upgrade head failed for worker database {parsed.database!r}:\n{result.stderr}"
+        )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """On an xdist worker, point `SD_DATABASE_URL` at that worker's own migrated database.
+
+    A URL that is unset or not a `_test` database is left alone: unit-only runs need no
+    database, and the per-test guard below still refuses every integration test against it.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+    url = os.environ.get("SD_DATABASE_URL", "")
+    if not worker or not url:
+        return
+    try:
+        require_test_database_url(url)
+    except NotATestDatabaseError:
+        return
+    if "selector_drift.db.session" in sys.modules:
+        raise RuntimeError(
+            "selector_drift.db.session was imported before the worker database was provisioned; "
+            "its engine would still point at the shared test database."
+        )
+    derived = worker_database_url(url, worker)
+    _provision_worker_database(derived)
+    os.environ["SD_DATABASE_URL"] = derived
+    # Review round 1, Important: `get_settings` is lru_cached. Anything that reached it before
+    # this hook would keep handing out the shared URL, silently undoing the isolation.
+    from selector_drift.config import get_settings
+
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)
