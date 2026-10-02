@@ -1,31 +1,33 @@
 """Tables and grids by role, so a native <table> and TableToDiv's role="table" divs are one model.
 
-Column positions count colspan (aria-colspan on divs). A multi-level header's grouping row
-(the one with "Money" spanning "Amount"/"Reserve") routinely has a plain, unlabelled corner
-cell that is not itself a columnheader -- a membership test that required EVERY cell in a row
-to be a columnheader (`is_header_row`) let that row slip through as "data" and the corner cell
-got returned as a value (fix round 2, I1).
+Column positions count colspan (aria-colspan on divs). Which rows are header and which are data
+is decided here, once, by three rules (fix round 4):
 
-`header_band()` is the real boundary, and it is keyed on `columnheader` alone, never on spans
-(fix round 3, I1): the band is every row from the top through the LAST row that contains a
-`columnheader` cell, inclusive. A row above that line is in the band purely by position, even
-if it carries no columnheader itself (the grouping row's plain corner cell) -- but a row
-*below* that line is never swept in just because one of its cells has a colspan/rowspan: a
-grouped line-item's rowspanned first cell, or a merged totals cell, is an ordinary and common
-data-row shape, and keying the band on spans mistook both for header (fix round 2's bug: a
-genuine second data row got pulled into the band by its own colspan, or a genuine data row's
-own rowspan tripped `header_has_rowspan` and declined a perfectly good resolution). If the grid
-has no `columnheader` anywhere, the band is empty -- a row-header table with no column headers
-at all is not swept in merely because a value cell happens to span.
+1. The HEADER BAND (`header_band()`) is every row from the top through the end of the FIRST
+   contiguous run of rows that contain a `columnheader` cell. A row with no columnheader that
+   sits above that run is in the band by position (a `<td colspan>` title row; probe P4's
+   all-`<td>` grouping row with its rowspanned corner). A row with no columnheader that sits
+   *inside* the run, between two columnheader rows, is in the band too when it is span-only
+   (every cell spans more than one column) or one of its cells rowspans down into the next
+   columnheader row -- that is header structure, not a record. Any other row ends the run. No
+   `columnheader` anywhere on the grid -> an empty band (a row-header table is not swept in by
+   a span).
+2. DATA ROWS (`data_rows()`) are rows below the band, EXCLUDING (i) any row that contains a
+   `columnheader` (a header row repeated mid-table, a `<tbody>` `<th colspan>` section label)
+   and (ii) any row in which every cell spans more than one column (a group, sub-header or
+   divider row; this generalises the full-width pager skip). `first_data_row()` is the first
+   row passing both. A value is never taken from an excluded row or from the band
+   (`is_value_row()` is the per-row check for paths -- `cell_right_of()`, a directly named
+   cell -- that do not go through `data_rows()`).
+3. `header_has_rowspan()` scans only the band: a `rowspan`/`aria-rowspan` > 1 there means
+   colspan-only column position cannot be trusted to line up, so `cell_under()` declines
+   (rung 2 reports `Miss("anchor_mismatch", "rowspan header ...")`). A rowspan in a data row
+   (grouped line items) is an ordinary data shape and is not this.
 
-`data_rows()`/`first_data_row()` start after the band, so no rung can be handed a band cell as
-a data value; and a cell with `rowspan`/`aria-rowspan` > 1 anywhere *in the band*
-(`header_has_rowspan()`) means colspan-only column position cannot be trusted to line up at
-all, so `cell_under()` declines outright rather than guess. `in_header_band()` is the
-belt-and-suspenders check for a path -- `cell_right_of()`, walking a single row -- that does
-not go through `data_rows()` and so would not otherwise be stopped from handing back a band
-cell. All four take an optional pre-computed `band`, so a caller resolving several candidates
-against the same grid (rung 2's cascade over the accessibility tree) computes it once.
+Round 3 ended the band at the LAST columnheader row, so a header repeated mid-table swept the
+first records into the band and a field silently resolved to a later record; round 2 keyed the
+band on spans and swept genuine data rows in. All band-taking helpers accept an optional
+pre-computed `band`, so a caller resolving several candidates against one grid computes it once.
 """
 
 from __future__ import annotations
@@ -111,19 +113,59 @@ def header_rows(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
     return [r for r in rows(page, grid) if is_header_row(page, r)]
 
 
+def _has_columnheader(page: PageSource, row: HtmlElement) -> bool:
+    return any(page.role(c) == "columnheader" for c in cells(page, row))
+
+
+def _rowspan(cell: HtmlElement) -> int:
+    raw = cell.get("rowspan") or cell.get("aria-rowspan") or "1"
+    return min(max(int(raw), 1), 1000) if raw.isdigit() else 1
+
+
+def _max_rowspan(page: PageSource, row: HtmlElement) -> int:
+    return max((_rowspan(c) for c in cells(page, row)), default=1)
+
+
+def is_span_only_row(page: PageSource, row: HtmlElement) -> bool:
+    """Every cell spans more than one column: a group, sub-header or divider row."""
+    cs = cells(page, row)
+    return bool(cs) and all(span(c) > 1 for c in cs)
+
+
 def header_band(page: PageSource, grid: HtmlElement) -> list[HtmlElement]:
-    """Every row from the top through the LAST row that contains a `columnheader` cell,
-    inclusive (fix round 3, I1). A row above that line is in the band purely by position --
-    P4's all-`<td>` grouping row, with no columnheader of its own, is swept in because it sits
-    above the row that does have one. A row *below* that line is never swept in by a span on
-    one of its own cells: a rowspanned first cell or a merged totals cell is an ordinary data
-    row (round 2's bug). No `columnheader` anywhere on the grid -> an empty band."""
+    """Rows from the top through the end of the FIRST contiguous run of columnheader rows
+    (rule 1 of the module docstring). Rows above the run belong to it by position. Rows with
+    no columnheader that sit between two of its columnheader rows belong to it when each is
+    span-only or rowspans down into the next columnheader row (header structure, not a
+    record); any other row ends the run. No columnheader anywhere -> empty band."""
     all_rows = rows(page, grid)
-    last = -1
-    for i, r in enumerate(all_rows):
-        if any(page.role(c) == "columnheader" for c in cells(page, r)):
-            last = i
-    return all_rows[: last + 1] if last >= 0 else []
+    flags = [_has_columnheader(page, r) for r in all_rows]
+    if True not in flags:
+        return []
+    end = flags.index(True)
+    while True:
+        nxt = next((k for k in range(end + 1, len(all_rows)) if flags[k]), None)
+        if nxt is None:
+            break
+        gap = range(end + 1, nxt)
+        if not all(
+            is_span_only_row(page, all_rows[g]) or g + _max_rowspan(page, all_rows[g]) - 1 >= nxt
+            for g in gap
+        ):
+            break
+        end = nxt
+    return all_rows[: end + 1]
+
+
+def is_value_row(page: PageSource, row: HtmlElement, band: list[HtmlElement] | None = None) -> bool:
+    """False for a band row and for a row excluded from data by rule 2: one that contains a
+    columnheader, or one in which every cell spans more than one column."""
+    if band is None:
+        grid = grid_of(page, row)
+        band = header_band(page, grid) if grid is not None else []
+    if any(row is b for b in band):
+        return False
+    return not _has_columnheader(page, row) and not is_span_only_row(page, row)
 
 
 def in_header_band(
@@ -140,32 +182,29 @@ def in_header_band(
 def header_has_rowspan(
     page: PageSource, grid: HtmlElement, band: list[HtmlElement] | None = None
 ) -> bool:
-    """True when any cell anywhere in the header band spans multiple rows. `column_of` and
-    `cell_at` count colspan only, so a rowspanned cell desynchronises column indices between
-    rows of the band -- and between the band and the data row beneath it -- and position alone
-    can no longer be trusted to verify a header. A rowspan in a *data* row (grouped line items)
-    is not this: the band excludes it (fix round 3, I1)."""
+    """True when any cell in the header band (rule 3: the band only) spans multiple rows.
+    `column_of` and `cell_at` count colspan only, so a rowspanned band cell desynchronises
+    column indices between band rows and the data row beneath, and position alone can no longer
+    be trusted to verify a header. A rowspan in a *data* row (grouped line items) is not this."""
     for r in header_band(page, grid) if band is None else band:
-        for c in cells(page, r):
-            raw = c.get("rowspan") or c.get("aria-rowspan") or "1"
-            if raw.isdigit() and int(raw) > 1:
-                return True
+        if _max_rowspan(page, r) > 1:
+            return True
     return False
 
 
 def data_rows(
     page: PageSource, grid: HtmlElement, band: list[HtmlElement] | None = None
 ) -> list[HtmlElement]:
-    """Visible rows holding data. A single cell spanning a multi-column grid is a pager or a
-    footer, not data (Pagination mutation). Rows in the header band never count as data,
-    whatever role or span their own cells carry (fix round 3, I1)."""
+    """Visible rows below the header band holding data (rule 2): never a band row, a row that
+    contains a columnheader, or a row in which every cell spans more than one column. A single
+    cell in a multi-column grid is a pager or footer, not data (Pagination mutation)."""
     all_rows = rows(page, grid)
     if band is None:
         band = header_band(page, grid)
     columns = max((width(page, r) for r in all_rows), default=0)
     out = []
     for r in all_rows:
-        if any(r is b for b in band) or is_header_row(page, r) or not page.visible(r):
+        if not is_value_row(page, r, band) or not page.visible(r):
             continue
         cs = cells(page, r)
         if not cs:
@@ -185,8 +224,12 @@ def first_data_row(
     return found[0] if found else None
 
 
-def column_header(page: PageSource, cell: HtmlElement) -> HtmlElement | None:
-    """The header a cell sits under: its headers="" idrefs first, else by column position."""
+def column_header(
+    page: PageSource, cell: HtmlElement, band: list[HtmlElement] | None = None
+) -> HtmlElement | None:
+    """The header a cell sits under: its headers="" idrefs first, else by column position.
+    Given a `band`, position is read only from header rows inside it (fix round 4): a header
+    row repeated mid-table -- possibly in another column order -- never verifies a cell."""
     for ident in (cell.get("headers") or "").split():
         hits = page.root().xpath("//*[@id=$i]", i=ident)
         if isinstance(hits, list):
@@ -196,7 +239,10 @@ def column_header(page: PageSource, cell: HtmlElement) -> HtmlElement | None:
     grid, index = grid_of(page, cell), column_of(page, cell)
     if grid is None or index is None:
         return None
-    for hr in reversed(header_rows(page, grid)):
+    candidates = header_rows(page, grid)
+    if band is not None:
+        candidates = [hr for hr in candidates if any(hr is b for b in band)]
+    for hr in reversed(candidates):
         h = cell_at(page, hr, index)
         if h is not None and page.role(h) == "columnheader":
             return h
@@ -236,7 +282,7 @@ def cell_under(
     cell = cell_at(page, row, index)
     if cell is None or page.role(cell) not in DATA_CELL_ROLES:
         return None
-    return cell if column_header(page, cell) is header else None
+    return cell if column_header(page, cell, band) is header else None
 
 
 def cell_right_of(page: PageSource, header: HtmlElement) -> HtmlElement | None:
@@ -279,6 +325,8 @@ __all__ = [
     "headers_named",
     "in_header_band",
     "is_header_row",
+    "is_span_only_row",
+    "is_value_row",
     "nearest",
     "row_header",
     "row_of",
