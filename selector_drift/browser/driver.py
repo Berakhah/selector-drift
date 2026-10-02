@@ -29,6 +29,7 @@ from playwright.async_api import Page, async_playwright
 # bind the original at import time and make every one of those patches vacuous.
 from selector_drift.browser import allowlist, ratelimit, registry
 from selector_drift.browser.allowlist import OffScopeNavigation, RequestLedger
+from selector_drift.heallog.capture import VIEWPORT
 from selector_drift.scope.errors import ScopeRefusal
 from selector_drift.scope.record import AuthorisedTarget
 
@@ -185,7 +186,11 @@ async def open(target: AuthorisedTarget) -> AsyncIterator[Session]:
             headless=True, args=_launch_args(), proxy=allowlist.proxy_for(target)
         )
         try:
+            # Fixed viewport on every context (Task 19): recorded boxes are only comparable
+            # across runs at one size, and CSS px == screenshot px only at a DPR of 1.
             context = await browser.new_context(
+                viewport={"width": VIEWPORT[0], "height": VIEWPORT[1]},
+                device_scale_factor=1,
                 user_agent=_user_agent(target),
                 service_workers="block",
                 accept_downloads=False,
