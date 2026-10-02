@@ -23,6 +23,7 @@ dependencies = [
     "alembic>=1.19.1",
     "bok-core",
     "cryptography>=50.0.1",
+    "cssselect>=1.5.0",
     "duckdb>=1.5.5",
     "fastapi>=0.141.1",
     "httpx>=0.28.1",
