@@ -5,22 +5,36 @@ and what has a real box; the outerHTML is read in the same call and the accessib
 once after it. Every rung then runs in-process over that snapshot -- no CDP round-trip per
 rung, per field, per row. The stamped ids stay on the live page, which is how LiveCapture
 (Task 19) masks and measures the same nodes the rungs resolved.
+
+The snapshot is bounded (fix round 1, S-I2): the evaluate() is abandoned after
+SNAPSHOT_TIMEOUT_S, and a page with more than MAX_SNAPSHOT_NODES elements is refused with
+SnapshotTooLarge before anything is stamped or measured -- never silently truncated, because a
+partial snapshot would let a rung resolve against a page it only half saw.
+
+dom()/browser_ax are unredacted; redaction happens at the evidence-storage boundary (Task 33)
+and nothing here may be persisted directly.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
 from lxml.html import HtmlElement
 from playwright.async_api import Page
 
-from selector_drift.browser.driver import PageHandle
+from selector_drift.browser.driver import PageHandle, _playwright_page
 from selector_drift.resolve.page import NODE_ATTR, ParsedPage
 
 _LIVE_ID = re.compile(r"^n\d{1,7}$")
+SNAPSHOT_TIMEOUT_S = 30
+MAX_SNAPSHOT_NODES = 50_000
+_REFUSED = "too_large"
 
-_SNAPSHOT_JS = """(attr) => {
+_SNAPSHOT_JS = """({attr, max}) => {
+  const count = document.querySelectorAll('*').length;
+  if (count > max) return {refused: 'too_large', count};
   const all = Array.from(document.querySelectorAll('*'));
   all.forEach((el, i) => el.setAttribute(attr, 'n' + i));
   const clipMemo = new Map();
@@ -49,6 +63,17 @@ _SNAPSHOT_JS = """(attr) => {
 }"""
 
 
+class SnapshotTooLarge(RuntimeError):
+    """The page has more elements than MAX_SNAPSHOT_NODES. Refused, not truncated."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__(
+            f"page has {count} elements, over the {MAX_SNAPSHOT_NODES} snapshot ceiling; "
+            "refusing rather than resolving against a partial snapshot"
+        )
+        self.count = count
+
+
 class LivePageSource(ParsedPage):
     def __init__(
         self, html: str, *, rendered: frozenset[str], boxed: frozenset[str], browser_ax: str
@@ -59,12 +84,18 @@ class LivePageSource(ParsedPage):
 
     @classmethod
     async def snapshot(cls, page: PageHandle) -> LivePageSource:
-        return await cls.from_playwright(page.raw)
+        return await cls.from_playwright(_playwright_page(page))
 
     @classmethod
     async def from_playwright(cls, page: Page) -> LivePageSource:
-        raw: dict[str, Any] = await page.evaluate(_SNAPSHOT_JS, NODE_ATTR)
-        browser_ax = await page.locator("html").aria_snapshot()
+        """Raises SnapshotTooLarge past the node ceiling, TimeoutError past the time limit."""
+        limits = {"attr": NODE_ATTR, "max": MAX_SNAPSHOT_NODES}
+        raw: dict[str, Any] = await asyncio.wait_for(
+            page.evaluate(_SNAPSHOT_JS, limits), SNAPSHOT_TIMEOUT_S
+        )
+        if raw.get("refused") == _REFUSED:
+            raise SnapshotTooLarge(int(raw["count"]))
+        browser_ax = await page.locator("html").aria_snapshot(timeout=SNAPSHOT_TIMEOUT_S * 1000)
         return cls(
             str(raw["html"]),
             rendered=frozenset(map(str, raw["rendered"])),
