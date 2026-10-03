@@ -1,32 +1,47 @@
-"""The one DOM scrubber (Task 19 fix round 1, R5). capture() calls it on every capture, and
+"""The one DOM scrubber (Task 19 fix rounds 1-2). capture() calls it on every capture, and
 Task 33's evidence writer reuses it -- there is deliberately no second credential predicate.
 
 What it removes, by sensitivity:
 
 CLIENT_CONFIDENTIAL -- default-deny on form values, so nothing depends on a heuristic:
-  every input's `value`; every textarea's text; `selected`/`value` on option and select; the
-  contents of [contenteditable], output and datalist.
+  every input's and button's `value`; `selected`/`value` on option and select; and the WHOLE
+  SUBTREE of every textarea, output, datalist and [contenteditable] element -- descendants
+  included (fix round 2, N-M3: a cell inside an editable region is gone, so a heal on it
+  replays as EvidenceCorrupted, and a heal on a readonly display input's value cannot be
+  reproduced; both are ruled trade-offs of default-deny).
 PUBLIC / SYNTHETIC -- the heuristic credential floor: the same removals, but only on controls
-  `is_credential_control()` flags.
+  the shared predicate (`credential_controls`) flags.
 
-At EVERY sensitivity (these are credential rules, not PII rules, and cost the cascade nothing):
+At EVERY sensitivity (credential rules, not PII rules):
   - script / noscript / template bodies emptied (__NEXT_DATA__, inline bearer tokens, hidden
     login templates). <style> is kept: it is layout only, and StaticPageSource reads it to
-    decide visibility, so dropping it would change what replay resolves.
-  - HTML comments dropped; `srcdoc` dropped.
-  - query string, fragment and ;matrix params stripped from every URL-bearing attribute, srcset
-    entries and meta refresh -- pre-signed links and ?token= downloads are routine on portals.
-  - meta content blanked when its name/property/http-equiv is credential-named; any attribute
-    whose NAME is credential-named (data-token, data-auth, data-api-key) blanked.
-  - any attribute VALUE that looks like a JWT, a bearer token, or a long opaque secret blanked;
-    JWTs and bearer tokens in text are replaced. "Long" is >= 32 characters of base64/hex
-    alphabet with both a letter and a digit and no whitespace: 32 is the length of a 128-bit
-    hex key, the shortest secret we treat as worth hiding; human-readable values are shorter
-    or contain spaces. The structural attributes the cascade reads (KEPT_ATTRS) are exempt.
+    decide visibility -- only the URLs inside it are stripped.
+  - HTML comments and processing instructions dropped; `srcdoc` dropped.
+  - URLs: query string, fragment, ;matrix params and user:pass@ userinfo stripped, and a
+    token-shaped path segment replaced -- in every URL-bearing attribute, srcset entry and
+    meta refresh, in ANY other attribute value or meta content that looks like a URL
+    (scheme://, protocol-relative //, or a whitespace-free path containing '?'), and inside
+    every CSS url(...) / @import in style attributes and <style> blocks (fix round 2, N-I2).
+  - meta content blanked when its name/property/http-equiv is credential-named; any other
+    attribute whose NAME is credential-named (data-token, data-auth, data-api-key) blanked,
+    unless its value is purely numeric or boolean (data-pin-count="2" is not a secret).
+  - an attribute VALUE that looks like a JWT, a bearer token, or a long opaque secret is
+    blanked. "Long opaque" is >= 32 characters of base64/hex alphabet with both a letter and
+    a digit and no whitespace (the length of a 128-bit hex key). A bearer token is "Bearer"
+    followed by >= 20 token characters including a digit, '.' or '=' (fix round 2, N-I1:
+    "Basic Coverage" and "Token expiration date" are English).
+  - JWTs and bearer tokens inside text, and inside the free-text attributes the rungs read
+    (aria-label, title, alt, placeholder), are REPLACED in place -- never the opaque rule there.
 
-The DOM is returned byte-for-byte when nothing matched, and re-serialised otherwise; element
-structure is never changed, so an lxml path minted before the scrub names the same element
-after it (replay compares paths).
+Never touched (the cascade reads them): KEPT_ATTRS, and the IDREF attributes (aria-labelledby,
+aria-describedby, aria-controls, aria-owns, aria-activedescendant, aria-details,
+aria-errormessage, for, headers, list, form) -- they point at ids that are themselves kept, so
+blanking them would hide nothing and break the accessible-name computation.
+
+The DOM is returned byte-for-byte when nothing matched, and re-serialised otherwise. Apart from
+the subtrees emptied above (script/noscript/template everywhere; the CLIENT_CONFIDENTIAL form
+subtrees), element structure is unchanged, so an lxml path minted before the scrub names the
+same element after it (replay compares paths).
 """
 
 from __future__ import annotations
@@ -235,14 +250,46 @@ KEPT_ATTRS = frozenset(
      "colspan", "rowspan", "scope", "tabindex", "hidden", NODE_ATTR, "data-testid"}
 )  # fmt: skip
 _JWT = re.compile(r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*")
-_BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}")
+_BEARER = re.compile(r"(?i)\b(bearer)\s+((?=[A-Za-z0-9._~+/=-]*[0-9.=])[A-Za-z0-9._~+/=-]{20,})")
 _OPAQUE = re.compile(r"^[A-Za-z0-9+/_=.-]{32,}$")
 _REFRESH_URL = re.compile(r"(?i)(url\s*=\s*)(['\"]?)([^'\"]*)")
 _SCRUBBED = "[scrubbed]"
+# They reference ids that are kept; blanking them hides nothing and breaks accessible names.
+_IDREF_ATTRS = frozenset(
+    {"aria-labelledby", "aria-describedby", "aria-controls", "aria-owns",
+     "aria-activedescendant", "aria-details", "aria-errormessage", "for", "headers", "list",
+     "form"}
+)  # fmt: skip
+# Free text the rungs read: only strict JWT/Bearer shapes are replaced here, in place.
+_FREE_TEXT_ATTRS = frozenset({"aria-label", "title", "alt", "placeholder"})
+_NUMERIC_OR_BOOL = re.compile(r"(?i)\s*(?:[-+]?\d+(?:\.\d+)?|true|false|yes|no|on|off)?\s*")
+_URLISH = re.compile(r"^\s*(?:[A-Za-z][A-Za-z0-9+.-]*://|//)")
+_USERINFO = re.compile(r"^(\s*(?:[A-Za-z][A-Za-z0-9+.-]*:)?//)[^/?#@\s]*@")
+_CSS_URL = re.compile(r"(?is)(url\(\s*)(['\"]?)(.*?)(\2\s*\))")
+_CSS_IMPORT = re.compile(r"(?i)(@import\s+)(['\"])(.*?)(\2)")
+
+
+def _looks_like_url(value: str) -> bool:
+    v = value.strip()
+    return bool(_URLISH.match(v)) or (bool(v) and "?" in v and not re.search(r"\s", v))
+
+
+def _strip_css(css: str) -> str:
+    """Every url(...) and @import in a stylesheet or a style attribute, stripped."""
+    css = _CSS_URL.sub(lambda m: m[1] + m[2] + _strip_url(m[3]) + m[4], css)
+    return _CSS_IMPORT.sub(lambda m: m[1] + m[2] + _strip_url(m[3]) + m[4], css)
+
+
+def _replace_strict(text: str) -> str:
+    """JWTs and bearer tokens replaced in place; everything else left as written."""
+    text = _BEARER.sub(lambda m: f"{m[1]} {_SCRUBBED}", text)
+    return _JWT.sub(_SCRUBBED, text)
 
 
 def _strip_url(url: str) -> str:
-    """Query, fragment and ;matrix params gone; a token-shaped path segment replaced."""
+    """Userinfo, query, fragment and ;matrix params gone; a token-shaped path segment
+    replaced."""
+    url = _USERINFO.sub(lambda m: m[1], url)
     cut = re.sub(r";[^/]*", "", re.split(r"[?#]", url, maxsplit=1)[0])
     return "/".join(_SCRUBBED if _token_shaped(seg) else seg for seg in cut.split("/"))
 
@@ -309,14 +356,14 @@ class _Scrub:
                 [
                     el
                     for el in _elements(self.root)
-                    if el.tag in _CONTROLS or el.tag == "option" or _is_editable(el)
+                    if el.tag in _CONTROLS or el.tag in ("option", "button") or _is_editable(el)
                 ],
                 credential=False,
             )
 
     def _clear(self, targets: list[HtmlElement], *, credential: bool) -> None:
         for el in targets:
-            if el.tag == "input":
+            if el.tag in ("input", "button"):
                 self._set(el, "value", None)
             elif el.tag in ("textarea", "output", "datalist") or _is_editable(el):
                 self._empty(el)
@@ -335,6 +382,14 @@ class _Scrub:
         for el in list(self.root.iter("script", "noscript", "template")):
             if isinstance(el, HtmlElement):
                 self._empty(el)
+
+    def stylesheets(self) -> None:
+        for el in self.root.iter("style"):
+            if isinstance(el, HtmlElement) and el.text:
+                stripped = _strip_css(el.text)
+                if stripped != el.text:
+                    el.text = stripped
+                    self.changed = True
 
     def comments(self) -> None:
         for node in list(self.root.iter(etree.Comment, etree.ProcessingInstruction)):
@@ -356,6 +411,8 @@ class _Scrub:
                         "content",
                         _REFRESH_URL.sub(lambda m: m[1] + m[2] + _strip_url(m[3]), content),
                     )
+                elif _looks_like_url(el.get("content") or ""):
+                    self._set(el, "content", _strip_url(el.get("content") or ""))
             for attr in list(el.attrib):
                 value = el.get(attr) or ""
                 bare = attr.removeprefix("data-").removeprefix("aria-")
@@ -365,7 +422,17 @@ class _Scrub:
                     self._set(el, attr, _strip_url(value))
                 elif attr in ("srcset", "imagesrcset"):
                     self._set(el, attr, _strip_srcset(value))
-                elif attr not in KEPT_ATTRS and (is_credential_text(bare) or _token_shaped(value)):
+                elif attr == "style":
+                    self._set(el, attr, _strip_css(value))
+                elif attr in KEPT_ATTRS or attr in _IDREF_ATTRS:
+                    continue  # read by the cascade
+                elif is_credential_text(bare) and not _NUMERIC_OR_BOOL.fullmatch(value):
+                    self._set(el, attr, "")
+                elif _looks_like_url(value):
+                    self._set(el, attr, _strip_url(value))
+                elif attr in _FREE_TEXT_ATTRS:
+                    self._set(el, attr, _replace_strict(value))
+                elif _token_shaped(value):
                     self._set(el, attr, "")
 
     def text(self) -> None:
@@ -373,8 +440,7 @@ class _Scrub:
             for slot in ("text", "tail"):
                 value = getattr(el, slot)
                 if value and (_JWT.search(value) or _BEARER.search(value)):
-                    scrubbed = _BEARER.sub(lambda m: f"{m[1]} {_SCRUBBED}", value)
-                    setattr(el, slot, _JWT.sub(_SCRUBBED, scrubbed))
+                    setattr(el, slot, _replace_strict(value))
                     self.changed = True
 
 
@@ -389,6 +455,7 @@ def scrub_dom(html: str, *, sensitivity: Sensitivity) -> str:
     scrub.executable()
     scrub.form_values()
     scrub.comments()
+    scrub.stylesheets()
     scrub.attributes()
     scrub.text()
     if not scrub.changed:

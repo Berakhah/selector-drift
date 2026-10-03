@@ -53,6 +53,7 @@ class FakePage:
     boxes: dict[str, BBox] = field(default_factory=dict)
     masks_seen: list[frozenset[str]] = field(default_factory=list)
     bbox_calls: list[str] = field(default_factory=list)
+    labels_seen: list[Sensitivity] = field(default_factory=list)
 
     @property
     def viewport(self) -> tuple[int, int]:
@@ -61,7 +62,10 @@ class FakePage:
     def dom(self) -> str:
         return self.html
 
-    async def masked_screenshot(self, *, mask_node_ids: frozenset[str]) -> bytes:
+    async def masked_screenshot(
+        self, *, mask_node_ids: frozenset[str], sensitivity: Sensitivity
+    ) -> bytes:
+        self.labels_seen.append(sensitivity)
         self.masks_seen.append(mask_node_ids)
         return b"\x89PNG-fake"
 
@@ -258,6 +262,7 @@ def test_the_caller_may_raise_the_label_never_lower_it() -> None:
         )
     )
     assert raised.dom.sensitivity is Sensitivity.CLIENT_CONFIDENTIAL
+    assert synthetic.labels_seen == [Sensitivity.CLIENT_CONFIDENTIAL]  # the pixels follow
     plain = asyncio.run(capture(FakePage(LOGIN_HTML), run_key=RUN_KEY, masker=_names_n4))
     assert plain.dom.sensitivity is Sensitivity.SYNTHETIC
 

@@ -68,7 +68,11 @@ class Capturable(Protocol):
 
     # Named masked_screenshot, not screenshot: the only `.screenshot(` call in the product is
     # LiveCapture's own (tests/test_screenshot_boundary.py).
-    async def masked_screenshot(self, *, mask_node_ids: frozenset[str]) -> bytes: ...
+    # `sensitivity` is the capture's effective label (the page's, possibly raised by the
+    # caller); the pixel mask must be at least as strict as the label the evidence carries.
+    async def masked_screenshot(
+        self, *, mask_node_ids: frozenset[str], sensitivity: Sensitivity
+    ) -> bytes: ...
 
     async def bbox(self, node_id: str) -> BBox | None: ...
 
@@ -227,7 +231,7 @@ async def capture(
     bad = sum(1 for n in mask if not NODE_ID_RE.fullmatch(n))
     if bad:
         raise CaptureError(f"{bad} node id(s) to mask are not minted node ids")
-    shot = await page.masked_screenshot(mask_node_ids=mask)
+    shot = await page.masked_screenshot(mask_node_ids=mask, sensitivity=label)
     return Evidence(
         run_key=run_key,
         dom=Labelled(value=dom, sensitivity=label),
