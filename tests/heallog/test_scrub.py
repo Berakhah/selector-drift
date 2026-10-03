@@ -134,8 +134,44 @@ SHAPES: list[tuple[str, str, str]] = [
     ("srcdoc", '<iframe srcdoc="&lt;p&gt;CNRY-j02&lt;/p&gt;"></iframe>', "CNRY-j02"),
     ("jwt-attr", f'<div title="{JWT}">x</div>', JWT),
     ("hex-attr", f'<div data-x="{HEX}">x</div>', HEX),
-    ("bearer-attr", '<div data-h="Bearer CNRY-k01.abcdefgh">x</div>', "CNRY-k01"),
+    ("bearer-attr", '<div data-h="Bearer CNRY-k01.abcdefghijklmnop">x</div>', "CNRY-k01"),
     ("jwt-text", f"<p>token: {JWT}</p>", JWT),
+    # fix round 2, N-I2: signed URLs outside the URL-attribute list
+    (
+        "data-src-s3-signature",
+        '<img data-src="https://b.s3.amazonaws.com/a.jpg?X-Amz-Signature=CNRY-l01'
+        '&X-Amz-Credential=AKIACNRYL02" alt="">',
+        "CNRY-l01",
+    ),
+    (
+        "data-src-s3-credential",
+        '<img data-src="https://b.s3.amazonaws.com/a.jpg?X-Amz-Signature=CNRY-l01'
+        '&X-Amz-Credential=AKIACNRYL02" alt="">',
+        "AKIACNRYL02",
+    ),
+    ("data-href-token", '<a data-href="/dl?token=CNRY-l03">dl</a>', "CNRY-l03"),
+    (
+        "inline-style-url",
+        '<div style="background:url(/a.png?sig=CNRY-l04)">x</div>',
+        "CNRY-l04",
+    ),
+    (
+        "style-block-url",
+        "<style>.x{background:url('/a.png?sig=CNRY-l05')}</style>",
+        "CNRY-l05",
+    ),
+    (
+        "meta-og-image",
+        '<meta property="og:image" content="https://cdn.example/a.png?sig=CNRY-l06">',
+        "CNRY-l06",
+    ),
+    ("url-userinfo", '<a href="https://user:CNRY-l07@host.example/x">x</a>', "CNRY-l07"),
+    (
+        "protocol-relative-data",
+        '<div data-u="//cdn.example/a?sig=CNRY-l08">x</div>',
+        "CNRY-l08",
+    ),
+    ("path-with-query", '<div data-next="next?token=CNRY-l09">x</div>', "CNRY-l09"),
 ]
 
 BOTH = [Sensitivity.CLIENT_CONFIDENTIAL, Sensitivity.SYNTHETIC]
@@ -306,3 +342,99 @@ def test_from_static_scrubs_with_the_same_floor() -> None:
         sensitivity=Sensitivity.SYNTHETIC,
     )
     assert "CNRY-z1" not in ev.dom.value
+
+
+# -- fix round 2, N-I1: the scrub must not change what the cascade resolves ------------------
+
+_UUID = "h-550e8400e29b41d4a716446655440000"
+_UUID_HYPHEN = "550e8400-e29b-41d4-a716-446655440000"
+N_I1_PROBES: dict[str, tuple[str, str]] = {
+    # name: (html, a literal that must survive the scrub)
+    "basic-header": (
+        BENCH_HTML.replace("<th>Amount</th>", "<th>Basic Coverage</th>"),
+        "Basic Coverage",
+    ),
+    "token-text": (
+        BENCH_HTML.replace("<th>Claimant</th>", "<th>Token expiration date</th>"),
+        "Token expiration date",
+    ),
+    "aria-label-basic": (
+        BENCH_HTML.replace(
+            '<table id="results">', '<table id="results" aria-label="Basic coverage claims">'
+        ),
+        'aria-label="Basic coverage claims"',
+    ),
+    "title-basic": (
+        BENCH_HTML.replace(
+            '<td data-testid="claim-number">AB',
+            '<td title="Basic membership plan" data-testid="claim-number">AB',
+        ),
+        'title="Basic membership plan"',
+    ),
+    "uuid-labelledby": (
+        BENCH_HTML.replace("Claim Number", "Claim Reference")
+        .replace("<th>Claim Reference</th>", f'<th id="{_UUID}">Claim Reference</th>')
+        .replace('<td data-testid="claim-number">', f'<td aria-labelledby="{_UUID}">'),
+        f'aria-labelledby="{_UUID}"',
+    ),
+    "uuid-hyphen-labelledby": (
+        BENCH_HTML.replace(
+            "<th>Claim Number</th>", f'<th id="{_UUID_HYPHEN}">Claim Number</th>'
+        ).replace('<td data-testid="claim-number">', f'<td aria-labelledby="{_UUID_HYPHEN}">'),
+        f'aria-labelledby="{_UUID_HYPHEN}"',
+    ),
+    "header-aria-token": (
+        BENCH_HTML.replace(
+            "<th>Claim Number</th>",
+            '<th aria-label="Claim number (token expiration)">Claim Number</th>',
+        ),
+        'aria-label="Claim number (token expiration)"',
+    ),
+    "data-pin-count": (
+        BENCH_HTML.replace('<table id="results">', '<table id="results" data-pin-count="2">'),
+        'data-pin-count="2"',
+    ),
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("sensitivity", BOTH, ids=lambda s: str(s))
+@pytest.mark.parametrize("probe", list(N_I1_PROBES))
+def test_a_scrub_probe_keeps_its_text_and_resolves_the_same(
+    probe: str, sensitivity: Sensitivity
+) -> None:
+    html, survivor = N_I1_PROBES[probe]
+    scrubbed = scrub_dom(html, sensitivity=sensitivity)
+    assert survivor in scrubbed, f"{probe}: {survivor!r} was scrubbed"
+    assert "[scrubbed]" not in scrubbed
+    assert _outcomes(scrubbed) == _outcomes(html)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entry", CATALOGUE, ids=lambda e: e.name)
+def test_every_mutated_bench_page_resolves_the_same_after_a_synthetic_scrub(
+    entry: object,
+) -> None:
+    raw = apply_all([entry.build(random.Random(0))], render_results(FIXTURE_DAY))  # type: ignore[attr-defined]
+    scrubbed = scrub_dom(raw, sensitivity=Sensitivity.SYNTHETIC)
+    assert _outcomes(scrubbed) == _outcomes(raw)
+
+
+@pytest.mark.unit
+def test_bearer_needs_a_token_shaped_credential() -> None:
+    """N-I1(a): "Bearer of this card" and "Basic plan" are English, not credentials."""
+    html = (
+        "<html><body><p>The bearer of this card</p><p>Basic plan holder</p>"
+        "<p>Authorization: Bearer abcdefghij0123456789xyz</p></body></html>"
+    )
+    out = scrub_dom(html, sensitivity=Sensitivity.SYNTHETIC)
+    assert "The bearer of this card" in out and "Basic plan holder" in out
+    assert "abcdefghij0123456789xyz" not in out
+
+
+@pytest.mark.unit
+def test_client_confidential_clears_button_values() -> None:
+    """N-M5."""
+    html = '<html><body><button name="act" value="CNRY-btn01">Go</button></body></html>'
+    out = scrub_dom(html, sensitivity=Sensitivity.CLIENT_CONFIDENTIAL)
+    assert "CNRY-btn01" not in out and ">Go<" in out
