@@ -269,9 +269,16 @@ _CSS_URL = re.compile(r"(?is)(url\(\s*)(['\"]?)(.*?)(\2\s*\))")
 _CSS_IMPORT = re.compile(r"(?i)(@import\s+)(['\"])(.*?)(\2)")
 
 
-def _looks_like_url(value: str) -> bool:
+def _looks_like_url(value: str, *, free_text: bool = False) -> bool:
+    """scheme:// or protocol-relative //. Otherwise -- and never for the free-text attributes
+    (fix round 3, N2-M1: aria-label="Paid?" is a question, not a URL) -- a whitespace-free
+    value with '?' that also carries '/' or '=' (a path or a query string)."""
     v = value.strip()
-    return bool(_URLISH.match(v)) or (bool(v) and "?" in v and not re.search(r"\s", v))
+    if _URLISH.match(v):
+        return True
+    if free_text or not v or re.search(r"\s", v):
+        return False
+    return "?" in v and ("/" in v or "=" in v)
 
 
 def _strip_css(css: str) -> str:
@@ -428,7 +435,7 @@ class _Scrub:
                     continue  # read by the cascade
                 elif is_credential_text(bare) and not _NUMERIC_OR_BOOL.fullmatch(value):
                     self._set(el, attr, "")
-                elif _looks_like_url(value):
+                elif _looks_like_url(value, free_text=attr in _FREE_TEXT_ATTRS):
                     self._set(el, attr, _strip_url(value))
                 elif attr in _FREE_TEXT_ATTRS:
                     self._set(el, attr, _replace_strict(value))
