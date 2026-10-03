@@ -16,6 +16,7 @@ from typing import Any, ClassVar, cast
 
 import pytest
 from bok_core.boundary.sensitivity import Sensitivity
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page, async_playwright
 
 from selector_drift import browser
@@ -219,7 +220,10 @@ def _magenta(png: bytes) -> int:
 
 
 async def _scenario(
-    html: str, after_snapshot: str | None, sensitivity: Sensitivity = CC
+    html: str,
+    after_snapshot: str | None,
+    sensitivity: Sensitivity = CC,
+    requested: Sensitivity | None = None,
 ) -> tuple[bytes, bytes]:
     """Snapshot (stamping data-sd-node), run `after_snapshot` on the live page, then capture.
     Returns (stored screenshot, an unmasked screenshot of the same page for the baseline)."""
@@ -233,7 +237,12 @@ async def _scenario(
             if after_snapshot:
                 await page.evaluate(after_snapshot)
             cap = LiveCapture(page, source.dom(), sensitivity=sensitivity)
-            ev = await capture(cap, run_key="testbench:1:2026-09-07", masker=lambda d: frozenset())
+            ev = await capture(
+                cap,
+                run_key="testbench:1:2026-09-07",
+                masker=lambda d: frozenset(),
+                sensitivity=requested,
+            )
             unmasked = await page.screenshot(full_page=True, type="png")
             return ev.screenshot.value, unmasked
         finally:
@@ -277,6 +286,20 @@ SCENARIOS: dict[str, tuple[str, str | None]] = {
         _STRIP_STAMPS,
     ),
     "modal-after-snapshot": ('<html><body style="margin:0"><p>claims</p></body></html>', _MODAL),
+    # fix round 2, N-M1: page script that patches the DOM built-ins after the snapshot
+    "shadowroot-getter-patched": (
+        _shadow("open"),
+        "Object.defineProperty(Element.prototype, 'shadowRoot',"
+        " {get() { return null; }, configurable: true})",
+    ),
+    "queryselectorall-patched": (
+        f'<html><body style="margin:0"><div>{_field()}</div></body></html>',
+        "(() => { for (const proto of [Document.prototype, Element.prototype,"
+        " DocumentFragment.prototype]) { const real = proto.querySelectorAll;"
+        " proto.querySelectorAll = function (s) {"
+        " return s === '*' ? document.createDocumentFragment().childNodes"
+        " : real.call(this, s); }; } })()",
+    ),
 }
 
 
@@ -373,3 +396,60 @@ def test_a_client_target_captured_as_public_stores_client_confidential(
 
     ev = _in_thread(go)
     assert ev.dom.sensitivity is CC and ev.screenshot.sensitivity is CC
+
+
+# -- fix round 2, N-M2: CDP failures refuse as CaptureError --------------------------------
+
+
+class _FakeCDP:
+    def __init__(self, reply: object) -> None:
+        self.reply = reply
+
+    async def send(self, method: str, params: object = None) -> object:
+        if isinstance(self.reply, BaseException):
+            raise self.reply
+        return self.reply
+
+    async def detach(self) -> None:
+        return None
+
+
+class _FakeContext:
+    def __init__(self, cdp: _FakeCDP) -> None:
+        self.cdp = cdp
+
+    async def new_cdp_session(self, page: object) -> _FakeCDP:
+        return self.cdp
+
+
+class _FakePage:
+    viewport_size: ClassVar[dict[str, int]] = {"width": 1280, "height": 900}
+
+    def __init__(self, cdp: _FakeCDP) -> None:
+        self.context = _FakeContext(cdp)
+        self.frames: list[object] = []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "reply",
+    [PlaywrightError("send failed"), {}, {"root": "not-a-node"}, {"nodeIds": None}],
+    ids=["send-raises", "empty-reply", "malformed-root", "malformed-ids"],
+)
+def test_a_cdp_failure_refuses_as_a_capture_error(reply: object) -> None:
+    page = _FakePage(_FakeCDP(reply))
+    cap = LiveCapture(cast(Page, page), "<html></html>", sensitivity=CC)
+    with pytest.raises(CaptureError):
+        asyncio.run(cap.masked_screenshot(mask_node_ids=frozenset()))
+
+
+@pytest.mark.e2e
+def test_a_label_raised_to_client_confidential_also_raises_the_pixel_mask() -> None:
+    """Fix round 2: a caller who raises a SYNTHETIC page to CLIENT_CONFIDENTIAL gets the
+    default-deny mask too, not a CLIENT_CONFIDENTIAL label over heuristic-floor pixels."""
+    html, after = SCENARIOS["open-shadow-root"]
+    stored, unmasked = _in_thread(
+        lambda: _scenario(html, after, Sensitivity.SYNTHETIC, requested=CC)
+    )
+    assert _magenta(unmasked) > 5_000
+    assert _magenta(stored) == 0
