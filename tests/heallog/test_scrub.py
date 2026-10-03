@@ -394,6 +394,26 @@ N_I1_PROBES: dict[str, tuple[str, str]] = {
         BENCH_HTML.replace('<table id="results">', '<table id="results" data-pin-count="2">'),
         'data-pin-count="2"',
     ),
+    # fix round 3, N2-M1: a '?' in a label is not a URL
+    "aria-label-amount-question": (
+        BENCH_HTML.replace("<th>Amount</th>", '<th aria-label="Amount?">Amount</th>'),
+        'aria-label="Amount?"',
+    ),
+    "aria-label-paid-question": (
+        BENCH_HTML.replace('<table id="results">', '<table id="results" aria-label="Paid?">'),
+        'aria-label="Paid?"',
+    ),
+    "title-approved-question": (
+        BENCH_HTML.replace(
+            '<td data-testid="claim-number">AB',
+            '<td title="Approved?" data-testid="claim-number">AB',
+        ),
+        'title="Approved?"',
+    ),
+    "data-attr-question": (
+        BENCH_HTML.replace('<table id="results">', '<table id="results" data-q="Ready?">'),
+        'data-q="Ready?"',
+    ),
 }
 
 
@@ -438,3 +458,12 @@ def test_client_confidential_clears_button_values() -> None:
     html = '<html><body><button name="act" value="CNRY-btn01">Go</button></body></html>'
     out = scrub_dom(html, sensitivity=Sensitivity.CLIENT_CONFIDENTIAL)
     assert "CNRY-btn01" not in out and ">Go<" in out
+
+
+@pytest.mark.unit
+def test_a_free_text_url_is_still_stripped_when_it_has_a_scheme() -> None:
+    """N2-M1 narrows the URL test for labels; a real URL in a label still loses its query."""
+    html = (
+        '<html><body><img alt="https://cdn.example/a.png?sig=CNRY-q1" src="/a.png"></body></html>'
+    )
+    assert "CNRY-q1" not in scrub_dom(html, sensitivity=Sensitivity.SYNTHETIC)
