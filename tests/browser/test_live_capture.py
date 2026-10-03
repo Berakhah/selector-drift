@@ -6,9 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import struct
 import threading
-import zlib
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,6 +21,7 @@ from selector_drift import browser
 from selector_drift.browser.driver import _playwright_page
 from selector_drift.browser.live_capture import LiveCapture
 from selector_drift.browser.page_source import LivePageSource
+from selector_drift.browser.png import decode as png_decode
 from selector_drift.heallog.capture import BBox, CaptureError, capture
 from selector_drift.scope.gate import authorise
 from selector_drift.scope.record import AuthorisedTarget, Basis, RateLimit, ScopeRecord
@@ -52,46 +51,9 @@ def _in_thread[T](make: Callable[[], Awaitable[T]], timeout: float = 120) -> T:
 
 
 def _png_pixels(png: bytes) -> tuple[int, int, int, list[bytes]]:
-    """Minimal stdlib PNG decoder (8-bit RGB/RGBA, non-interlaced): width, height, bytes per
-    pixel, and the unfiltered scanlines. No Pillow in the dependency set."""
-    assert png.startswith(b"\x89PNG\r\n\x1a\n")
-    pos, idat, header = 8, b"", b""
-    while pos < len(png):
-        (length,) = struct.unpack(">I", png[pos : pos + 4])
-        tag, data = png[pos + 4 : pos + 8], png[pos + 8 : pos + 8 + length]
-        if tag == b"IHDR":
-            header = data
-        elif tag == b"IDAT":
-            idat += data
-        pos += 12 + length
-    width, height, depth, colour, _, _, interlace = struct.unpack(">IIBBBBB", header)
-    assert depth == 8 and colour in (2, 6) and interlace == 0
-    bpp = 3 if colour == 2 else 4
-    raw = zlib.decompress(idat)
-    stride = width * bpp
-    rows: list[bytes] = []
-    prev = bytearray(stride)
-    for y in range(height):
-        kind = raw[y * (stride + 1)]
-        line = bytearray(raw[y * (stride + 1) + 1 : (y + 1) * (stride + 1)])
-        for i in range(stride):
-            a = line[i - bpp] if i >= bpp else 0
-            b = prev[i]
-            c = prev[i - bpp] if i >= bpp else 0
-            if kind == 1:
-                line[i] = (line[i] + a) & 0xFF
-            elif kind == 2:
-                line[i] = (line[i] + b) & 0xFF
-            elif kind == 3:
-                line[i] = (line[i] + (a + b) // 2) & 0xFF
-            elif kind == 4:
-                p = a + b - c
-                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-                pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
-                line[i] = (line[i] + pred) & 0xFF
-        rows.append(bytes(line))
-        prev = line
-    return width, height, bpp, rows
+    """The product's own stdlib decoder (selector_drift/browser/png.py), as the tests see it."""
+    image = png_decode(png)
+    return image.width, image.height, image.channels, image.rows
 
 
 def _region_colours(png: bytes, box: BBox) -> set[tuple[int, int, int]]:
