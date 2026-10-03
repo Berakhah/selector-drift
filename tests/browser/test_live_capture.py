@@ -453,3 +453,99 @@ def test_a_label_raised_to_client_confidential_also_raises_the_pixel_mask() -> N
     )
     assert _magenta(unmasked) > 5_000
     assert _magenta(stored) == 0
+
+
+# -- fix round 3 (a): the mask's pixels are verified after the shot --------------------------
+
+_OVERLAY_ATTACKS = {
+    "mutation-observer-removes-overlay": (
+        "new MutationObserver((ms) => { for (const m of ms) for (const n of m.addedNodes)"
+        " if (n.nodeType === 1 && n.localName.startsWith('x-')) n.remove(); })"
+        ".observe(document, {childList: true, subtree: true})"
+    ),
+    "css-hides-overlay": (
+        "(() => { const s = document.createElement('style');"
+        " s.textContent = 'x-pw-glass{display:none!important}';"
+        " document.head.appendChild(s); })()"
+    ),
+}
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("attack", list(_OVERLAY_ATTACKS))
+def test_a_removed_or_hidden_mask_overlay_refuses_the_capture(attack: str) -> None:
+    html = (
+        '<html><head></head><body style="margin:0"><p>claims</p>'
+        f"<div>{_field()}</div></body></html>"
+    )
+    with pytest.raises(CaptureError, match="did not cover"):
+        _in_thread(lambda: _scenario(html, _OVERLAY_ATTACKS[attack]))
+
+
+_GEOMETRY = {
+    "css-transform": (
+        f'<html><body style="margin:0;padding:40px"><div style="transform:rotate(12deg) '
+        f'scale(1.2);width:320px">{_field()}</div></body></html>'
+    ),
+    "position-fixed-on-long-page": (
+        '<html><body style="margin:0;height:3000px"><div style="position:fixed;bottom:0;'
+        f'left:0">{_field()}</div></body></html>'
+    ),
+    "position-sticky-on-long-page": (
+        '<html><body style="margin:0;height:3000px"><div style="height:200px"></div>'
+        f'<div style="position:sticky;top:0">{_field()}</div></body></html>'
+    ),
+}
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("shape", list(_GEOMETRY))
+def test_unusual_geometry_passes_clean_or_refuses_never_leaks(shape: str) -> None:
+    try:
+        stored, unmasked = _in_thread(lambda: _scenario(_GEOMETRY[shape], None))
+    except CaptureError as refused:
+        print(f"{shape}: refused ({refused})")
+        return
+    print(f"{shape}: magenta unmasked={_magenta(unmasked)} stored={_magenta(stored)}")
+    assert _magenta(unmasked) > 5_000
+    assert _magenta(stored) == 0
+
+
+@pytest.mark.e2e
+def test_a_synthetic_capture_with_a_mask_is_pixel_verified_too() -> None:
+    password = _field('type="password"')
+    html = f'<html><body style="margin:0"><div>{password}</div></body></html>'
+    with pytest.raises(CaptureError, match="did not cover"):
+        _in_thread(
+            lambda: _scenario(html, _OVERLAY_ATTACKS["css-hides-overlay"], Sensitivity.SYNTHETIC)
+        )
+
+
+@pytest.mark.unit
+def test_the_png_decoder_reads_what_it_is_given() -> None:
+    from selector_drift.browser.png import decode
+    from selector_drift.heallog.capture import BLANK_PNG
+
+    image = decode(BLANK_PNG)
+    assert (image.width, image.height) == (1, 1)
+    with pytest.raises(ValueError):
+        decode(b"not a png")
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize(
+    "name", ["open-shadow-root", "closed-shadow-root", "same-origin-iframe", "modal-after-snapshot"]
+)
+def test_pixel_verification_is_not_vacuous(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every scenario's field yields at least one verified box -- the check really ran."""
+    seen: list[int] = []
+    real = LiveCapture._verify_pixels
+
+    def spy(shot: bytes, boxes: list[Any], css_width: float) -> None:
+        seen.append(len(boxes))
+        real(shot, boxes, css_width)
+
+    monkeypatch.setattr(LiveCapture, "_verify_pixels", staticmethod(spy))
+    html, after = SCENARIOS[name]
+    _in_thread(lambda: _scenario(html, after))
+    assert seen and seen[0] >= 1, f"{name}: no box was verified"

@@ -29,17 +29,33 @@ the snapshot string (fix round 1, R4 / S-I1), and it fails closed:
    reply is a CaptureError (fix round 2, N-M2) -- a refusal, never a retryable Playwright
    error. As with a snapshot timeout, a page whose call timed out must not be reused.
 
-PUBLIC and SYNTHETIC captures keep the heuristic floor (step 1 and the step-3 count only),
-per the R4 ruling. Chromium only: without CDP a CLIENT_CONFIDENTIAL capture refuses.
+6. The PIXELS are verified after the shot (fix round 3): Playwright paints its mask as an
+   in-page overlay element, which page script or a stylesheet can remove or hide. Before the
+   shot every marked node's content quads are read over CDP (DOM.getContentQuads, offset by
+   Page.getLayoutMetrics into full-page coordinates); after it the PNG is decoded (stdlib,
+   browser/png.py) and every quad's bounding box, inset by VERIFY_INSET_PX, must be entirely
+   #000000 -- otherwise the capture is refused. A node with no layout box (display:none, a
+   hidden input), a box no larger than the inset, or a box wholly off the page has nothing to
+   verify: it painted nothing there. A geometry mismatch (an element that moves during the
+   full-page capture) can only cause a false refusal, never a pass with colour in the box.
+   This applies to every CLIENT_CONFIDENTIAL capture and to any capture with a non-empty mask.
+   Verification is the control; Playwright's mask is not replaced by self-painting.
+7. Marking and clearing are one CDP call per node, so each pass also has an overall deadline
+   (PASS_DEADLINE_S); clearing reuses the mark list rather than re-reading the tree.
+
+PUBLIC and SYNTHETIC captures keep the heuristic floor (step 1 and the step-3 count), per the
+R4 ruling, plus step 6 whenever they mask anything. Chromium only: without CDP a capture that
+must be verified refuses.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import secrets
 from collections import Counter
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Coroutine
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -47,6 +63,7 @@ from bok_core.boundary.sensitivity import Sensitivity
 from playwright.async_api import CDPSession, Locator, Page
 from playwright.async_api import Error as PlaywrightError
 
+from selector_drift.browser import png
 from selector_drift.browser.driver import PageHandle, _playwright_page
 from selector_drift.browser.page_source import MAX_SNAPSHOT_NODES
 from selector_drift.heallog.capture import NODE_ATTR, NODE_ID_RE, BBox, CaptureError, raised
@@ -59,6 +76,12 @@ LIVE_MAX_NODES = MAX_SNAPSHOT_NODES
 # Elements one capture may mark (form controls + whole-masked containers + ids).
 MAX_LIVE_MARKS = 10_000
 MASK_ATTR = "data-sd-mask"
+# Overall bound on a mark or clear pass (one CDP call per node, up to MAX_LIVE_MARKS).
+PASS_DEADLINE_S = 60
+# Pixels trimmed from each side of a box before it must be black (anti-aliased edges).
+VERIFY_INSET_PX = 2
+
+Box = tuple[float, float, float, float]  # x0, y0, x1, y1 in full-page CSS px
 
 _BOX_JS = """(args) => {
   const el = document.querySelector(`[${args.attr}="${CSS.escape(args.id)}"]`);
@@ -94,6 +117,13 @@ async def _bounded[T](call: Awaitable[T], what: str) -> T:
         return await asyncio.wait_for(call, CALL_TIMEOUT_S)
     except TimeoutError:
         raise CaptureError(f"{what} timed out after {CALL_TIMEOUT_S}s; refusing") from None
+
+
+async def _deadline[T](call: Coroutine[Any, Any, T], what: str) -> T:
+    try:
+        return await asyncio.wait_for(call, PASS_DEADLINE_S)
+    except TimeoutError:
+        raise CaptureError(f"{what} exceeded {PASS_DEADLINE_S}s; refusing") from None
 
 
 def _stale(count: int) -> CaptureError:
@@ -187,6 +217,15 @@ class _Cdp:
             raise CaptureError(f"CDP {method} returned a malformed reply; refusing")
         return reply
 
+    async def optional(self, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
+        """Like send(), but a protocol error is None -- for DOM.getContentQuads, which errors
+        on a node with no layout box. A timeout is still a refusal."""
+        try:
+            reply = await _bounded(self._session.send(method, params), method)
+        except PlaywrightError:
+            return None
+        return reply if isinstance(reply, dict) else None
+
     async def tree(self) -> dict[str, Any]:
         """The pierced document -- after the light-DOM count is checked, so an oversized page
         is refused before its whole tree is transferred."""
@@ -260,38 +299,112 @@ class LiveCapture:
             if id_hits[node_id] != 1:
                 raise _stale(id_hits[node_id])
 
-    async def _mark_cc(self, cdp: _Cdp, ids: frozenset[str], nonce: str) -> int:
+    async def _mark_cc(self, cdp: _Cdp, ids: frozenset[str], nonce: str) -> list[int]:
+        """Classify and mark; returns the marked nodes' backend ids (stable across the later
+        DOM.getDocument calls, which invalidate frontend node ids)."""
         marks, id_hits, _ = _classify(await cdp.tree(), ids)
         self._check_ids(ids, id_hits)
         if len(marks) > MAX_LIVE_MARKS:
             raise CaptureError(f"{len(marks)} elements to mask exceeds {MAX_LIVE_MARKS}; refusing")
-        for node in marks:
-            try:
-                node_id = int(node["nodeId"])
-            except (KeyError, TypeError, ValueError):
-                raise CaptureError("CDP returned a malformed node; refusing") from None
-            await cdp.send(
-                "DOM.setAttributeValue", {"nodeId": node_id, "name": MASK_ATTR, "value": nonce}
-            )
-        return len(marks)
+        try:
+            pairs = [(int(n["nodeId"]), int(n["backendNodeId"])) for n in marks]
+        except (KeyError, TypeError, ValueError):
+            raise CaptureError("CDP returned a malformed node; refusing") from None
+
+        async def mark_all() -> None:
+            for node_id, _backend in pairs:
+                await cdp.send(
+                    "DOM.setAttributeValue",
+                    {"nodeId": node_id, "name": MASK_ATTR, "value": nonce},
+                )
+
+        await _deadline(mark_all(), "the mark pass")
+        return [backend for _node, backend in pairs]
 
     async def _unmarked_cc(self, cdp: _Cdp, ids: frozenset[str], nonce: str) -> int:
         marks, id_hits, _ = _classify(await cdp.tree(), ids)
         self._check_ids(ids, id_hits)
         return sum(1 for node in marks if _attrs(node).get(MASK_ATTR) != nonce)
 
-    async def _clear_cc(self, cdp: _Cdp, nonce: str) -> None:
-        stack = [await cdp.tree()]
-        while stack:
-            node = stack.pop()
-            if _attrs(node).get(MASK_ATTR) == nonce:
-                await cdp.send(
-                    "DOM.removeAttribute", {"nodeId": int(node["nodeId"]), "name": MASK_ATTR}
-                )
-            stack.extend(node.get("children") or [])
-            stack.extend(node.get("shadowRoots") or [])
-            if node.get("contentDocument"):
-                stack.append(node["contentDocument"])
+    async def _clear_cc(self, cdp: _Cdp, backend: list[int]) -> None:
+        """Reuses the mark list: no third full-tree transfer."""
+        if not backend:
+            return
+        pushed = await cdp.send("DOM.pushNodesByBackendIdsToFrontend", {"backendNodeIds": backend})
+
+        async def clear_all() -> None:
+            for node_id in pushed.get("nodeIds") or []:
+                if node_id:
+                    await cdp.send(
+                        "DOM.removeAttribute", {"nodeId": int(node_id), "name": MASK_ATTR}
+                    )
+
+        await _deadline(clear_all(), "the clear pass")
+
+    async def _marked_by_selector(self, cdp: _Cdp, nonce: str) -> list[dict[str, int]]:
+        """PUBLIC/SYNTHETIC: the id pass marked in page script; find those nodes over CDP."""
+        try:
+            shallow = await cdp.send("DOM.getDocument", {"depth": 0})
+            root_id = int(shallow["root"]["nodeId"])
+            found = await cdp.send(
+                "DOM.querySelectorAll",
+                {"nodeId": root_id, "selector": f'[{MASK_ATTR}="{nonce}"]'},
+            )
+            return [{"nodeId": int(n)} for n in found["nodeIds"]]
+        except (KeyError, TypeError, ValueError):
+            raise CaptureError("CDP returned a malformed document; refusing") from None
+
+    # -- pixel verification (fix round 3) ------------------------------------------------------
+    @staticmethod
+    async def _boxes(cdp: _Cdp, targets: list[dict[str, int]]) -> tuple[list[Box], float]:
+        """Every marked node's quads as full-page boxes, and the page's CSS width."""
+        try:
+            metrics = await cdp.send("Page.getLayoutMetrics", {})
+            viewport = metrics["cssLayoutViewport"]
+            ox, oy = float(viewport["pageX"]), float(viewport["pageY"])
+            width = max(float(metrics["cssContentSize"]["width"]), float(viewport["clientWidth"]))
+        except (KeyError, TypeError, ValueError):
+            raise CaptureError("CDP returned malformed layout metrics; refusing") from None
+        boxes: list[Box] = []
+        for target in targets:
+            reply = await cdp.optional("DOM.getContentQuads", dict(target))
+            if reply is None:
+                continue  # no layout box: it painted nothing
+            try:
+                for quad in reply.get("quads") or []:
+                    xs = [float(v) for v in quad[0::2]]
+                    ys = [float(v) for v in quad[1::2]]
+                    boxes.append((min(xs) + ox, min(ys) + oy, max(xs) + ox, max(ys) + oy))
+            except (TypeError, ValueError):
+                raise CaptureError("CDP returned a malformed quad; refusing") from None
+        return boxes, width
+
+    @staticmethod
+    def _verify_pixels(shot: bytes, boxes: list[Box], css_width: float) -> None:
+        if not boxes:
+            return
+        try:
+            header = png.decode(shot, rows_needed=0)
+            scale = header.width / css_width if css_width > 0 else 1.0
+            bottom = max(math.ceil(y1 * scale) for _, _, _, y1 in boxes)
+            image = png.decode(shot, rows_needed=min(header.height, bottom + 1))
+        except ValueError:
+            raise CaptureError("the masked screenshot could not be decoded; refusing") from None
+        uncovered = 0
+        for x0, y0, x1, y1 in boxes:
+            left = max(0, math.ceil(x0 * scale) + VERIFY_INSET_PX)
+            top = max(0, math.ceil(y0 * scale) + VERIFY_INSET_PX)
+            right = min(image.width, math.floor(x1 * scale) - VERIFY_INSET_PX)
+            lower = min(len(image.rows), math.floor(y1 * scale) - VERIFY_INSET_PX)
+            if right <= left or lower <= top:
+                continue  # zero-size, inset away, or off the page: nothing to verify
+            if not image.is_black(left, top, right, lower):
+                uncovered += 1
+        if uncovered:
+            raise CaptureError(
+                f"the mask did not cover {uncovered} marked box(es) in the screenshot "
+                "(overlay removed or hidden?); refusing"
+            )
 
     # -- the screenshot ----------------------------------------------------------------------
     def _masks(self, nonce: str) -> list[Locator]:
@@ -322,18 +435,26 @@ class LiveCapture:
         deny_all = raised(self._sensitivity, sensitivity) is Sensitivity.CLIENT_CONFIDENTIAL
         ids = sorted(mask_node_ids)
         nonce = secrets.token_hex(8)
-        cdp = await self._cdp() if deny_all else None
+        # Pixel verification needs CDP whenever anything is masked (and always at CC).
+        cdp = await self._cdp() if deny_all or ids else None
+        backend: list[int] = []
         try:
-            if cdp is not None:
-                marked = await self._mark_cc(cdp, mask_node_ids, nonce)
+            targets: list[dict[str, int]] = []
+            if deny_all and cdp is not None:
+                backend = await self._mark_cc(cdp, mask_node_ids, nonce)
+                marked = len(backend)
+                targets = [{"backendNodeId": b} for b in backend]
             else:
                 await self._id_pass("mark", ids, nonce)
                 marked = len(ids)
+                if cdp is not None:
+                    targets = await self._marked_by_selector(cdp, nonce)
             visible = await self._visible_marks(nonce)
             if visible != marked:
                 raise CaptureError(
                     f"{marked} elements were marked but the mask can see {visible}; refusing"
                 )
+            boxes, css_width = await self._boxes(cdp, targets) if cdp is not None else ([], 0.0)
             try:
                 shot = await self._page.screenshot(
                     full_page=True,
@@ -346,7 +467,7 @@ class LiveCapture:
                 )
             except PlaywrightError:
                 raise CaptureError("the masked screenshot failed; refusing") from None
-            if cdp is not None:
+            if deny_all and cdp is not None:
                 late = await self._unmarked_cc(cdp, mask_node_ids, nonce)
             else:
                 late = await self._id_pass("verify", ids, nonce)
@@ -354,12 +475,13 @@ class LiveCapture:
                 raise CaptureError(
                     f"{late} element(s) needing a mask appeared during the screenshot; refusing"
                 )
+            self._verify_pixels(shot, boxes, css_width)
             return shot
         finally:
             # Removing our marks is housekeeping; the outcome is already decided.
             with contextlib.suppress(CaptureError, PlaywrightError, TimeoutError, KeyError):
-                if cdp is not None:
-                    await asyncio.wait_for(self._clear_cc(cdp, nonce), CALL_TIMEOUT_S)
+                if deny_all and cdp is not None:
+                    await self._clear_cc(cdp, backend)
                 else:
                     await asyncio.wait_for(self._id_pass("clear", ids, nonce), CALL_TIMEOUT_S)
             if cdp is not None:
