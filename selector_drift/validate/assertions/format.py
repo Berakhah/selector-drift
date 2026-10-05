@@ -61,7 +61,7 @@ class FormatAssertion:
                 f"the pattern timed out after {MATCH_TIMEOUT_S * 1000:.0f} ms on "
                 f"{len(timed_out)} value(s); a pattern that backtracks is refused, not waited for",
             )
-        bad = [v for v, r in results if r == "no_match"]
+        bad = [v for v, r in results if r != "match"]  # PASS only on an explicit match
         if bad:
             return self._v(
                 Outcome.FAIL,

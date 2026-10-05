@@ -163,6 +163,13 @@ def test_currency_sanity_refuses_more_decimals_than_the_currency_has():
         {"enum": "Open"},
         {"min": True},
         {"date_after": dt.date(2023, 1, 1)},
+        {"min": None},
+        {"enum": None},
+        {"enum": []},
+        {"date_after": "20261001"},
+        {"date_before": "2026-W39-1"},
+        {"date_after": "2026-10-01", "date_before": "2026-10-01"},
+        {"date_after": "2026-10-02", "date_before": "2026-10-01"},
     ],
 )
 def test_a_malformed_domain_rule_is_refused_when_the_spec_loads(rule):
@@ -269,6 +276,15 @@ def test_cross_field_division_by_zero_and_non_numbers_fail_without_raising():
         "f'{net}' == 1",
         "net == 1j",
         "net == ...",
+        "1 == 1",
+        "1 < 2 and 2 < 3",
+        "not net",
+        "net == 1 or net",
+        "net and tax",
+        "(net < tax) + 1 == 2",
+        "(net < tax) < 2",
+        "-(net < tax) == 1",
+        "net == 0x10",
         "await net",
         "net and",
         "",
@@ -320,8 +336,8 @@ def test_safe_eval_bounds_huge_arithmetic():
     started = time.monotonic()
     assert safe_eval(expr, big) is False
     assert time.monotonic() - started < 1.0
-    with pytest.raises(ArithmeticError):
-        safe_eval("1e999 - 1e999 == 0", {})  # inf - inf: the gate maps this to a FAIL row
+    with pytest.raises(ArithmeticError):  # the gate maps this to a FAIL row
+        safe_eval("net / tax == 1", {"net": Decimal(1), "tax": Decimal(0)})
 
 
 @pytest.mark.unit
@@ -333,3 +349,40 @@ def test_deeply_parenthesised_expressions_are_bounded_not_hung():
         with pytest.raises(UnsafeExpression):
             safe_eval("(" * n + "net" + ")" * n + " == 1", {"net": Decimal(1)})
     assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.unit
+def test_cross_field_float_literal_keeps_its_source_text():
+    assert safe_eval("net == 0.1 + 0.2", {"net": Decimal("0.3")}) is True
+
+
+@pytest.mark.unit
+def test_a_cross_field_check_with_a_short_circuit_cannot_pass_by_it():
+    with pytest.raises(UnsafeExpression):
+        CrossFieldAssertion("net < 0 or net")  # right operand is a number, not a condition
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad", ["20261001", "2026-W39-1", "2026-1-1", "\uff12\uff10\uff12\uff16-10-01"]
+)
+def test_domain_requires_the_exact_iso_date_shape_in_the_page_value(bad):
+    v = DomainAssertion({"date_after": "2000-01-01"}).check(
+        column("filed", [bad]), None, ctx(FILED)
+    )
+    assert v.outcome is Outcome.FAIL and "ISO" in v.reason
+
+
+@pytest.mark.unit
+def test_format_passes_only_on_an_explicit_match(monkeypatch):
+    monkeypatch.setattr(format_mod, "match_value", lambda pattern, value: "weird")
+    v = FormatAssertion(CLAIM).check(column("claim_number", ["AB12345678"]), None, ctx())
+    assert v.outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+def test_an_exponent_literal_is_exact_not_infinity():
+    # float('1e999') is inf, which would make `gross < 1e999` true for any value for the wrong
+    # reason; the Decimal from the source text is the finite number the author wrote.
+    assert safe_eval("net < 1e999", {"net": Decimal(5)}) is True
+    assert safe_eval("net > 1e999", {"net": Decimal(5)}) is False
