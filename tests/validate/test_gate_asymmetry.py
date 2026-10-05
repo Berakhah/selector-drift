@@ -1,3 +1,6 @@
+import copy
+import dataclasses
+
 import pytest
 
 from selector_drift.validate.gate import (
@@ -23,7 +26,10 @@ from tests.validate.helpers import (
     ctx,
 )
 
-CANDIDATE = candidate([{"claim_number": "AB12345678", "amount": "1,200.00"}])
+# gate() judges one field, so its candidate carries one field: a field the gate does not
+# judge may not ride into a ValidatedExtraction (fix round 1, finding 1).
+CANDIDATE = candidate([{"claim_number": "AB12345678"}])
+TWO_FIELDS = candidate([{"claim_number": "AB12345678", "amount": "1,200.00"}])
 
 
 @pytest.mark.unit
@@ -74,7 +80,7 @@ def test_one_failing_field_quarantines_the_whole_run():
     ok = ctx(CLAIM_NUMBER, healed=False, rung=1)
     bad = ctx(AMOUNT, healed=True, rung=3)
     r = gate_run(
-        CANDIDATE,
+        TWO_FIELDS,
         None,
         {"claim_number": ok, "amount": bad},
         {"claim_number": [AlwaysPass()], "amount": [AlwaysInsufficient()]},
@@ -144,7 +150,7 @@ def test_a_cache_hit_runs_every_check_and_a_fail_on_it_still_quarantines():
     # one (Task 22's RowKeyContinuity) still quarantines the whole run.
     passing, failing, insufficient = AlwaysPass(), AlwaysFail("RowKeyStub"), AlwaysInsufficient()
     r = gate_run(
-        CANDIDATE,
+        TWO_FIELDS,
         None,
         {
             "claim_number": ctx(CLAIM_NUMBER, healed=False, rung=1),
@@ -201,3 +207,103 @@ def test_a_context_whose_heal_flag_contradicts_its_rung_is_refused(healed, rung)
 def test_effective_outcome_is_the_whole_policy(outcome, strict, expected):
     v = Verdict(check="X", outcome=outcome, threshold=None, observed=None, reason="r")
     assert _effective(v, strict) is expected
+
+
+# -- fix round 1 -------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_row_field_without_a_context_is_refused_not_minted_unjudged():
+    # Finding 1: the reviewer's probe minted a ValidatedExtraction carrying an unjudged `amount`.
+    with pytest.raises(ValueError, match=r"'amount'.*no context"):
+        gate(TWO_FIELDS, None, ctx(rung=3), [AlwaysPass()])
+
+
+@pytest.mark.unit
+def test_a_field_appearing_only_in_a_later_row_is_still_refused():
+    # Never assume row 0 is a record: a summary row first, the unjudged field after it.
+    rows = candidate([{"claim_number": "AB12345678"}, {"claim_number": "AB00000001", "x": "9"}])
+    with pytest.raises(ValueError, match=r"'x'.*no context"):
+        gate(rows, None, ctx(rung=3), [AlwaysPass()])
+
+
+@pytest.mark.unit
+def test_a_traced_field_without_a_context_is_refused():
+    traced = dataclasses.replace(CANDIDATE, trace={"amount": object()})  # type: ignore[dict-item]
+    with pytest.raises(ValueError, match=r"'amount'.*no context"):
+        gate(traced, None, ctx(rung=3), [AlwaysPass()])
+
+
+@pytest.mark.unit
+def test_checks_for_a_field_with_no_context_are_refused_not_ignored():
+    with pytest.raises(ValueError, match=r"checks for 'amount' have no context"):
+        gate_run(
+            CANDIDATE,
+            None,
+            {"claim_number": ctx(rung=3)},
+            {"claim_number": [AlwaysPass()], "amount": [AlwaysFail()]},
+        )
+
+
+@pytest.mark.unit
+def test_a_context_filed_under_another_fields_name_is_refused():
+    # Minor 2: contexts["amount"] judging claim_number's target would stamp the wrong field.
+    with pytest.raises(ValueError, match="target"):
+        gate_run(
+            TWO_FIELDS,
+            None,
+            {"claim_number": ctx(CLAIM_NUMBER, rung=3), "amount": ctx(CLAIM_NUMBER, rung=3)},
+            {"claim_number": [AlwaysPass()], "amount": [AlwaysPass()]},
+        )
+
+
+class _ReturnsNone:
+    name = "ReturnsNone"
+
+    def check(self, candidate, history, ctx):
+        return None
+
+
+class _NamelessRaises:
+    def check(self, candidate, history, ctx):
+        raise RuntimeError("boom")
+
+
+class _BadName:
+    name = ""
+
+    def check(self, candidate, history, ctx):
+        return True
+
+
+@pytest.mark.unit
+def test_a_check_that_returns_a_non_verdict_is_a_failure_not_a_pass():
+    # Minor 3: None (or a bare boolean) is not a verdict; it must never crash or pass.
+    r = gate(CANDIDATE, None, ctx(healed=False, rung=1), [_ReturnsNone()])
+    assert isinstance(r, QuarantinedRun)
+    (v,) = r.verdicts
+    assert v.check == "ReturnsNone" and v.outcome is Outcome.FAIL and v.observed == "NoneType"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("check", "name"), [(_NamelessRaises(), "_NamelessRaises"), (_BadName(), "_BadName")]
+)
+def test_a_check_without_a_usable_name_is_still_judged_a_failure(check, name):
+    r = gate(CANDIDATE, None, ctx(healed=False, rung=1), [check])
+    assert isinstance(r, QuarantinedRun)
+    (v,) = r.verdicts
+    assert v.check == name and v.outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+def test_a_validated_extraction_cannot_be_copied_or_replaced_into_a_new_one():
+    # Minor 1: replace() re-passes the real token; it must still not mint outside gate_run.
+    v = gate(CANDIDATE, None, ctx(rung=3), [AlwaysPass()])
+    assert isinstance(v, ValidatedExtraction)
+    with pytest.raises(TypeError, match=r"minted only by validate\.gate"):
+        dataclasses.replace(v, verdicts=())
+    with pytest.raises(TypeError, match=r"minted only by validate\.gate"):
+        copy.copy(v)
+    with pytest.raises(TypeError, match=r"minted only by validate\.gate"):
+        copy.deepcopy(v)
