@@ -11,6 +11,8 @@
 | Zero bins | `ε = 1e-6` added to both proportions | `ln(0)` is `-inf`; PSI would silently become `inf` and quarantine everything |
 | Categorical fields | category proportions over the union of categories, no binning | a reference of text values selects this path |
 | Threshold | **0.20** | the conventional "significant shift" line; stated in every verdict |
+| Noise floor | breach needs PSI > max(0.20, critical); critical = χ²₍ₖ₋₁₎(1 − α) · (1/n_current + 1/n_reference), **α = 0.01** (`ALPHA`), k = bins (or categories) populated in the reference or the current run; k < 2 is INSUFFICIENT | under the null PSI ≈ χ²₍ₖ₋₁₎ · (1/n_c + 1/n_r): over a small page, 0.20 is sampling noise. χ² quantile: exact for df 1–2, Wilson–Hilferty otherwise (stdlib, no scipy); stated in every verdict |
+| Numeric or categorical | numeric when **≥ 95%** of the reference parses (`NUMERIC_PARSE_FLOOR`); the rest, on either side, go to the unparseable bin | one accepted `N/A` must not turn every amount into its own category |
 | Which fields | `FieldTarget.distributional` (Task 5), default `False` | PSI over an identifier column is noise |
 | Persistence | **2** consecutive breaching runs before alerting (steady state only) | B7 |
 

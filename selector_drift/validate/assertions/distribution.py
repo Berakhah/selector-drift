@@ -1,6 +1,9 @@
 """PSI with a documented threshold, per-target warm-up, and persistence for ALERTING only
 (design 5.7, M16/M17/M18). The statistic itself is validate/stats.py, shared with Task 29.
 
+A breach is PSI over max(threshold, critical), where critical is the chi-square noise floor
+(validate/stats.critical_psi at `alpha`): over a small sample, PSI over 0.20 is sampling noise.
+
 - Healed: a single-run breach is FAIL; no breach is PASS. No alert.
 - Steady state (cache hit): always PASS -- a cache hit's distribution is not a write gate (5.7).
   An alert only when the breach persists `persistence` runs and the client has not marked it
@@ -20,10 +23,12 @@ from selector_drift.extract.models import CandidateExtraction
 from selector_drift.validate.assertions.base import column
 from selector_drift.validate.history import History
 from selector_drift.validate.stats import (
+    ALPHA,
     PSI_BINS,
     PSI_EPSILON,
-    floats,
-    psi_of_values,
+    critical_psi,
+    numeric_reference,
+    psi_result,
     quantile_edges,
 )
 from selector_drift.validate.verdict import Outcome, Verdict
@@ -36,6 +41,7 @@ REFERENCE_RUNS: Final = 30
 # The brief is silent on tiny samples. Task 22's precedent (MIN_JOINED = 10): a handful of
 # values is not evidence either way, so below this on EITHER side the check has no basis.
 MIN_VALUES: Final = 10
+__all__ = ["ALPHA", "MIN_VALUES", "REFERENCE_RUNS", "Assessment", "DistributionalAssertion"]
 
 
 @dataclass(frozen=True)
@@ -44,7 +50,8 @@ class Assessment:
     reference_n: int
     current_n: int
     categorical: bool
-    breach: bool  # PSI over threshold on THIS run -- Task 29 records every breach
+    critical: float  # the chi-square noise floor for this run's k and n (stats.critical_psi)
+    breach: bool  # PSI over max(threshold, critical) on THIS run -- Task 29 records every breach
     prior_breaches: int  # consecutive trailing accepted runs that breached
     suppressed: bool  # the client marked this field's shift expected on the last run
     alert: bool  # breach, persisted, not suppressed -- Task 29 notifies on this
@@ -60,6 +67,7 @@ class DistributionalAssertion:
         persistence: int = 2,
         bins: int = PSI_BINS,
         epsilon: float = PSI_EPSILON,
+        alpha: float = ALPHA,
     ) -> None:
         # NaN compares False against everything: a NaN threshold would never breach, a NaN
         # epsilon would make every PSI NaN. Both disable the check, so both are refused.
@@ -71,10 +79,12 @@ class DistributionalAssertion:
             or bins < 2
             or not math.isfinite(epsilon)
             or epsilon <= 0
+            or not 0.0 < alpha < 1.0  # NaN fails this too
+            or not 1.0 - alpha < 1.0  # an alpha so small that 1 - alpha rounds to 1
         ):
             raise ValueError("these parameters would disable the check, not tune it")
         self.threshold, self.warmup_runs, self.persistence = threshold, warmup_runs, persistence
-        self.bins, self.epsilon = bins, epsilon
+        self.bins, self.epsilon, self.alpha = bins, epsilon, alpha
 
     @classmethod
     def for_target(cls, target: AuthorisedTarget) -> DistributionalAssertion:
@@ -87,7 +97,7 @@ class DistributionalAssertion:
     def bin_edges_for(self, history: History, field: str) -> tuple[float, ...]:
         """Quantile edges from the reference window ONLY. The current run is not an input.
         Empty for a text field (the categorical path has no edges)."""
-        ref = floats(history.trailing(REFERENCE_RUNS).values(field))
+        ref = numeric_reference(history.trailing(REFERENCE_RUNS).values(field))
         return quantile_edges(ref, self.bins) if ref else ()
 
     def assess(
@@ -113,8 +123,14 @@ class DistributionalAssertion:
                 f"{len(current)} {field} values were extracted, fewer than {MIN_VALUES}: "
                 "too few to be evidence"
             )
-        score, categorical = psi_of_values(reference, current, bins=self.bins, epsilon=self.epsilon)
-        breach = score > self.threshold
+        r = psi_result(reference, current, bins=self.bins, epsilon=self.epsilon)
+        if r.k < 2:
+            return (
+                f"every {field} value, reference and current, falls in one "
+                f"{'category' if r.categorical else 'bin'}: nothing to compare"
+            )
+        critical = critical_psi(r.k, r.reference_n, r.current_n, self.alpha)
+        breach = r.psi > max(self.threshold, critical)
         prior = 0
         for run in reversed(history.runs):
             if field not in run.shift_alerts:
@@ -123,10 +139,11 @@ class DistributionalAssertion:
         previous = history.previous()
         suppressed = previous is not None and field in previous.marked_expected
         return Assessment(
-            psi=score,
-            reference_n=len(reference),
-            current_n=len(current),
-            categorical=categorical,
+            psi=r.psi,
+            reference_n=r.reference_n,
+            current_n=r.current_n,
+            categorical=r.categorical,
+            critical=critical,
             breach=breach,
             prior_breaches=prior,
             suppressed=suppressed,
@@ -153,7 +170,9 @@ class DistributionalAssertion:
         )
         basis = (
             f"PSI {a.psi:.4f} over {how} the trailing {REFERENCE_RUNS} accepted runs "
-            f"(n={a.reference_n} reference, {a.current_n} current)"
+            f"(n={a.reference_n} reference, {a.current_n} current); threshold "
+            f"{self.threshold:.2f}, critical {a.critical:.4f} (chi-square noise floor at alpha "
+            f"{self.alpha:g}); a breach needs PSI over the larger"
         )
         observed = f"{a.psi:.4f}"
         if ctx.healed:
@@ -163,7 +182,7 @@ class DistributionalAssertion:
                     outcome=Outcome.FAIL,
                     threshold=self.threshold_text,
                     observed=observed,
-                    reason=f"{basis} exceeds the threshold on the run the selector healed: a "
+                    reason=f"{basis} breaches on the run the selector healed: a "
                     "heal into a shifted distribution blocks on one run (M17)",
                 )
             return Verdict(
