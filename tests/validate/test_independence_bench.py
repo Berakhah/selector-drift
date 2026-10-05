@@ -14,6 +14,7 @@ cell at the column index Amount held before the mutation. Every confirmer is rea
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 import pytest
 from lxml import html as lh
@@ -38,6 +39,7 @@ from selector_drift.validate.gate import (
 )
 from selector_drift.validate.history import AcceptedRun, History
 from selector_drift.validate.verdict import Confirmation, Outcome
+from testbench.mutations.adversarial.decoy_column import DECOY_LABELS
 from testbench.portal.render import render_results
 from tests.resolve.conftest import AMOUNT, CLAIM_NUMBER, RESERVE, BenchPage
 from tests.testbench.helpers import FIXTURE_DAY
@@ -67,6 +69,10 @@ class StaleColumnRung:
             anchor=AnchorEvidence(header_text=None),
             rung_id=self.rung_id,
         )
+
+
+def _money(text: str) -> Decimal:
+    return Decimal(text.strip().replace(",", ""))
 
 
 def _bench() -> BenchPage:
@@ -132,7 +138,13 @@ def test_real_text_rungs_refuse_a_positional_heal_onto_the_bench_decoy_column() 
     page = _bench().mutated("DecoyColumn")
     stale = StaleColumnRung(AMOUNT_COLUMN_BEFORE)
     landed = stale.resolve(page.source(), AMOUNT)
-    assert landed is not None and landed.node_id not in page.truth("amount")  # it IS the decoy
+    assert landed is not None and landed.node_id not in page.truth("amount")
+    # It IS the decoy column: its header is a decoy label, and every value sits below the
+    # same record's real amount (DecoyColumn draws 80-97% of it).
+    header = _text(page, f"/html/body/main/table/thead/tr/th[{AMOUNT_COLUMN_BEFORE}]").strip()
+    assert header in DECOY_LABELS
+    for decoy, real in zip(_rows(page, AMOUNT_COLUMN_BEFORE), _rows(page), strict=True):
+        assert _money(decoy["amount"]) < _money(real["amount"])
 
     v = IndependentRungAgreement([AxTreeRung(), AnchorRung(), stale]).check(
         candidate(_rows(page, AMOUNT_COLUMN_BEFORE)), _history(), _amount_heal(page, 4)
