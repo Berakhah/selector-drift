@@ -28,6 +28,9 @@ COLLAPSE_FLOOR: Final = 0.50
 """Steady-state agreement below this is a collapse, not churn: FAIL even on a cache hit
 (decided 2026-09-26, ledger #32 -- it is what catches ValueSwap under unchanged markup).
 A published methodology number (Task 40), not a tunable."""
+MIN_JOINED: Final = 10
+"""Fewer joined cells than this is no basis for continuity either way: one coincidental match
+is not a confirmation, and one legitimate change among two rows is not a collapse (fix round 1)."""
 
 
 def _norm(value: object) -> str:
@@ -55,13 +58,21 @@ class RowKeyContinuity:
 
     name = "RowKeyContinuity"
 
-    def __init__(self, threshold: float = 0.95, collapse_floor: float = COLLAPSE_FLOOR) -> None:
+    def __init__(
+        self,
+        threshold: float = 0.95,
+        collapse_floor: float = COLLAPSE_FLOOR,
+        min_joined: int = MIN_JOINED,
+    ) -> None:
+        if min_joined < 1:
+            raise ValueError("min_joined must be at least 1")
         if not 0.0 < threshold <= 1.0:
             raise ValueError("threshold must be in (0, 1]")
         if not 0.0 < collapse_floor < threshold:
             raise ValueError("collapse_floor must be in (0, threshold)")
         self.threshold = threshold
         self.collapse_floor = collapse_floor
+        self.min_joined = min_joined
 
     @property
     def threshold_text(self) -> str:
@@ -126,6 +137,15 @@ class RowKeyContinuity:
                 f"no natural keys in common with {previous.run_key} (joined on {joined}), so "
                 "continuity has no basis",
             )
+        if compared < self.min_joined:
+            # No rate is reported: a rate over this few cells is noise, and an observed rate is
+            # what continuity_alert reads (fix round 1).
+            return self._v(
+                Outcome.INSUFFICIENT,
+                None,
+                f"only {compared} joined cells with {previous.run_key} (joined on {joined}); "
+                f"continuity needs at least {self.min_joined}, so it has no basis either way",
+            )
         what = "the fields that co-vary with it" if field in previous.natural_key else field
         detail = (
             f"{what} agree with {previous.run_key} on {rate:.1%} of {compared} joined cells "
@@ -184,6 +204,13 @@ class IndependentRungAgreement:
 
     def __init__(self, rungs: Sequence[Rung], value: RowKeyContinuity | None = None) -> None:
         self.rungs = tuple(rungs)
+        ids = [r.rung_id for r in self.rungs]
+        duplicated = sorted({i for i in ids if ids.count(i) > 1})
+        if duplicated:
+            raise ValueError(
+                "each rung may be injected once; duplicated: "
+                + ", ".join(f"rung {i}" for i in duplicated)
+            )
         self.value = value if value is not None else RowKeyContinuity()
 
     def _v(
@@ -208,9 +235,13 @@ class IndependentRungAgreement:
             return "no page snapshot to re-resolve against"
         healer = next((r for r in self.rungs if r.rung_id == ctx.winning_rung), None)
         if healer is None:
-            return (
-                f"rung {ctx.winning_rung} healed but is not among the injected rungs, so its "
-                "node cannot be re-derived"
+            # A wiring fault, not an absence of evidence: never let values paper over it
+            # (fix round 1, M2).
+            return self._v(
+                Outcome.INSUFFICIENT,
+                None,
+                f"no DOM evidence: the healing rung was not injected (rung {ctx.winning_rung}), "
+                "so its node cannot be re-derived and the heal is not confirmed",
             )
         if healer.family not in _DOM_FAMILIES:
             return (
