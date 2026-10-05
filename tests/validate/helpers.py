@@ -12,9 +12,10 @@ from bok_core.provenance.source import DomSource
 from selector_drift.extract.models import CandidateExtraction
 from selector_drift.resolve.cache import CachedSelector
 from selector_drift.resolve.page import PageSource, StaticPageSource
+from selector_drift.resolve.trace import AnchorEvidence, Family, ResolvedElement
 from selector_drift.spec.schema import FieldTarget
 from selector_drift.validate.gate import HealContext
-from selector_drift.validate.history import History
+from selector_drift.validate.history import AcceptedRun, History
 from selector_drift.validate.verdict import Outcome, Verdict
 
 AT = dt.datetime(2026, 10, 1, 4, 12, tzinfo=dt.UTC)  # fixed: never the wall clock (M20)
@@ -150,3 +151,90 @@ class Raises:
         self, candidate: CandidateExtraction, history: History | None, ctx: HealContext
     ) -> Verdict:
         raise RuntimeError("boom")
+
+
+# -- Task 22: rung doubles and the row-key fixtures -------------------------------------------
+
+
+class FakeRung:
+    """Satisfies the Rung protocol. validate/ is tested against the protocol only; the real
+    rungs against real mutated pages are in test_independence_bench.py and Task 26's suites."""
+
+    def __init__(
+        self, rung_id: int, family: Family, node_id: str | None, *, selector: str | None = None
+    ) -> None:
+        self.rung_id, self.family, self.node_id = rung_id, family, node_id
+        self.selector = selector or f"#from-rung-{rung_id}"
+        self.calls = 0
+
+    def resolve(self, page: PageSource, target: FieldTarget) -> ResolvedElement | None:
+        self.calls += 1
+        if self.node_id is None:
+            return None
+        return ResolvedElement(
+            selector=self.selector,
+            node_id=self.node_id,
+            anchor=AnchorEvidence(accessible_name=None, label_text=None, header_text=None),
+            rung_id=self.rung_id,
+        )
+
+
+def ax(node: str | None, **kw: str) -> FakeRung:
+    return FakeRung(2, Family.TEXT_SEMANTIC, node, **kw)
+
+
+def anchors(node: str | None, **kw: str) -> FakeRung:
+    return FakeRung(3, Family.TEXT_SEMANTIC, node, **kw)
+
+
+def heuristic(node: str | None, **kw: str) -> FakeRung:
+    return FakeRung(4, Family.STRUCTURAL, node, **kw)
+
+
+AMOUNT_CELL = "/html/body/table/tr[2]/td[3]"
+PRIOR_AMOUNT_CELL = "/html/body/table/tr[2]/td[4]"
+
+BASE_ROWS = [
+    {
+        "claim_number": f"AB{i:08d}",
+        "amount": f"{1000 + 37 * i:,.2f}",
+        "reserve": f"{200 + 11 * i:,.2f}",
+        "prior_amount": f"{900 + 53 * i:,.2f}",
+    }
+    for i in range(1, 21)
+]
+SPEC_FIELDS = ("claim_number", "amount", "reserve")
+
+
+def _spec_row(r: Mapping[str, str]) -> dict[str, str]:
+    return {k: r[k] for k in SPEC_FIELDS}
+
+
+def previous_history() -> History:
+    return History(
+        runs=(
+            AcceptedRun(
+                run_key="testbench:2:2026-09-30",
+                window=dt.date(2026, 9, 30),
+                rows=tuple(_spec_row(r) for r in BASE_ROWS),
+                natural_key=("claim_number",),
+            ),
+        )
+    )
+
+
+UNCHANGED = candidate([_spec_row(r) for r in BASE_ROWS])  # reword / reorder: same data
+DECOY = candidate([_spec_row(r) | {"amount": r["prior_amount"]} for r in BASE_ROWS])
+SWAPPED = candidate(
+    [_spec_row(r) | {"amount": r["reserve"], "reserve": r["amount"]} for r in BASE_ROWS]
+)
+FOREIGN_KEYS = candidate(
+    [_spec_row(r) | {"claim_number": f"ZZ{i:08d}"} for i, r in enumerate(BASE_ROWS)]
+)
+# Ordinary overnight churn: 2 of 20 amounts change (agreement 0.90 -- above the collapse floor).
+CHURNED = candidate(
+    [
+        _spec_row(r) | ({"amount": "9,999.99"} if i % 10 == 0 else {})
+        for i, r in enumerate(BASE_ROWS)
+    ]
+)
