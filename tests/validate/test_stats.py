@@ -10,11 +10,11 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from selector_drift.validate.stats import (
+    JEFFREYS,
     NUMERIC_PARSE_FLOOR,
     PSI_BINS,
-    PSI_EPSILON,
-    binned,
-    category_proportions,
+    bin_counts,
+    category_counts,
     chi2_quantile,
     critical_psi,
     floats,
@@ -23,6 +23,7 @@ from selector_drift.validate.stats import (
     psi_of_values,
     psi_result,
     quantile_edges,
+    smoothed,
 )
 
 
@@ -34,7 +35,7 @@ def test_psi_of_a_distribution_against_itself_is_zero() -> None:
 
 @pytest.mark.unit
 def test_psi_is_finite_when_a_bin_is_empty() -> None:
-    # M16: without epsilon, log(0) makes PSI infinite and every run a breach.
+    # M16: without smoothing, log(0) makes PSI infinite and every run a breach.
     reference = [str(i) for i in range(100)]
     assert math.isfinite(psi_of_values(reference, ["5000"] * 10)[0])
 
@@ -54,7 +55,7 @@ def test_unparseable_current_values_land_in_their_own_bin() -> None:
 
 @pytest.mark.unit
 def test_the_published_constants() -> None:
-    assert PSI_BINS == 10 and PSI_EPSILON == 1e-6
+    assert PSI_BINS == 10 and JEFFREYS == 0.5
 
 
 @pytest.mark.unit
@@ -80,30 +81,58 @@ def test_quantile_edges_ignore_non_finite_reference_values() -> None:
 
 
 @pytest.mark.unit
-def test_binned_adds_the_unparseable_bin_last_and_sums_to_one() -> None:
-    p = binned([1.0, 5.0, 9.0], (2.0, 6.0), unparseable=1)
-    assert p.tolist() == [0.25, 0.25, 0.25, 0.25]
+def test_bin_counts_add_the_unparseable_bin_last() -> None:
+    assert bin_counts([1.0, 5.0, 9.0], (2.0, 6.0), unparseable=1).tolist() == [1, 1, 1, 1]
     # A value equal to an edge falls in the lower bin (side="left").
-    assert binned([2.0], (2.0, 6.0), unparseable=0).tolist() == [1.0, 0.0, 0.0, 0.0]
+    assert bin_counts([2.0], (2.0, 6.0), unparseable=0).tolist() == [1, 0, 0, 0]
 
 
 @pytest.mark.unit
-def test_binned_counts_non_finite_values_as_unparseable() -> None:
-    p = binned([math.nan, math.inf, -math.inf, 1.0], (2.0,), unparseable=0)
-    assert p.tolist() == [0.25, 0.0, 0.75]
+def test_bin_counts_count_non_finite_values_as_unparseable() -> None:
+    c = bin_counts([math.nan, math.inf, -math.inf, 1.0], (2.0,), unparseable=0)
+    assert c.tolist() == [1, 0, 3]
 
 
 @pytest.mark.unit
-def test_binned_refuses_an_empty_sample() -> None:
+def test_bin_counts_refuse_an_empty_sample() -> None:
     with pytest.raises(ValueError):
-        binned([], (2.0,), unparseable=0)
+        bin_counts([], (2.0,), unparseable=0)
 
 
 @pytest.mark.unit
-def test_category_proportions_cover_the_union_of_categories() -> None:
-    r, c = category_proportions(["a", "a", "b"], ["c"])
-    assert r.tolist() == pytest.approx([2 / 3, 1 / 3, 0.0])
-    assert c.tolist() == [0.0, 0.0, 1.0]
+def test_category_counts_cover_the_union_of_categories() -> None:
+    r, c = category_counts(["a", "a", "b"], ["c"])
+    assert r.tolist() == [2, 1, 0] and c.tolist() == [0, 0, 1]
+
+
+@pytest.mark.unit
+def test_smoothing_adds_half_a_count_to_every_bin_either_side_populates() -> None:
+    r, c = smoothed(np.array([2.0, 1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0, 0.0]))
+    # The last bin is empty on BOTH sides: it carries no information and is dropped.
+    assert r.tolist() == pytest.approx([2.5 / 4.5, 1.5 / 4.5, 0.5 / 4.5])
+    assert c.tolist() == pytest.approx([0.5 / 2.5, 0.5 / 2.5, 1.5 / 2.5])
+
+
+@pytest.mark.unit
+def test_smoothing_keeps_equal_proportions_equal_whatever_the_sample_sizes() -> None:
+    r, c = smoothed(np.array([60.0, 60.0, 0.0]), np.array([10.0, 10.0, 0.0]))
+    assert r.tolist() == c.tolist() == [0.5, 0.5]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("r", "c"),
+    [
+        ([0.0, 0.0], [1.0, 1.0]),
+        ([1.0, -1.0], [1.0, 1.0]),
+        ([1.0, math.nan], [1.0, 1.0]),
+        ([1.0], [1.0, 1.0]),
+    ],
+    ids=["empty-side", "negative", "nan", "shape"],
+)
+def test_smoothing_refuses_counts_that_are_not_counts(r: list[float], c: list[float]) -> None:
+    with pytest.raises(ValueError):
+        smoothed(np.array(r), np.array(c))
 
 
 @pytest.mark.unit
@@ -115,17 +144,10 @@ def test_psi_of_values_refuses_empty_inputs() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("epsilon", [0.0, -1e-6, math.nan, math.inf])
-def test_psi_refuses_an_epsilon_that_would_disable_the_guard(epsilon: float) -> None:
-    with pytest.raises(ValueError):
-        psi(np.array([0.5, 0.5]), np.array([1.0, 0.0]), epsilon)
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize(
     "bad",
-    [[math.nan, 1.0], [math.inf, 0.0], [-0.5, 1.5]],
-    ids=["nan", "inf", "negative"],
+    [[math.nan, 1.0], [math.inf, 0.0], [-0.5, 1.5], [0.0, 1.0]],
+    ids=["nan", "inf", "negative", "zero"],
 )
 def test_psi_refuses_proportions_that_are_not_proportions(bad: list[float]) -> None:
     with pytest.raises(ValueError):
@@ -143,10 +165,10 @@ def test_psi_refuses_mismatched_bins() -> None:
 # -- properties ---------------------------------------------------------------------------------
 
 _proportions = st.lists(
-    st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False),
+    st.floats(min_value=1e-9, max_value=1e6, allow_nan=False, allow_infinity=False),
     min_size=2,
     max_size=12,
-).filter(lambda xs: sum(xs) > 0)
+)
 
 
 def _normalise(xs: list[float]) -> np.ndarray:  # type: ignore[type-arg]
@@ -169,10 +191,10 @@ def test_property_psi_is_symmetric_non_negative_and_finite(data: st.DataObject) 
     xs = data.draw(_proportions)
     ys = data.draw(
         st.lists(
-            st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False),
+            st.floats(min_value=1e-9, max_value=1e6, allow_nan=False, allow_infinity=False),
             min_size=len(xs),
             max_size=len(xs),
-        ).filter(lambda v: sum(v) > 0)
+        )
     )
     p, q = _normalise(xs), _normalise(ys)
     forward, backward = psi(p, q), psi(q, p)
@@ -180,15 +202,43 @@ def test_property_psi_is_symmetric_non_negative_and_finite(data: st.DataObject) 
     assert forward == pytest.approx(backward, rel=1e-9, abs=1e-12)
 
 
+_counts = st.lists(st.integers(min_value=0, max_value=10_000), min_size=1, max_size=12)
+
+
 @pytest.mark.unit
-@settings(max_examples=100, deadline=None)
-@given(st.integers(min_value=2, max_value=20), st.integers(min_value=0, max_value=19))
-def test_property_epsilon_keeps_every_empty_bin_finite(k: int, hot: int) -> None:
+@settings(max_examples=200, deadline=None)
+@given(_counts.filter(lambda xs: sum(xs) > 0))
+def test_property_identical_counts_score_zero(xs: list[int]) -> None:
+    counts = np.asarray(xs, dtype=np.float64)
+    r, c = smoothed(counts, counts)
+    assert psi(r, c) == pytest.approx(0.0, abs=1e-12)
+
+
+@pytest.mark.unit
+@settings(max_examples=200, deadline=None)
+@given(_counts.filter(lambda xs: sum(xs) >= 100 * len(xs)), st.integers(min_value=2, max_value=50))
+def test_property_proportional_counts_score_about_zero(xs: list[int], m: int) -> None:
+    # The same distribution at a different sample size: smoothing may move it, but barely.
+    counts = np.asarray(xs, dtype=np.float64)
+    r, c = smoothed(counts * m, counts)
+    assert psi(r, c) < 0.05
+
+
+@pytest.mark.unit
+@settings(max_examples=200, deadline=None)
+@given(
+    st.integers(min_value=2, max_value=20),
+    st.integers(min_value=0, max_value=19),
+    st.integers(min_value=1, max_value=10_000),
+    st.integers(min_value=1, max_value=10_000),
+)
+def test_property_smoothing_keeps_every_empty_bin_finite(k: int, hot: int, a: int, b: int) -> None:
     # All mass in one bin on one side and in a different bin on the other: every ln() term
-    # would be ln(0) or ln(x/0) without epsilon.
-    p, q = np.zeros(k), np.zeros(k)
-    p[hot % k], q[(hot + 1) % k] = 1.0, 1.0
-    assert math.isfinite(psi(p, q)) and psi(p, q) > 0.20
+    # would be ln(0) or ln(x/0) without smoothing.
+    r, c = np.zeros(k), np.zeros(k)
+    r[hot % k], c[(hot + 1) % k] = float(a), float(b)
+    score = psi(*smoothed(r, c))
+    assert math.isfinite(score) and score > 0
 
 
 _hostile_float = st.one_of(
@@ -208,7 +258,7 @@ def test_property_nan_and_inf_values_never_produce_a_nan_psi(
 ) -> None:
     edges = quantile_edges(reference)
     assert all(math.isfinite(e) for e in edges)
-    score = psi(binned(reference, edges, 0), binned(current, edges, 0))
+    score = psi(*smoothed(bin_counts(reference, edges, 0), bin_counts(current, edges, 0)))
     assert math.isfinite(score)
 
 
