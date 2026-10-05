@@ -29,6 +29,7 @@ from tests.validate.helpers import (
     amount_history,
     column,
     ctx,
+    field_target,
     grid,
     history_of,
 )
@@ -147,7 +148,7 @@ def test_marking_a_shift_expected_does_not_unblock_a_heal() -> None:
 
 @pytest.mark.unit
 def test_a_bin_with_no_observations_does_not_return_infinity() -> None:
-    # M16. PSI is undefined at log(0). Without epsilon this silently returns inf,
+    # M16. PSI is undefined at log(0). Without smoothing this silently returns inf,
     # which compares greater than every threshold and quarantines everything.
     v = DA.check(LOW_BAND, amount_history(40), HEALED)
     assert math.isfinite(float(v.observed or "nan")) and v.outcome is Outcome.FAIL
@@ -252,8 +253,14 @@ def test_a_tiny_current_sample_is_not_evidence() -> None:
     few = column("amount", grid(101, 9, n=MIN_VALUES - 1))
     v = DA.check(few, amount_history(40), HEALED)
     assert v.outcome is Outcome.INSUFFICIENT and f"fewer than {MIN_VALUES}" in v.reason
+    # At MIN_VALUES the check judges (not INSUFFICIENT). With Jeffreys smoothing and the
+    # chi-square floor, ten values all above the reference range score PSI ~1.83 against a
+    # critical ~2.18 -- not yet a breach; twenty are (fix round 2: the measured power at small n).
     enough = column("amount", grid(5000, 9, n=MIN_VALUES))
-    assert DA.check(enough, amount_history(40), HEALED).outcome is Outcome.FAIL
+    v = DA.check(enough, amount_history(40), HEALED)
+    assert v.outcome is not Outcome.INSUFFICIENT and v.observed is not None
+    twenty = column("amount", grid(5000, 9, n=2 * MIN_VALUES))
+    assert DA.check(twenty, amount_history(40), HEALED).outcome is Outcome.FAIL
 
 
 @pytest.mark.unit
@@ -289,11 +296,8 @@ def test_assess_and_psi_of_values_agree_so_task_29_cannot_print_a_second_psi() -
         {"bins": 1},
         {"threshold": 0.0},
         {"persistence": 0},
-        {"epsilon": 0.0},
         {"threshold": math.nan},
         {"threshold": math.inf},
-        {"epsilon": math.nan},
-        {"epsilon": math.inf},
         {"alpha": 0.0},
         {"alpha": 1.0},
         {"alpha": -0.01},
@@ -357,11 +361,10 @@ def test_synthetic_seasonality_is_not_alerted_after_warmup() -> None:
 # -- fix round 1: the chi-square noise floor (concern 1) and the parse floor (concern 2) --------
 
 
-def _one_empty_bin() -> list[str]:
-    """Ten values against the 100..991 reference: one per decile, except that the top decile
-    is empty and its value doubled up in the ninth. PSI over 0.20 from sampling noise alone."""
-    values = grid(145, 90, n=10)
-    return [*values[:-1], values[-2]]
+def _bunched() -> list[str]:
+    """Ten values against the 100..991 reference, five in each of two deciles: over 0.20 on
+    ten values is what sampling noise does, and it is under the chi-square critical value."""
+    return grid(110, 1, n=5) + grid(560, 1, n=5)
 
 
 @pytest.mark.unit
@@ -372,7 +375,7 @@ def test_alpha_is_published() -> None:
 @pytest.mark.unit
 def test_small_sample_noise_over_threshold_but_under_the_critical_value_is_not_a_breach() -> None:
     h = amount_history(40)
-    small = column("amount", _one_empty_bin())
+    small = column("amount", _bunched())
     a = DA.assess(small, h, "amount")
     assert isinstance(a, Assessment)
     assert 0.20 < a.psi < a.critical and not a.breach
@@ -400,7 +403,7 @@ def test_a_large_shift_still_breaches_the_larger_of_threshold_and_critical() -> 
 
 @pytest.mark.unit
 def test_steady_state_alerting_uses_the_same_bar() -> None:
-    small = column("amount", _one_empty_bin())
+    small = column("amount", _bunched())
     a = DA.assess(small, amount_history(40, prior_breaches=1), "amount")
     assert isinstance(a, Assessment) and not a.breach and not a.alert
 
@@ -415,10 +418,33 @@ def test_the_categorical_path_uses_the_same_bar() -> None:
 
 
 @pytest.mark.unit
-def test_fewer_than_two_effective_bins_is_insufficient() -> None:
-    h = history_of("status", 40, values=lambda i: ["Open"] * 100)
-    v = DA.check(column("status", ["Open"] * 100), h, ctx(STATUS, rung=3))
-    assert v.outcome is Outcome.INSUFFICIENT and "nothing to compare" in v.reason
+def test_a_constant_usd_field_heals_to_pass() -> None:
+    # Ruling 2: one bin or category on both sides is no shift, not "no basis".
+    h = history_of("currency", 40, values=lambda i: ["USD"] * 100)
+    usd = field_target("currency", distributional=True)
+    v = DA.check(column("currency", ["USD"] * 100), h, ctx(usd, rung=3))
+    assert v.outcome is Outcome.PASS and float(v.observed or "nan") == 0.0
+    a = DA.assess(column("currency", ["USD"] * 100), h, "currency")
+    assert isinstance(a, Assessment) and not a.breach
+    steady = DA.check(column("currency", ["USD"] * 100), h, ctx(usd, healed=False, rung=1))
+    assert steady.outcome is Outcome.PASS and "alert" not in steady.reason
+
+
+@pytest.mark.unit
+def test_a_heal_onto_a_different_constant_is_not_a_pass() -> None:
+    h = history_of("currency", 40, values=lambda i: ["USD"] * 100)
+    usd = field_target("currency", distributional=True)
+    a = DA.assess(column("currency", ["EUR"] * 100), h, "currency")
+    assert isinstance(a, Assessment) and a.breach  # k = 2: the normal rule
+    assert DA.check(column("currency", ["EUR"] * 100), h, ctx(usd, rung=3)).outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+def test_a_constant_numeric_field_same_bin_passes_and_a_different_bin_fails() -> None:
+    h = history_of("amount", 40, values=lambda i: ["100.00"] * 100)
+    same = DA.check(column("amount", ["100.00"] * 100), h, HEALED)
+    moved = DA.check(column("amount", ["200.00"] * 100), h, HEALED)
+    assert same.outcome is Outcome.PASS and moved.outcome is Outcome.FAIL
 
 
 @pytest.mark.unit

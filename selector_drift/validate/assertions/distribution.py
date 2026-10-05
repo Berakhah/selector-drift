@@ -25,7 +25,6 @@ from selector_drift.validate.history import History
 from selector_drift.validate.stats import (
     ALPHA,
     PSI_BINS,
-    PSI_EPSILON,
     critical_psi,
     numeric_reference,
     psi_result,
@@ -66,25 +65,22 @@ class DistributionalAssertion:
         warmup_runs: int = 30,
         persistence: int = 2,
         bins: int = PSI_BINS,
-        epsilon: float = PSI_EPSILON,
         alpha: float = ALPHA,
     ) -> None:
-        # NaN compares False against everything: a NaN threshold would never breach, a NaN
-        # epsilon would make every PSI NaN. Both disable the check, so both are refused.
+        # NaN compares False against everything: a NaN threshold would never breach and a NaN
+        # alpha would make the critical value NaN. Both disable the check, so both are refused.
         if (
             not math.isfinite(threshold)
             or threshold <= 0
             or warmup_runs < 1
             or persistence < 1
             or bins < 2
-            or not math.isfinite(epsilon)
-            or epsilon <= 0
             or not 0.0 < alpha < 1.0  # NaN fails this too
             or not 1.0 - alpha < 1.0  # an alpha so small that 1 - alpha rounds to 1
         ):
             raise ValueError("these parameters would disable the check, not tune it")
         self.threshold, self.warmup_runs, self.persistence = threshold, warmup_runs, persistence
-        self.bins, self.epsilon, self.alpha = bins, epsilon, alpha
+        self.bins, self.alpha = bins, alpha
 
     @classmethod
     def for_target(cls, target: AuthorisedTarget) -> DistributionalAssertion:
@@ -123,13 +119,11 @@ class DistributionalAssertion:
                 f"{len(current)} {field} values were extracted, fewer than {MIN_VALUES}: "
                 "too few to be evidence"
             )
-        r = psi_result(reference, current, bins=self.bins, epsilon=self.epsilon)
-        if r.k < 2:
-            return (
-                f"every {field} value, reference and current, falls in one "
-                f"{'category' if r.categorical else 'bin'}: nothing to compare"
-            )
-        critical = critical_psi(r.k, r.reference_n, r.current_n, self.alpha)
+        r = psi_result(reference, current, bins=self.bins)
+        # k == 1: every value on both sides in the same bin or category -- a constant field that
+        # stayed constant. PSI is 0 and there is no noise to floor: no shift, not "no basis"
+        # (fix round 2). Different constants are k == 2 and take the normal rule.
+        critical = critical_psi(r.k, r.reference_n, r.current_n, self.alpha) if r.k >= 2 else 0.0
         breach = r.psi > max(self.threshold, critical)
         prior = 0
         for run in reversed(history.runs):
