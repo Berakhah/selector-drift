@@ -4,7 +4,7 @@ Tasks 22 and 23 append to this module."""
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from bok_core.provenance.claim import Claim, Method
 from bok_core.provenance.source import DomSource
@@ -238,3 +238,53 @@ CHURNED = candidate(
         for i, r in enumerate(BASE_ROWS)
     ]
 )
+
+
+# -- Task 23: history builders for the distributional check ------------------------------------
+
+
+def grid(start: float, step: float, n: int = 100) -> list[str]:
+    return [f"{start + step * j:,.2f}" for j in range(n)]
+
+
+def history_of(
+    field: str,
+    n: int,
+    *,
+    values: Callable[[int], list[str]],
+    prior_breaches: int = 0,
+    marked_expected: bool = False,
+) -> History:
+    runs = []
+    for i in range(n):
+        day = dt.date(2026, 10, 1) - dt.timedelta(days=n - i)
+        rows = tuple({"claim_number": f"AB{j:08d}", field: v} for j, v in enumerate(values(i)))
+        runs.append(
+            AcceptedRun(
+                run_key=f"testbench:2:{day}",
+                window=day,
+                rows=rows,
+                natural_key=("claim_number",),
+                shift_alerts=frozenset({field}) if i >= n - prior_breaches else frozenset(),
+                marked_expected=frozenset({field})
+                if marked_expected and i == n - 1
+                else frozenset(),
+            )
+        )
+    return History(runs=tuple(runs))
+
+
+def amount_history(n: int, *, prior_breaches: int = 0, marked_expected: bool = False) -> History:
+    """Reference: 100 amounts per run on a 100..1,000 grid, jittered per run."""
+    return history_of(
+        "amount",
+        n,
+        values=lambda i: grid(100 + (i % 3), 9),
+        prior_breaches=prior_breaches,
+        marked_expected=marked_expected,
+    )
+
+
+SAME = column("amount", grid(101, 9))  # the reference distribution again
+SHIFTED = column("amount", grid(5000, 9))  # every value above the top reference edge
+LOW_BAND = column("amount", grid(100, 0.5))  # nine of ten reference bins left empty
