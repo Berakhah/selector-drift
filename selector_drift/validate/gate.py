@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, NoReturn
 
 from selector_drift.extract.models import CandidateExtraction, Row
 from selector_drift.spec.schema import FieldTarget
@@ -52,6 +53,10 @@ class _ValidateToken:
 
 
 _TOKEN: Final = _ValidateToken()  # the only instance ValidatedExtraction accepts
+# True only inside _mint. The token alone is not enough: dataclasses.replace() re-passes the
+# real token from an existing instance, which would mint an altered extraction (fix round 1).
+_MINTING: ContextVar[bool] = ContextVar("_MINTING", default=False)
+_NOT_MINTED: Final = "a ValidatedExtraction is minted only by validate.gate (C2)"
 
 
 @dataclass(frozen=True)
@@ -62,8 +67,30 @@ class ValidatedExtraction:
     _token: _ValidateToken = dataclasses.field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self._token is not _TOKEN:  # identity, not isinstance (M29)
-            raise TypeError("a ValidatedExtraction is minted only by validate.gate (C2)")
+        if self._token is not _TOKEN or not _MINTING.get():  # identity, not isinstance (M29)
+            raise TypeError(_NOT_MINTED)
+
+    # copy bypasses __init__ (it rebuilds through __reduce_ex__), so it would duplicate a
+    # judged extraction without passing __post_init__. A validated run is used, never copied.
+    def __copy__(self) -> NoReturn:
+        raise TypeError(_NOT_MINTED)
+
+    def __deepcopy__(self, memo: object) -> NoReturn:
+        raise TypeError(_NOT_MINTED)
+
+
+def _mint(candidate: CandidateExtraction, verdicts: Sequence[Verdict]) -> ValidatedExtraction:
+    """The one mint site."""
+    reset = _MINTING.set(True)
+    try:
+        return ValidatedExtraction(
+            rows=tuple(candidate.rows),
+            run_key=candidate.run_key,
+            verdicts=tuple(verdicts),
+            _token=_TOKEN,
+        )
+    finally:
+        _MINTING.reset(reset)
 
 
 @dataclass(frozen=True)
@@ -95,18 +122,66 @@ def _escalated(rung: int) -> Verdict:
     )
 
 
+def _name_of(check: Assertion) -> str:
+    """A check's name for its verdict; the class name when it has no usable one."""
+    name = getattr(check, "name", None)
+    return name if isinstance(name, str) and name else type(check).__name__
+
+
 def _judge(
     check: Assertion, candidate: CandidateExtraction, history: History | None, ctx: HealContext
 ) -> Verdict:
+    """Every check yields a Verdict. A crash would lose the run's data, and a non-Verdict
+    (None, a bare boolean) is no judgement at all: both become a FAIL kept in quarantine."""
     try:
-        return check.check(candidate, history, ctx)
-    except Exception as exc:  # a crash would lose the run; a FAIL keeps it quarantined
+        verdict: object = check.check(candidate, history, ctx)
+    except Exception as exc:
         return Verdict(
-            check=check.name,
+            check=_name_of(check),
             outcome=Outcome.FAIL,
             threshold="the check returns a verdict",
             observed=type(exc).__name__,
             reason=f"the check raised instead of judging: {exc!r}",
+        )
+    if not isinstance(verdict, Verdict):
+        return Verdict(
+            check=_name_of(check),
+            outcome=Outcome.FAIL,
+            threshold="the check returns a verdict",
+            observed=type(verdict).__name__,
+            reason="the check returned something other than a Verdict, which is not a judgement",
+        )
+    return verdict
+
+
+def _require_every_field_judged(
+    candidate: CandidateExtraction,
+    contexts: Mapping[str, HealContext],
+    checks: Mapping[str, Sequence[Assertion]],
+) -> None:
+    """Fail closed (fix round 1). The mint carries every row whole, so every field in any row
+    -- not just row 0 -- or in the trace must have been judged; and a check filed under a
+    field with no context would otherwise be silently skipped."""
+    if not contexts:
+        raise ValueError("a run with no fields has nothing to judge")
+    for name, ctx in contexts.items():
+        if ctx.target.name != name:
+            raise ValueError(
+                f"contexts[{name!r}] carries the target {ctx.target.name!r}: a context must be "
+                "filed under its own field"
+            )
+    present = {f for row in candidate.rows for f in row} | set(candidate.trace)
+    unjudged = sorted(present - contexts.keys())
+    if unjudged:
+        raise ValueError(
+            f"field(s) {', '.join(map(repr, unjudged))} appear in the candidate but have no "
+            "context: an unjudged field would be written unjudged"
+        )
+    orphaned = sorted(checks.keys() - contexts.keys())
+    if orphaned:
+        raise ValueError(
+            f"checks for {', '.join(map(repr, orphaned))} have no context: a check that is "
+            "filed but never run is a check skipped"
         )
 
 
@@ -122,8 +197,7 @@ def gate_run(
     INSUFFICIENT is tolerated, never whether a check is consulted (a ValueSwap arrives as a
     rung-1 hit and only a check can see it).
     """
-    if not contexts:
-        raise ValueError("a run with no fields has nothing to judge")
+    _require_every_field_judged(candidate, contexts, checks)
     verdicts: list[Verdict] = []
     failing: list[Verdict] = []
     for field_name, ctx in contexts.items():
@@ -148,12 +222,7 @@ def gate_run(
         return QuarantinedRun(
             run_key=candidate.run_key, reason=f"gate failed: {names}", verdicts=tuple(verdicts)
         )
-    return ValidatedExtraction(
-        rows=tuple(candidate.rows),
-        run_key=candidate.run_key,
-        verdicts=tuple(verdicts),
-        _token=_TOKEN,  # the one mint site
-    )
+    return _mint(candidate, verdicts)
 
 
 def gate(
