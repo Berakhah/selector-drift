@@ -72,6 +72,39 @@ def _depth(node: ast.AST) -> int:
     return deepest
 
 
+def _kind(node: ast.expr) -> str:
+    """Static typing of the whitelist: 'num' or 'bool'. Mismatches are refused at construction,
+    so no row ever reaches a short-circuit that skips a type error."""
+
+    def need(child: ast.expr, kind: str) -> None:
+        if _kind(child) != kind:
+            raise UnsafeExpression(f"a {_kind(child)} was used where a {kind} is needed")
+
+    match node:
+        case ast.Constant() | ast.Name():
+            return "num"
+        case ast.UnaryOp(op=ast.Not(), operand=operand):
+            need(operand, "bool")
+            return "bool"
+        case ast.UnaryOp(operand=operand):
+            need(operand, "num")
+            return "num"
+        case ast.BinOp(left=left, right=right):
+            need(left, "num")
+            need(right, "num")
+            return "num"
+        case ast.BoolOp(values=values):
+            for v in values:
+                need(v, "bool")
+            return "bool"
+        case ast.Compare(left=left, comparators=comparators):
+            need(left, "num")
+            for c in comparators:
+                need(c, "num")
+            return "bool"
+    raise UnsafeExpression(f"{type(node).__name__} is not allowed in a spec expression")
+
+
 def parse_expression(expression: str) -> tuple[ast.Expression, frozenset[str]]:
     if len(expression) > MAX_EXPRESSION:
         raise UnsafeExpression(f"expression longer than {MAX_EXPRESSION} characters")
@@ -89,13 +122,24 @@ def parse_expression(expression: str) -> tuple[ast.Expression, frozenset[str]]:
             isinstance(node.value, bool) or not isinstance(node.value, int | float)
         ):
             raise UnsafeExpression(f"literal of type {type(node.value).__name__} is not a number")
+        if isinstance(node, ast.Constant):
+            # Exact from the source text: str(float) turns 1e999 into Infinity and 0.1 + 0.2 into
+            # binary noise. The tree is never compiled, so a Decimal constant is safe to store.
+            text = ast.get_source_segment(expression, node) or ""
+            try:
+                exact = Decimal(text)
+            except ArithmeticError as exc:
+                raise UnsafeExpression("a numeric literal is not a plain decimal number") from exc
+            if not exact.is_finite():
+                raise UnsafeExpression("a numeric literal is not finite")
+            node.value = exact  # type: ignore[assignment]
         if isinstance(node, ast.Name):
             if node.id.startswith("_"):
                 raise UnsafeExpression(f"name {node.id!r} is not a field")
             names.add(node.id)
-    body = tree.body
-    is_not = isinstance(body, ast.UnaryOp) and isinstance(body.op, ast.Not)
-    if not (isinstance(body, ast.Compare | ast.BoolOp) or is_not):
+    if not names:
+        raise UnsafeExpression("a cross-field check must name at least one field")
+    if _kind(tree.body) != "bool":
         raise UnsafeExpression("a cross-field check must be a comparison, e.g. net + tax == gross")
     return tree, frozenset(names)
 

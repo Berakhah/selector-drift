@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
@@ -32,6 +33,9 @@ _MINOR_UNITS: Final = {
 }
 
 
+_ISO_DATE: Final = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)  # not "20261001", not "2026-W39-1"
+
+
 def _bound(raw: object, key: str) -> Decimal | None:
     if raw is None:
         return None
@@ -47,7 +51,7 @@ def _day(raw: object, key: str) -> dt.date | None:
     """Task 5's DomainRule carries dates as ISO `YYYY-MM-DD` strings (its IsoDate validator)."""
     if raw is None:
         return None
-    if isinstance(raw, str):
+    if isinstance(raw, str) and _ISO_DATE.fullmatch(raw):
         try:
             return dt.date.fromisoformat(raw)
         except ValueError:
@@ -64,6 +68,9 @@ class DomainAssertion:
         unknown = set(rule) - _KEYS
         if unknown:
             raise SpecError(f"unknown domain rule key(s) {sorted(unknown)}")
+        empty = sorted(k for k, v in rule.items() if v is None)
+        if empty:
+            raise SpecError(f"domain rule key(s) {empty} are present but have no value")
         self._min = _bound(rule.get("min"), "min")
         self._max = _bound(rule.get("max"), "max")
         if self._min is not None and self._max is not None and self._min > self._max:
@@ -74,14 +81,20 @@ class DomainAssertion:
         ):
             raise SpecError(f"domain rule 'enum' must be a list of strings, got {enum!r}")
         self._enum = frozenset(enum) if enum is not None else None
+        if enum is not None and not enum:
+            raise SpecError("a domain enum lists at least one value")
         self._after = _day(rule.get("date_after"), "date_after")
         self._before = _day(rule.get("date_before"), "date_before")
+        if self._after is not None and self._before is not None and self._after >= self._before:
+            raise SpecError(f"domain rule date_after {self._after} is not before {self._before}")
         currency = rule.get("currency")
         if currency is not None and (not isinstance(currency, str) or currency not in _MINOR_UNITS):
             raise SpecError(f"unknown currency {currency!r}; known: {sorted(_MINOR_UNITS)}")
         self._currency = currency if isinstance(currency, str) else None
         self._numeric = self._min is not None or self._max is not None or self._currency is not None
         self._dated = self._after is not None or self._before is not None
+        if not (self._numeric or self._dated or self._enum is not None):
+            raise SpecError("a domain rule must set at least one constraint")
         self.threshold = self._describe()
 
     def _describe(self) -> str:
@@ -122,9 +135,11 @@ class DomainAssertion:
             return "a value is not an allowed value"
         if self._dated:
             try:
+                if not _ISO_DATE.fullmatch(value):
+                    raise ValueError(value)
                 day = dt.date.fromisoformat(value)
             except ValueError:
-                return "a value is not an ISO date"
+                return "a value is not an ISO date (YYYY-MM-DD)"
             if self._after is not None and day <= self._after:
                 return f"{day} is not after {self._after}"
             if self._before is not None and day >= self._before:
