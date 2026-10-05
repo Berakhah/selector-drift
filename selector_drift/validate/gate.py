@@ -53,10 +53,10 @@ class _ValidateToken:
 
 
 _TOKEN: Final = _ValidateToken()  # the only instance ValidatedExtraction accepts
-# True only inside _mint. The token alone is not enough: dataclasses.replace() re-passes the
+# True only inside _construct. The token alone is not enough: dataclasses.replace() re-passes the
 # real token from an existing instance, which would mint an altered extraction (fix round 1).
-_MINTING: ContextVar[bool] = ContextVar("_MINTING", default=False)
-_NOT_MINTED: Final = "a ValidatedExtraction is minted only by validate.gate (C2)"
+_CONSTRUCTING: ContextVar[bool] = ContextVar("_CONSTRUCTING", default=False)
+_NOT_FROM_GATE: Final = "a ValidatedExtraction is minted only by validate.gate (C2)"
 
 
 @dataclass(frozen=True)
@@ -67,21 +67,21 @@ class ValidatedExtraction:
     _token: _ValidateToken = dataclasses.field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self._token is not _TOKEN or not _MINTING.get():  # identity, not isinstance (M29)
-            raise TypeError(_NOT_MINTED)
+        if self._token is not _TOKEN or not _CONSTRUCTING.get():  # identity, not isinstance (M29)
+            raise TypeError(_NOT_FROM_GATE)
 
     # copy bypasses __init__ (it rebuilds through __reduce_ex__), so it would duplicate a
     # judged extraction without passing __post_init__. A validated run is used, never copied.
     def __copy__(self) -> NoReturn:
-        raise TypeError(_NOT_MINTED)
+        raise TypeError(_NOT_FROM_GATE)
 
     def __deepcopy__(self, memo: object) -> NoReturn:
-        raise TypeError(_NOT_MINTED)
+        raise TypeError(_NOT_FROM_GATE)
 
 
-def _mint(candidate: CandidateExtraction, verdicts: Sequence[Verdict]) -> ValidatedExtraction:
+def _construct(candidate: CandidateExtraction, verdicts: Sequence[Verdict]) -> ValidatedExtraction:
     """The one mint site."""
-    reset = _MINTING.set(True)
+    reset = _CONSTRUCTING.set(True)
     try:
         return ValidatedExtraction(
             rows=tuple(candidate.rows),
@@ -90,7 +90,7 @@ def _mint(candidate: CandidateExtraction, verdicts: Sequence[Verdict]) -> Valida
             _token=_TOKEN,
         )
     finally:
-        _MINTING.reset(reset)
+        _CONSTRUCTING.reset(reset)
 
 
 @dataclass(frozen=True)
@@ -222,7 +222,7 @@ def gate_run(
         return QuarantinedRun(
             run_key=candidate.run_key, reason=f"gate failed: {names}", verdicts=tuple(verdicts)
         )
-    return _mint(candidate, verdicts)
+    return _construct(candidate, verdicts)
 
 
 def gate(
