@@ -9,6 +9,7 @@ from selector_drift.spec.schema import FieldTarget
 from selector_drift.validate.assertions.base import Assertion
 from selector_drift.validate.assertions.independence import (
     COLLAPSE_FLOOR,
+    MIN_JOINED,
     IndependentRungAgreement,
     RowKeyContinuity,
     continuity_alert,
@@ -249,12 +250,12 @@ def test_an_escalated_field_is_never_confirmed_even_by_values() -> None:
 
 
 @pytest.mark.unit
-def test_a_healer_missing_from_the_injected_rungs_falls_back_to_values() -> None:
+def test_a_healer_missing_from_the_injected_rungs_is_insufficient_not_a_value_pass() -> None:
+    """Fix round 1 (M2): the pipeline always injects rungs 2-4, so a missing healer is a
+    wiring fault -- values agreeing must not paper over it."""
     v = IndependentRungAgreement([ax(AMOUNT_CELL)]).check(UNCHANGED, previous_history(), healed(4))
-    assert v.outcome is Outcome.PASS and v.confirmed_by == Confirmation(
-        rung=None, family=Family.VALUE
-    )
-    assert "not among the injected rungs" in v.reason
+    assert v.outcome is Outcome.INSUFFICIENT and v.confirmed_by is None
+    assert "no DOM evidence: the healing rung was not injected" in v.reason
 
 
 @pytest.mark.unit
@@ -334,7 +335,7 @@ def test_a_composite_natural_key_joins_on_every_part() -> None:
     )
     cand = candidate([{"a": "1", "b": "y", "v": "20"}, {"a": "1", "b": "x", "v": "10"}])
     target = ctx(AMOUNT).target.model_copy(update={"name": "v"})
-    v = RowKeyContinuity().check(cand, History(runs=(prev,)), ctx(target, rung=4))
+    v = RowKeyContinuity(min_joined=2).check(cand, History(runs=(prev,)), ctx(target, rung=4))
     assert v.outcome is Outcome.PASS
 
 
@@ -406,3 +407,73 @@ def test_a_healer_outside_the_dom_families_has_no_cross_family_counterpart() -> 
     odd_healer = FakeRung(4, Family.NONE, AMOUNT_CELL)
     v = IndependentRungAgreement([ax(AMOUNT_CELL), odd_healer]).check(UNCHANGED, None, healed(4))
     assert v.outcome is Outcome.INSUFFICIENT and "outside the DOM families" in v.reason
+
+
+# ---- fix round 1: a minimum joined count (Important), duplicate rung ids (M4) ---------------
+
+
+def _prev(n: int) -> History:
+    run = previous_history().runs[0]
+    return History(
+        runs=(
+            AcceptedRun(
+                run_key=run.run_key,
+                window=run.window,
+                rows=run.rows[:n],
+                natural_key=run.natural_key,
+            ),
+        )
+    )
+
+
+@pytest.mark.unit
+def test_min_joined_is_published_and_validated() -> None:
+    assert MIN_JOINED == 10
+    with pytest.raises(ValueError):
+        RowKeyContinuity(min_joined=0)
+
+
+@pytest.mark.unit
+def test_one_coincidental_joined_cell_never_confirms_a_heal() -> None:
+    v = RowKeyContinuity().check(UNCHANGED, _prev(1), healed(4))
+    assert v.outcome is Outcome.INSUFFICIENT and v.confirmed_by is None
+    assert "1 joined" in v.reason and "10" in v.reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("n", [1, 2])
+def test_a_tiny_join_with_a_change_on_a_cache_hit_is_not_a_collapse(n: int) -> None:
+    changed = candidate(
+        [
+            {"claim_number": r["claim_number"], "amount": "0.01"}
+            for r in previous_history().runs[0].rows[:n]
+        ]
+    )
+    v = RowKeyContinuity().check(changed, _prev(n), ctx(AMOUNT, healed=False, rung=1))
+    assert v.outcome is Outcome.INSUFFICIENT and not continuity_alert(v)
+    assert f"{n} joined" in v.reason
+
+
+@pytest.mark.unit
+def test_exactly_min_joined_is_judged_normally() -> None:
+    assert RowKeyContinuity().check(UNCHANGED, _prev(10), healed(4)).outcome is Outcome.PASS
+    assert RowKeyContinuity().check(DECOY, _prev(10), healed(4)).outcome is Outcome.FAIL
+    assert (
+        RowKeyContinuity().check(SWAPPED, _prev(10), ctx(AMOUNT, healed=False, rung=1)).outcome
+        is Outcome.FAIL
+    )
+    assert RowKeyContinuity().check(UNCHANGED, _prev(9), healed(4)).outcome is Outcome.INSUFFICIENT
+
+
+@pytest.mark.unit
+def test_the_value_fallback_with_too_few_joined_is_not_a_pass() -> None:
+    v = IndependentRungAgreement([ax(None), anchors(None), heuristic(AMOUNT_CELL)]).check(
+        UNCHANGED, _prev(1), healed(4)
+    )
+    assert v.outcome is Outcome.INSUFFICIENT and v.confirmed_by is None
+
+
+@pytest.mark.unit
+def test_duplicate_rung_ids_are_refused() -> None:
+    with pytest.raises(ValueError, match="rung 4"):
+        IndependentRungAgreement([heuristic(AMOUNT_CELL), heuristic(PRIOR_AMOUNT_CELL)])
