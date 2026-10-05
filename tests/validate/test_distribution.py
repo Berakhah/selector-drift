@@ -10,6 +10,7 @@ from selector_drift.scope.gate import authorise
 from selector_drift.scope.record import AuthorisedTarget, Basis, ScopeRecord
 from selector_drift.validate.assertions.base import Assertion
 from selector_drift.validate.assertions.distribution import (
+    ALPHA,
     MIN_VALUES,
     REFERENCE_RUNS,
     Assessment,
@@ -17,7 +18,7 @@ from selector_drift.validate.assertions.distribution import (
 )
 from selector_drift.validate.gate import QuarantinedRun, ValidatedExtraction, gate_run
 from selector_drift.validate.history import History
-from selector_drift.validate.stats import psi_of_values
+from selector_drift.validate.stats import critical_psi, psi_of_values, psi_result
 from selector_drift.validate.verdict import Outcome
 from tests.validate.helpers import (
     AMOUNT,
@@ -293,6 +294,11 @@ def test_assess_and_psi_of_values_agree_so_task_29_cannot_print_a_second_psi() -
         {"threshold": math.inf},
         {"epsilon": math.nan},
         {"epsilon": math.inf},
+        {"alpha": 0.0},
+        {"alpha": 1.0},
+        {"alpha": -0.01},
+        {"alpha": math.nan},
+        {"alpha": 1e-300},
     ],
 )
 def test_parameters_that_would_disable_the_check_are_refused(kw: dict[str, float]) -> None:
@@ -346,3 +352,83 @@ def test_synthetic_seasonality_is_not_alerted_after_warmup() -> None:
     )
     back = DA.assess(SAME, after, "amount")
     assert isinstance(back, Assessment) and not back.breach and not back.alert
+
+
+# -- fix round 1: the chi-square noise floor (concern 1) and the parse floor (concern 2) --------
+
+
+def _one_empty_bin() -> list[str]:
+    """Ten values against the 100..991 reference: one per decile, except that the top decile
+    is empty and its value doubled up in the ninth. PSI over 0.20 from sampling noise alone."""
+    values = grid(145, 90, n=10)
+    return [*values[:-1], values[-2]]
+
+
+@pytest.mark.unit
+def test_alpha_is_published() -> None:
+    assert ALPHA == 0.01 and DA.alpha == 0.01
+
+
+@pytest.mark.unit
+def test_small_sample_noise_over_threshold_but_under_the_critical_value_is_not_a_breach() -> None:
+    h = amount_history(40)
+    small = column("amount", _one_empty_bin())
+    a = DA.assess(small, h, "amount")
+    assert isinstance(a, Assessment)
+    assert 0.20 < a.psi < a.critical and not a.breach
+    v = DA.check(small, h, HEALED)
+    assert v.outcome is Outcome.PASS
+    assert "threshold 0.20" in v.reason and f"critical {a.critical:.4f}" in v.reason
+
+
+@pytest.mark.unit
+def test_the_critical_value_is_the_one_stats_computes_for_the_effective_bins() -> None:
+    h = amount_history(40)
+    a = DA.assess(SAME, h, "amount")
+    r = psi_result(h.trailing(REFERENCE_RUNS).values("amount"), grid(101, 9))
+    assert isinstance(a, Assessment)
+    assert a.critical == pytest.approx(critical_psi(r.k, 3000, 100, ALPHA))
+
+
+@pytest.mark.unit
+def test_a_large_shift_still_breaches_the_larger_of_threshold_and_critical() -> None:
+    a = DA.assess(SHIFTED, amount_history(40), "amount")
+    assert isinstance(a, Assessment) and a.breach and a.psi > max(0.20, a.critical)
+    v = DA.check(SHIFTED, amount_history(40), HEALED)
+    assert "critical" in v.reason and "threshold 0.20" in v.reason
+
+
+@pytest.mark.unit
+def test_steady_state_alerting_uses_the_same_bar() -> None:
+    small = column("amount", _one_empty_bin())
+    a = DA.assess(small, amount_history(40, prior_breaches=1), "amount")
+    assert isinstance(a, Assessment) and not a.breach and not a.alert
+
+
+@pytest.mark.unit
+def test_the_categorical_path_uses_the_same_bar() -> None:
+    h = history_of("status", 40, values=lambda i: ["Open", "Paid"] * 50)
+    a = DA.assess(column("status", ["Closed"] * 100), h, "status")
+    assert isinstance(a, Assessment) and a.categorical
+    # k = 3 categories, df = 2.
+    assert a.critical == pytest.approx(critical_psi(3, 3000, 100, ALPHA)) and a.breach
+
+
+@pytest.mark.unit
+def test_fewer_than_two_effective_bins_is_insufficient() -> None:
+    h = history_of("status", 40, values=lambda i: ["Open"] * 100)
+    v = DA.check(column("status", ["Open"] * 100), h, ctx(STATUS, rung=3))
+    assert v.outcome is Outcome.INSUFFICIENT and "nothing to compare" in v.reason
+
+
+@pytest.mark.unit
+def test_one_na_in_a_numeric_reference_keeps_the_field_numeric_and_a_matching_heal_passes() -> None:
+    def values(i: int) -> list[str]:
+        g = grid(100 + (i % 3), 9)
+        return [*g[:-1], "N/A"] if i == 39 else g
+
+    h = history_of("amount", 40, values=values)
+    a = DA.assess(SAME, h, "amount")
+    assert isinstance(a, Assessment) and not a.categorical
+    assert DA.check(SAME, h, HEALED).outcome is Outcome.PASS
+    assert DA.bin_edges_for(h, "amount") != ()

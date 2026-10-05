@@ -10,13 +10,18 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from selector_drift.validate.stats import (
+    NUMERIC_PARSE_FLOOR,
     PSI_BINS,
     PSI_EPSILON,
     binned,
     category_proportions,
+    chi2_quantile,
+    critical_psi,
     floats,
+    numeric_reference,
     psi,
     psi_of_values,
+    psi_result,
     quantile_edges,
 )
 
@@ -222,3 +227,85 @@ def test_property_hostile_cell_text_always_yields_a_finite_psi(
 ) -> None:
     score, _ = psi_of_values(reference, current)
     assert math.isfinite(score) and score >= -1e-12
+
+
+# -- fix round 1: the sampling-noise floor and the numeric parse floor ---------------------------
+
+# Upper-tail chi-square quantiles from standard tables (e.g. NIST/SEMATECH e-Handbook 1.3.6.7.4).
+_CHI2_TABLE = [
+    (1, 0.99, 6.635),
+    (2, 0.99, 9.210),
+    (1, 0.95, 3.841),
+    (2, 0.95, 5.991),
+    (3, 0.99, 11.345),
+    (5, 0.99, 15.086),
+    (9, 0.99, 21.666),
+    (10, 0.99, 23.209),
+    (9, 0.95, 16.919),
+    (30, 0.99, 50.892),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("df", "p", "expected"), _CHI2_TABLE)
+def test_chi2_quantile_matches_the_table(df: int, p: float, expected: float) -> None:
+    # df 1 and 2 are computed exactly (Wilson-Hilferty is weak there): 1e-3 relative is the
+    # table rounding. df >= 3 uses Wilson-Hilferty: within 0.5% of the table.
+    tolerance = 1e-3 if df <= 2 else 5e-3
+    assert chi2_quantile(df, p) == pytest.approx(expected, rel=tolerance)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("df", "p"), [(0, 0.99), (3, 0.0), (3, 1.0), (3, math.nan)])
+def test_chi2_quantile_refuses_a_meaningless_question(df: int, p: float) -> None:
+    with pytest.raises(ValueError):
+        chi2_quantile(df, p)
+
+
+@pytest.mark.unit
+def test_critical_psi_is_the_chi_square_quantile_scaled_by_both_sample_sizes() -> None:
+    # Under the null, PSI ~ chi2_{k-1} * (1/n_current + 1/n_reference).
+    assert critical_psi(10, 3000, 100, 0.01) == pytest.approx(
+        chi2_quantile(9, 0.99) * (1 / 100 + 1 / 3000)
+    )
+    with pytest.raises(ValueError):
+        critical_psi(1, 3000, 100, 0.01)
+    with pytest.raises(ValueError):
+        critical_psi(10, 0, 100, 0.01)
+
+
+@pytest.mark.unit
+def test_psi_result_counts_the_effective_bins() -> None:
+    reference = [f"{i}" for i in range(100)]
+    r = psi_result(reference, reference)
+    assert (r.k, r.categorical, r.reference_n, r.current_n) == (10, False, 100, 100)
+    # A bin populated only by the current run counts: here the unparseable bin.
+    assert psi_result(reference, [*reference, "n/a"]).k == 11
+    assert psi_result(["Open", "Paid"] * 5, ["Closed"] * 3).k == 3
+    assert psi_result(["Open"] * 5, ["Open"] * 3).k == 1
+    assert psi_of_values(reference, reference) == (r.psi, r.categorical)
+
+
+@pytest.mark.unit
+def test_the_numeric_parse_floor_is_published() -> None:
+    assert NUMERIC_PARSE_FLOOR == 0.95
+
+
+@pytest.mark.unit
+def test_one_unparseable_reference_value_does_not_make_a_numeric_field_categorical() -> None:
+    reference = [f"{100 + i:,.2f}" for i in range(99)] + ["N/A"]
+    assert numeric_reference(reference) is not None
+    r = psi_result(reference, [f"{100 + i:,.2f}" for i in range(99)])
+    # 0.01 of the reference in a bin the current leaves empty costs ~0.01 * ln(1e4) = 0.09.
+    assert not r.categorical and r.psi < 0.20
+    # The reference's own N/A sits in the unparseable bin, on its side only.
+    assert psi_result(reference, ["n/a"] * 100).psi > 0.20
+
+
+@pytest.mark.unit
+def test_the_parse_floor_boundary() -> None:
+    at_floor = [str(i) for i in range(95)] + ["x"] * 5
+    below = [str(i) for i in range(94)] + ["x"] * 6
+    assert numeric_reference(at_floor) is not None and not psi_result(at_floor, ["1"]).categorical
+    assert numeric_reference(below) is None and psi_result(below, ["1"]).categorical
+    assert numeric_reference([]) is None
