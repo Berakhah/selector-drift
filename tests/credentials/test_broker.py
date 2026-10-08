@@ -190,3 +190,87 @@ def test_a_broker_timeout_must_be_positive(timeout, token):
 def test_the_repr_hides_the_token(token):
     r = repr(ClientBroker(ENDPOINT, token))
     assert token.get_secret_value() not in r and "broker.client.example.invalid" in r
+
+
+# -- H2 (fix round 1): the broker's cookies reach only the authorised host --------------------
+
+
+def _cookie(domain: str, value: str, **extra):
+    return {"name": "sid", "value": value, "domain": domain, "path": "/", **extra}
+
+
+@pytest.mark.unit
+def test_an_off_origin_broker_cookie_is_dropped(httpx_mock, target, token, caplog):
+    keep, drop = f"v-{secrets.token_hex(6)}", f"v-{secrets.token_hex(6)}"
+    httpx_mock.add_response(
+        url=f"{ENDPOINT}/credentials?target=testbench",
+        json={"cookies": [_cookie("bench.example.invalid", keep), _cookie("evil.invalid", drop)]},
+    )
+    with caplog.at_level(logging.DEBUG):
+        creds = ClientBroker(ENDPOINT, token).get(target)
+    assert creds.cookies == [_cookie("bench.example.invalid", keep)]
+    assert keep not in caplog.text and drop not in caplog.text  # counts only
+
+
+@pytest.mark.unit
+def test_a_parent_domain_broker_cookie_is_cloned_host_only(httpx_mock, target, token):
+    value = f"v-{secrets.token_hex(6)}"
+    httpx_mock.add_response(
+        url=f"{ENDPOINT}/credentials?target=testbench",
+        json={"cookies": [_cookie(".example.invalid", value)]},
+    )
+    creds = ClientBroker(ENDPOINT, token).get(target)
+    assert creds.cookies == [_cookie("bench.example.invalid", value)]
+
+
+@pytest.mark.unit
+def test_an_expired_broker_cookie_is_dropped(httpx_mock, target, token):
+    httpx_mock.add_response(
+        url=f"{ENDPOINT}/credentials?target=testbench",
+        json={
+            "cookies": [_cookie("bench.example.invalid", "old", expires=1)],
+            "username": "u",
+            "password": "p-test-only",
+        },
+    )
+    creds = ClientBroker(ENDPOINT, token).get(target)
+    assert creds.cookies is None and creds.username == "u"
+
+
+@pytest.mark.unit
+def test_a_broker_answer_with_only_off_origin_cookies_is_refused(httpx_mock, target, token):
+    value = f"v-{secrets.token_hex(6)}"
+    httpx_mock.add_response(
+        url=f"{ENDPOINT}/credentials?target=testbench",
+        json={
+            "cookies": [
+                _cookie("evil.invalid", value),
+                _cookie("bench.example.invalid.evil", value),
+            ]
+        },
+    )
+    with pytest.raises(BrokerError, match="no usable credential") as exc:
+        ClientBroker(ENDPOINT, token).get(target)
+    assert value not in str(exc.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cookies", ["sid=x", {"name": "sid"}])
+def test_broker_cookies_that_are_not_a_list_are_refused(httpx_mock, target, token, cookies):
+    httpx_mock.add_response(
+        url=f"{ENDPOINT}/credentials?target=testbench", json={"cookies": cookies}
+    )
+    with pytest.raises(BrokerError, match="malformed"):
+        ClientBroker(ENDPOINT, token).get(target)
+
+
+@pytest.mark.unit
+def test_a_broker_cookie_with_an_unreadable_expiry_is_refused(httpx_mock, target, token):
+    value = f"v-{secrets.token_hex(6)}"
+    httpx_mock.add_response(
+        url=f"{ENDPOINT}/credentials?target=testbench",
+        json={"cookies": [_cookie("bench.example.invalid", value, expires="soon")]},
+    )
+    with pytest.raises(BrokerError, match="unreadable expiry") as exc:
+        ClientBroker(ENDPOINT, token).get(target)
+    assert value not in str(exc.value)

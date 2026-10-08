@@ -21,8 +21,15 @@ The posture is a field on the target's scope record, so it is part of what the c
 refuses to run; neither ever falls back to a weaker one. A provider registers once and cannot be
 replaced.
 
-`encrypted_store` refuses to store or read anything until your signed acknowledgement is on file;
-we record its SHA-256, so the acknowledgement that was in force is checkable later.
+`encrypted_store` refuses to store or read anything until your signed acknowledgement is on file.
+We record its SHA-256, who recorded it and when, twice: in the audit log, and in an append-only
+history sealed under your data key — a second acknowledgement is added beside the first, never in
+place of it, and a history edited or forged without the key is refused. So the acknowledgement that
+was in force is checkable later.
+
+Whatever the posture, only cookies for your portal's authorised host reach the browser: a cookie
+for another domain is dropped, a parent-domain cookie is narrowed to the exact host, an expired
+one is dropped, and an answer left with nothing usable is refused rather than run logged out.
 
 ## The client broker
 
@@ -50,5 +57,8 @@ Configuration is per target: `SD_BROKER_URL_<TARGET>` and `SD_BROKER_TOKEN_<TARG
 A key-encryption key (KEK) lives only in the worker's environment (`SD_CREDENTIAL_KEK`, 64 hex
 characters). It wraps a per-client 256-bit data key; the data key seals each target's credential
 with AES-GCM, bound to that client and target, so a file copied to another client or target does
-not decrypt. Rotating the KEK re-wraps one small file per client. Files are written atomically with
-owner-only permissions, and a key or credential file that group or others can read is refused.
+not decrypt. The design supports rotating the KEK: only the data-key file is wrapped by it, so
+rotation re-wraps one small file per client. No rotation tool exists yet. Files are written
+atomically, through an fsync'd temp file, with owner-only permissions; the data key is created
+once, never left truncated by a crash. A key, credential or acknowledgement file that group or
+others can read is refused.

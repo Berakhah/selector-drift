@@ -12,15 +12,20 @@ neither `__cause__` nor `__context__` carries httpx's request or pydantic's echo
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
+from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 from pydantic import SecretStr, ValidationError
 
-from selector_drift.credentials.provider import Credentials
+from selector_drift.credentials.provider import Credentials, select_cookies, utc_now
 from selector_drift.scope.record import AuthorisedTarget
+
+log = logging.getLogger(__name__)
 
 _CODE = re.compile(r"^\d{6,8}$")
 
@@ -42,12 +47,20 @@ def _checked_endpoint(endpoint: str) -> str:
 
 
 class ClientBroker:
-    def __init__(self, endpoint: str, token: SecretStr, *, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        token: SecretStr,
+        *,
+        timeout: float = 10.0,
+        now: Callable[[], datetime] = utc_now,
+    ) -> None:
         if not timeout > 0:
             raise ValueError("the broker timeout must be positive")
         self._endpoint = _checked_endpoint(endpoint)
         self._token = token
         self._timeout = timeout
+        self._now = now
 
     def __repr__(self) -> str:
         return f"ClientBroker(endpoint={self._endpoint!r}, token=SecretStr('**********'))"
@@ -81,24 +94,45 @@ class ClientBroker:
 
     def get(self, target: AuthorisedTarget) -> Credentials:
         body = self._get("credentials", target)
-        password = body.get("password")
+        password, cookies = body.get("password"), body.get("cookies")
         if password is not None and not isinstance(password, str):
             raise BrokerError("client broker returned malformed credentials")
+        if cookies is not None and not isinstance(cookies, list):
+            raise BrokerError("client broker returned malformed credentials")
+        live: list[dict[str, Any]] | None = None
+        if cookies:
+            # H2: only host-only clones of live cookies for the authorised origin reach the
+            # driver -- the broker is the client's, but its answer is not trusted for scope.
+            picked = select_cookies(cookies, target.origins, self._now())
+            if picked.unreadable:
+                raise BrokerError(
+                    f"client broker returned {picked.unreadable} cookie(s) with an "
+                    "unreadable expiry"
+                )
+            log.info(
+                "client broker for %s: %d live cookie(s); %d dropped as off-origin, %d expired",
+                target.target,
+                len(picked.live),
+                picked.off_origin,
+                picked.expired,
+            )
+            live = picked.live or None
         creds: Credentials | None = None
         # pydantic's message echoes the input (the password): suppressed here, converted below
         # outside the handler so no ValidationError rides along as __context__.
         with contextlib.suppress(ValidationError):
             creds = Credentials(
-                cookies=body.get("cookies"),
+                cookies=live,
                 username=body.get("username"),
                 password=SecretStr(password) if password is not None else None,
             )
         if creds is None:
             raise BrokerError("client broker returned malformed credentials")
+        # After filtering: an answer whose only cookies are off-origin or expired is refused.
         if not creds.cookies and not (creds.username and creds.password):
             raise BrokerError(
-                "client broker returned no usable credential (neither a cookie nor a "
-                "username and password)"
+                "client broker returned no usable credential (neither a live cookie for the "
+                "authorised origin nor a username and password)"
             )
         return creds
 
