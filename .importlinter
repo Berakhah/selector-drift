@@ -89,5 +89,13 @@ forbidden_modules = selector_drift.scope._token
 # What is forbidden is a DIRECT import of _token from any of these packages.
 allow_indirect_imports = True
 
+[importlinter:contract:validate-cannot-land]
+name = The judge never writes the lake or the cache
+type = forbidden
+source_modules = selector_drift.validate
+forbidden_modules =
+    selector_drift.land
+    selector_drift.orchestrate
+
 # There is no no-model-calls contract here: the bok_core import allow-list is enforced by
 # tests/test_bok_core_allowlist.py instead.
