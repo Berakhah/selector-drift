@@ -81,6 +81,8 @@ services:
       SD_SESSION_DIR: /data/sessions
       SD_ESCALATION_CORPUS: /data/corpus/escalations
       SD_ALERT_WEBHOOK_URL: ${SD_ALERT_WEBHOOK_URL:-}
+      SD_DEPLOYS_FILE: /app/deploys.yaml       # Task 29A: each target's deploy feed
+      SD_GITHUB_TOKEN: ${SD_GITHUB_TOKEN:-}     # optional; gh-actions feeds only
       TZ: UTC
     depends_on:
       postgres: { condition: service_healthy }

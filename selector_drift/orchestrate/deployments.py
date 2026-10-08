@@ -1,7 +1,8 @@
 """One Prefect deployment per (target, spec), served by the worker container (design 9.2).
 
 `python -m selector_drift.orchestrate.deployments` registers them with the Prefect server and
-serves them; it blocks. Tasks 26C and 33 add their deployments to the serve() call.
+serves them; it blocks. Tasks 26C and 33 add their deployments to the serve() call; Task 29A
+added the fifteen-minute alert watch.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from prefect.schedules import Cron
 from selector_drift.browser.limits import MEM_LIMIT, PIDS_LIMIT
 from selector_drift.config import get_settings
 from selector_drift.orchestrate.flows import extraction_flow
+from selector_drift.orchestrate.watch import alert_watch
 from selector_drift.quality.alerts import WEBHOOK_ENV, webhook_url
 from selector_drift.spec.loader import load_spec
 
@@ -24,6 +26,8 @@ from selector_drift.spec.loader import load_spec
 # are named once, in browser/limits.py (Task 4).
 JOB_LIMITS: dict[str, str | int] = {"mem_limit": MEM_LIMIT, "pids_limit": PIDS_LIMIT}
 SCHEDULE_TIMEZONE = "UTC"
+WATCH_CRON = "*/15 * * * *"
+WATCH_JOB_LIMITS: dict[str, str | int] = {"mem_limit": "256m"}  # no browser in this flow
 
 _log = logging.getLogger(__name__)
 
@@ -50,6 +54,20 @@ def extraction_deployments() -> list[RunnerDeployment]:
     return out
 
 
+def watch_deployment() -> RunnerDeployment:
+    """Missed heartbeats, false accepts and deploy ingest: the checks with no run to hang off."""
+    return cast(
+        RunnerDeployment,
+        alert_watch.to_deployment(
+            name="alert-watch",
+            schedules=[Cron(WATCH_CRON, timezone=SCHEDULE_TIMEZONE)],
+            job_variables=dict(WATCH_JOB_LIMITS),
+            tags=["alerting"],
+            description="every 15 minutes: missed heartbeats, false accepts, deploy history",
+        ),
+    )
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     if webhook_url() is None:
@@ -57,7 +75,7 @@ def main() -> None:
     deployments = extraction_deployments()
     if not deployments:
         raise SystemExit(f"no task specs in {get_settings().spec_dir}")
-    serve(*deployments)
+    serve(*deployments, watch_deployment())
 
 
 if __name__ == "__main__":
