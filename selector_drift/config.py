@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import SecretStr
+
 DEFAULT_DATABASE_URL = "postgresql+psycopg://selector_drift@localhost:5432/selector_drift"
 MIN_REDACTION_KEY_BYTES = 32
 
@@ -35,6 +37,10 @@ class Settings:
     alert_webhook_url: str | None  # SD_ALERT_WEBHOOK_URL -- None: every alert logged NOT SENT
     session_dir: Path  # SD_SESSION_DIR -- injected session state (Task 31)
     escalation_corpus: Path  # SD_ESCALATION_CORPUS -- rung 5's cases (Task 18)
+    deploys_file: Path  # SD_DEPLOYS_FILE -- each target's deploy feed (Task 29A, M10)
+    # SD_GITHUB_TOKEN -- optional, read-only deployments scope, for gh-actions feeds (Task 29A).
+    # A SecretStr so the dataclass repr can never print it.
+    github_token: SecretStr | None
     _redaction_key_hex: str  # SD_REDACTION_KEY -- hex, >= 32 bytes, never committed
 
     @property
@@ -75,6 +81,8 @@ class Settings:
             alert_webhook_url=None,
             session_dir=Path("sessions"),
             escalation_corpus=Path("corpus/escalations"),
+            deploys_file=Path("deploys.yaml"),
+            github_token=None,
             _redaction_key_hex="",
         )
 
@@ -110,6 +118,9 @@ def get_settings() -> Settings:
         alert_webhook_url=e("SD_ALERT_WEBHOOK_URL", "").strip() or None,
         session_dir=Path(_env_or_default("SD_SESSION_DIR", "sessions")),
         escalation_corpus=Path(_env_or_default("SD_ESCALATION_CORPUS", "/data/corpus/escalations")),
+        deploys_file=Path(_env_or_default("SD_DEPLOYS_FILE", "deploys.yaml")),
+        # No default (a credential): set-but-empty behaves as unset.
+        github_token=SecretStr(token) if (token := e("SD_GITHUB_TOKEN", "").strip()) else None,
         # No default (a secret): a set-but-empty SD_REDACTION_KEY already behaves as unset --
         # `redaction_key` raises ConfigError on any falsy `_redaction_key_hex`.
         _redaction_key_hex=e("SD_REDACTION_KEY", ""),
