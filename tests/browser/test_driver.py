@@ -212,9 +212,9 @@ _SECOND_PROCESS = textwrap.dedent(
         ),
         today=today,
     )
-    t0 = time.monotonic()
+    before = time.time()
     ratelimit.acquire(target)
-    print(time.monotonic() - t0)
+    print(before, time.time())
     """
 )
 
@@ -223,7 +223,7 @@ _SECOND_PROCESS = textwrap.dedent(
 def test_the_limiter_is_persistent_across_processes(authorised_testbench):
     """Ten runs starting at once must not each get their own fresh bucket."""
     ratelimit.acquire(authorised_testbench)
-    t0 = time.monotonic()
+    first_acquired = time.time()
     out = subprocess.run(
         [sys.executable, "-c", _SECOND_PROCESS],
         env=os.environ.copy(),
@@ -232,7 +232,13 @@ def test_the_limiter_is_persistent_across_processes(authorised_testbench):
         timeout=120,
         check=True,
     )
-    assert time.monotonic() - t0 >= 29
-    # The wait happened inside the second process's acquire(), not in interpreter start-up
-    # (which legitimately spends part of the 30 s window, so this cannot also be >= 29).
-    assert float(out.stdout.strip().splitlines()[-1]) >= 20, out.stdout
+    # The child prints wall-clock stamps taken immediately around its own acquire(), so
+    # interpreter start-up time (seconds under -n 4 on a loaded host) is excluded from the
+    # measurement of what the limiter did.
+    before, after = (float(x) for x in out.stdout.strip().splitlines()[-1].split())
+    # The second process must not have been admitted until 30 s after the first acquire...
+    assert after - first_acquired >= 29, out.stdout
+    # ...and the wait must have happened inside its acquire(): whatever part of the 30 s
+    # window start-up did not already use (2 s clock/rounding slack) was spent waiting there.
+    remaining_at_call = 30 - (before - first_acquired)
+    assert after - before >= remaining_at_call - 2, out.stdout

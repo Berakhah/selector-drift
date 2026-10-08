@@ -30,6 +30,12 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
+# Prefect's background log shipper POSTs to its API (`/api/logs/`) from a worker thread that
+# outlives the flow test that started it; on the same xdist worker a later `httpx_mock` test
+# then sees that request as unexpected and fails. No test reads logs back from the API, so ship
+# none. Set here, before anything imports prefect, so every worker and subprocess inherits it.
+os.environ["PREFECT_LOGGING_TO_API_ENABLED"] = "false"
+
 REPO = Path(__file__).resolve().parents[1]
 _XDIST_WORKER = re.compile(r"gw\d+")
 _DATABASE_NAME = re.compile(r"[a-z0-9_]+")
