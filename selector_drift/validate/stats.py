@@ -1,7 +1,7 @@
-"""The one PSI in the product (ledger 2026-09-26). DistributionalAssertion (Task 23) and the
-data-quality distribution_shift rule (Task 29) both call psi_result() and critical_psi() -- the
-same statistic and the same breach rule, PSI over max(threshold, critical) -- so a heal-log line
-and a quality row about the same field cannot disagree. validate/ must not import
+"""The one PSI in the product (ledger 2026-09-26). Task 29's distribution-shift rule calls
+DistributionalAssertion.assess() (validate/assertions/distribution.py), which computes this
+module's statistic, so the gate and the quality screen share every guard and the breach rule and a
+heal-log line and a quality row about the same field cannot disagree. validate/ must not import
 quality/, and this task runs first, so the statistic lives here; the methodology table in
 docs/methodology.md describes exactly this file."""
 
@@ -30,8 +30,8 @@ ALPHA: Final = 0.01
 # A field is numeric when at least this share of the reference parses (fix round 1).
 NUMERIC_PARSE_FLOOR: Final = 0.95
 # The chi-square null behind critical_psi() assumes ~5 expected counts per bin. The numeric path's
-# k is bounded (PSI_BINS + underflow + overflow + unparseable); a categorical field's k is not, so
-# there a current sample under MIN_EXPECTED_PER_BIN * k is no basis (fix round 1, review C2).
+# k is bounded (PSI_BINS + underflow + overflow + blank + unparseable); a categorical field's k
+# is not, so there a current sample under MIN_EXPECTED_PER_BIN * k is no basis (review C2).
 MIN_EXPECTED_PER_BIN: Final = 5
 
 
@@ -93,26 +93,39 @@ def bin_counts(
     edges: tuple[float, ...],
     unparseable: int,
     bounds: tuple[float, float],
+    *,
+    blank: int,
 ) -> Floats:
     """Counts in this order: an UNDERFLOW bin (value < bounds[0], the reference minimum), the
-    len(edges) + 1 quantile bins, an OVERFLOW bin (value > bounds[1], the reference maximum),
-    and one last bin for values that are not numbers -- `unparseable`, and any non-finite float.
+    len(edges) + 1 quantile bins, an OVERFLOW bin (value > bounds[1], the reference maximum), a
+    BLANK bin (`blank` empty or whitespace-only cells), and a last bin for text that is not a
+    number -- `unparseable`, and any non-finite float.
     The outer bins are what let a constant reference see a move: its edges collapse to (c,), and
-    without them every value <= c would share its one bin (fix round 1, review C1). A value
-    equal to an edge falls in the lower bin (side="left"); the bounds themselves are inside.
-    Refuses an empty sample and bounds that are not a finite range."""
+    without them every value <= c would share its one bin (fix round 1, review C1). Blanks and
+    text are separate because a mostly-blank field healed onto a column of text kept one shared
+    bin's proportion and passed (fix round 2). A value equal to an edge falls in the lower bin
+    (side="left"); the bounds themselves are inside. Refuses an empty sample, a negative count,
+    and bounds that are not a finite range."""
     lo, hi = bounds
     if not (math.isfinite(lo) and math.isfinite(hi) and lo <= hi):
         raise ValueError(f"bounds must be a finite range, got {bounds!r}")
+    if blank < 0 or unparseable < 0:
+        raise ValueError("blank and unparseable are counts, never negative")
     a = np.asarray(values, dtype=np.float64)
     finite = a[np.isfinite(a)]
     idx = np.searchsorted(np.asarray(edges, dtype=np.float64), finite, side="left") + 1
     idx = np.where(finite < lo, 0, np.where(finite > hi, len(edges) + 2, idx))
     counts = np.bincount(idx, minlength=len(edges) + 3).astype(np.float64)
-    counts = np.append(counts, np.float64(unparseable + (a.size - finite.size)))
+    tail = [float(blank), float(unparseable + (a.size - finite.size))]
+    counts = np.append(counts, np.asarray(tail, dtype=np.float64))
     if counts.sum() <= 0:
         raise ValueError("cannot bin an empty sample")
     return np.asarray(counts, dtype=np.float64)
+
+
+def is_blank(cell: str) -> bool:
+    """An empty or whitespace-only cell (str.strip(): NBSP and tabs included)."""
+    return not cell.strip()
 
 
 def category_counts(reference: Sequence[str], current: Sequence[str]) -> tuple[Floats, Floats]:
@@ -147,8 +160,8 @@ def numeric_reference(reference: Sequence[str]) -> list[float] | None:
     parse -- the field is numeric -- else None, which selects the categorical path. One accepted
     "N/A" in a numeric column must not turn every amount into its own category (fix round 1),
     and neither must empty cells: a blank or whitespace-only cell is left out of the
-    denominator (review C2(b)) but still lands in the unparseable bin."""
-    filled = [v for v in reference if v.strip()]
+    denominator (review C2(b)) and lands in its own blank bin (fix round 2)."""
+    filled = [v for v in reference if not is_blank(v)]
     if not filled:
         return None
     parsed = [float(n) for v in filled if (n := parse_number(v)) is not None]
@@ -169,8 +182,8 @@ def psi_result(
 ) -> PsiResult:
     """PSI with what the noise floor needs. Numeric when numeric_reference() says so: quantile
     bins fixed from the reference's parsed values, flanked by an underflow and an overflow bin
-    at the reference's min and max, and unparseable values (blanks included) on EITHER side
-    counted in a last bin. Otherwise category counts over the union of
+    at the reference's min and max, then a blank bin and an unparseable-text bin, each counted on
+    EITHER side. Otherwise category counts over the union of
     categories. Jeffreys-smoothed (smoothed()). k == 1 -- every value on both sides in the same
     bin or category -- is PSI 0: a constant field that stayed constant. Both inputs must be
     non-empty (ValueError otherwise)."""
@@ -180,8 +193,10 @@ def psi_result(
     if ref_num is not None:
         edges, bounds = quantile_edges(ref_num, bins), reference_bounds(ref_num)
         parsed = [float(n) for v in current if (n := parse_number(v)) is not None]
-        rc = bin_counts(ref_num, edges, len(reference) - len(ref_num), bounds)
-        cc = bin_counts(parsed, edges, len(current) - len(parsed), bounds)
+        rb = sum(1 for v in reference if is_blank(v))
+        cb = sum(1 for v in current if is_blank(v))
+        rc = bin_counts(ref_num, edges, len(reference) - rb - len(ref_num), bounds, blank=rb)
+        cc = bin_counts(parsed, edges, len(current) - cb - len(parsed), bounds, blank=cb)
         categorical = False
     else:
         rc, cc = category_counts(reference, current)

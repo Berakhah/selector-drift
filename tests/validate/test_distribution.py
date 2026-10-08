@@ -268,10 +268,10 @@ def test_a_tiny_current_sample_is_not_evidence() -> None:
 
 @pytest.mark.unit
 def test_min_values_is_set_from_measured_power() -> None:
-    # The smallest n at which a x10 shift is detected >= 95% of the time, rounded up to a
-    # multiple of 10: n=20 (97.1%; n=15 80.3%) on scripts/measure_psi_power.py once the
-    # overflow bin existed (review fix round 1). See docs/methodology.md.
-    assert MIN_VALUES == 20
+    # The smallest n at which BOTH a x10 and a x3 shift are detected >= 95% of the time on
+    # scripts/measure_psi_power.py, rounded up to a multiple of 10: n=40 (x3 98.0%; n=35 93.7%).
+    # x10 alone gave 20 once the overflow bin existed, with x3 at 49% (fix round 2).
+    assert MIN_VALUES == 40
 
 
 @pytest.mark.unit
@@ -611,13 +611,66 @@ def test_six_percent_blank_amounts_healed_onto_an_na_column_fails() -> None:
 
 
 @pytest.mark.unit
-def test_judge_is_the_breach_rule_assess_applies() -> None:
-    # scripts/measure_psi_power.py measures through judge(); assess() must be judge() plus the
-    # warm-up and MIN_VALUES guards, nothing else.
+def test_the_private_judge_is_the_breach_rule_assess_applies() -> None:
+    # Fix round 2: _judge() skips warm-up and MIN_VALUES, so it is private; assess() is the only
+    # path to a verdict. scripts/measure_psi_power.py measures through _judge() below
+    # MIN_VALUES; assess() must be _judge() plus the guards, nothing else.
+    assert not hasattr(DistributionalAssertion, "judge")
     h = amount_history(40)
     reference = h.trailing(REFERENCE_RUNS).values("amount")
     for current in (grid(101, 9), grid(5000, 9), _bunched()):
-        j = DA.judge(reference, current, "amount")
+        j = DA._judge(reference, current, "amount")
         a = DA.assess(column("amount", current), h, "amount")
         assert isinstance(j, Judgement) and isinstance(a, Assessment)
         assert (j.result.psi, j.critical, j.breach) == (a.psi, a.critical, a.breach)
+
+
+# -- fix round 2 (re-review a78cc83b13ce18e8e): blanks get their own bin; thin numeric reference
+
+
+def _mostly_blank(i: int) -> list[str]:
+    """100 cells per run: 90 blank, 10 amounts distinct per run."""
+    return ["" if j % 10 else f"{100 + 0.37 * i + 9 * j:,.2f}" for j in range(100)]
+
+
+@pytest.mark.unit
+def test_a_mostly_blank_field_healed_onto_a_text_column_fails() -> None:
+    h = history_of("amount", 40, values=_mostly_blank)
+    current = column("amount", ["see notes" if j % 10 == 0 else "" for j in range(100)])
+    v = DA.check(current, h, HEALED)
+    assert v.outcome is Outcome.FAIL and "see notes" not in v.reason
+
+
+@pytest.mark.unit
+def test_a_mostly_blank_field_healed_onto_the_same_mix_passes() -> None:
+    h = history_of("amount", 40, values=_mostly_blank)
+    assert DA.check(column("amount", _mostly_blank(41)), h, HEALED).outcome is Outcome.PASS
+
+
+def _thin(numbers: int) -> History:
+    """40 runs of 20 blank cells; the trailing 30 runs also hold `numbers` amounts between them."""
+
+    def values(i: int) -> list[str]:
+        own = [f"{100 + 9 * j:,.2f}" for j in range(numbers) if i >= 10 and j % 30 == i - 10]
+        return [""] * 20 + own
+
+    return history_of("amount", 40, values=values)
+
+
+@pytest.mark.unit
+def test_a_numeric_reference_with_one_number_is_no_basis() -> None:
+    # 599 blanks + one number: the field is numeric, but quantile edges from one number are
+    # degenerate. Fewer than MIN_VALUES parseable reference values -> INSUFFICIENT.
+    h = _thin(1)
+    assert len(h.trailing(REFERENCE_RUNS).values("amount")) == 601
+    v = DA.check(column("amount", ["n/a"] * 100), h, HEALED)
+    assert v.outcome is Outcome.INSUFFICIENT
+    assert "1 parseable amount values" in v.reason and f"fewer than {MIN_VALUES}" in v.reason
+
+
+@pytest.mark.unit
+def test_the_parseable_reference_floor_boundary() -> None:
+    below = DA.check(column("amount", ["n/a"] * 100), _thin(MIN_VALUES - 1), HEALED)
+    assert below.outcome is Outcome.INSUFFICIENT and "parseable" in below.reason
+    at = DA.check(column("amount", ["n/a"] * 100), _thin(MIN_VALUES), HEALED)
+    assert at.outcome is Outcome.FAIL  # judged: a column of text where blanks and amounts were

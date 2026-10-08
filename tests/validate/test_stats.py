@@ -83,38 +83,44 @@ def test_quantile_edges_ignore_non_finite_reference_values() -> None:
 
 
 @pytest.mark.unit
-def test_bin_counts_layout_is_underflow_quantile_bins_overflow_then_unparseable() -> None:
-    # Fix round 1 (C1): [< min | quantile bins | > max | unparseable].
-    c = bin_counts([1.0, 5.0, 9.0], (2.0, 6.0), unparseable=1, bounds=(1.0, 9.0))
-    assert c.tolist() == [0, 1, 1, 1, 0, 1]
+def test_bin_counts_layout_is_underflow_quantile_bins_overflow_blank_then_unparseable() -> None:
+    # [< min | quantile bins | > max | blank | unparseable text] (fix rounds 1 and 2).
+    c = bin_counts([1.0, 5.0, 9.0], (2.0, 6.0), unparseable=1, bounds=(1.0, 9.0), blank=2)
+    assert c.tolist() == [0, 1, 1, 1, 0, 2, 1]
     # A value equal to an edge falls in the lower bin (side="left").
-    assert bin_counts([2.0], (2.0, 6.0), unparseable=0, bounds=(1.0, 9.0)).tolist() == [
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-    ]
+    c = bin_counts([2.0], (2.0, 6.0), unparseable=0, bounds=(1.0, 9.0), blank=0)
+    assert c.tolist() == [0, 1, 0, 0, 0, 0, 0]
 
 
 @pytest.mark.unit
 def test_bin_counts_put_values_outside_the_reference_range_in_their_own_bins() -> None:
-    c = bin_counts([0.5, 1.0, 9.0, 9.5, 100.0], (2.0, 6.0), unparseable=0, bounds=(1.0, 9.0))
+    c = bin_counts(
+        [0.5, 1.0, 9.0, 9.5, 100.0], (2.0, 6.0), unparseable=0, bounds=(1.0, 9.0), blank=0
+    )
     # Below min -> underflow; min itself and max itself are inside; above max -> overflow.
-    assert c.tolist() == [1, 1, 0, 1, 2, 0]
+    assert c.tolist() == [1, 1, 0, 1, 2, 0, 0]
 
 
 @pytest.mark.unit
 def test_bin_counts_count_non_finite_values_as_unparseable() -> None:
-    c = bin_counts([math.nan, math.inf, -math.inf, 1.0], (2.0,), unparseable=0, bounds=(0.0, 3.0))
-    assert c.tolist() == [0, 1, 0, 0, 3]
+    c = bin_counts(
+        [math.nan, math.inf, -math.inf, 1.0], (2.0,), unparseable=0, bounds=(0.0, 3.0), blank=0
+    )
+    assert c.tolist() == [0, 1, 0, 0, 0, 3]
+
+
+@pytest.mark.unit
+def test_bin_counts_refuse_a_negative_count() -> None:
+    with pytest.raises(ValueError):
+        bin_counts([1.0], (2.0,), unparseable=0, bounds=(0.0, 3.0), blank=-1)
+    with pytest.raises(ValueError):
+        bin_counts([1.0], (2.0,), unparseable=-1, bounds=(0.0, 3.0), blank=0)
 
 
 @pytest.mark.unit
 def test_bin_counts_refuse_an_empty_sample() -> None:
     with pytest.raises(ValueError):
-        bin_counts([], (2.0,), unparseable=0, bounds=(0.0, 3.0))
+        bin_counts([], (2.0,), unparseable=0, bounds=(0.0, 3.0), blank=0)
 
 
 @pytest.mark.unit
@@ -125,7 +131,7 @@ def test_bin_counts_refuse_an_empty_sample() -> None:
 )
 def test_bin_counts_refuse_bounds_that_are_not_a_range(bounds: tuple[float, float]) -> None:
     with pytest.raises(ValueError):
-        bin_counts([1.0], (2.0,), unparseable=0, bounds=bounds)
+        bin_counts([1.0], (2.0,), unparseable=0, bounds=bounds, blank=0)
 
 
 @pytest.mark.unit
@@ -296,7 +302,10 @@ def test_property_nan_and_inf_values_never_produce_a_nan_psi(
     edges, bounds = quantile_edges(reference), reference_bounds(reference)
     assert all(math.isfinite(e) for e in edges)
     score = psi(
-        *smoothed(bin_counts(reference, edges, 0, bounds), bin_counts(current, edges, 0, bounds))
+        *smoothed(
+            bin_counts(reference, edges, 0, bounds, blank=0),
+            bin_counts(current, edges, 0, bounds, blank=0),
+        )
     )
     assert math.isfinite(score)
 
@@ -449,12 +458,45 @@ def test_blank_cells_do_not_count_against_the_parse_floor(blank: str) -> None:
 
 
 @pytest.mark.unit
-def test_blank_cells_still_go_to_the_unparseable_bin() -> None:
+def test_blank_cells_have_their_own_bin() -> None:
+    # Fix round 2: a blank is not unparseable text. Each has its own bin on the numeric path.
     amounts = [f"{100 + i:,.2f}" for i in range(94)]
     with_blanks = [*amounts, *[""] * 6]
     r = psi_result(with_blanks, with_blanks)
     assert not r.categorical and r.k == 11 and r.psi == pytest.approx(0.0, abs=1e-12)
     assert psi_result(with_blanks, amounts).k == 11  # the reference's blanks are a bin
+    # Blanks on one side and the same share of text on the other are two bins, not one.
+    assert psi_result(with_blanks, [*amounts, *["n/a"] * 6]).k == 12
+
+
+def _breaches(reference: list[str], current: list[str]) -> bool:
+    r = psi_result(reference, current)
+    return r.psi > max(0.20, critical_psi(r.k, r.reference_n, r.current_n))
+
+
+_MOSTLY_BLANK = ["" if j % 10 else f"{100 + 7 * j:,.2f}" for j in range(3000)]  # 90% blank
+
+
+@pytest.mark.unit
+def test_a_mostly_blank_field_healed_onto_text_breaches() -> None:
+    # Re-review a78cc83b13ce18e8e: 90% blank + 10% amounts, healed onto 90% blank + 10% text.
+    # Blanks and text shared a bin: PSI 0.044 against critical 0.24, a PASS.
+    current = ["see notes" if j % 10 == 0 else "" for j in range(100)]
+    assert not psi_result(_MOSTLY_BLANK, current).categorical
+    assert _breaches(_MOSTLY_BLANK, current)
+
+
+@pytest.mark.unit
+def test_a_mostly_blank_field_healed_onto_the_same_mix_does_not_breach() -> None:
+    current = ["" if j % 10 else f"{105 + 70 * j:,.2f}" for j in range(100)]
+    assert not _breaches(_MOSTLY_BLANK, current)
+
+
+@pytest.mark.unit
+def test_one_number_among_blanks_healed_onto_text_breaches_in_the_statistic() -> None:
+    # 599 blanks + one number is numeric; an all-n/a heal scored PSI 0.002 with one shared bin.
+    # (The assertion refuses to judge a reference this thin: see test_distribution.py.)
+    assert _breaches([*[""] * 599, "5"], ["n/a"] * 100)
 
 
 @pytest.mark.unit

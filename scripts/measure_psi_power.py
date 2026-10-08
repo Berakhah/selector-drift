@@ -2,17 +2,19 @@
 
 Run from the repository root:  python scripts/measure_psi_power.py
 
-Every breach decision goes through DistributionalAssertion.judge() -- the product's own breach
-rule (PSI over max(threshold, chi-square critical), Jeffreys smoothing, under/overflow bins), the
-same call assess() makes -- so these numbers are the product's, not a re-implementation's.
-judge() is used rather than assess() because assess() refuses to judge below MIN_VALUES, and the
-rows below MIN_VALUES are how MIN_VALUES is chosen.
+Every breach decision goes through DistributionalAssertion._judge() -- the product's own breach
+rule (PSI over max(threshold, chi-square critical), Jeffreys smoothing, under/overflow, blank and
+unparseable bins), the same call assess() makes -- so these numbers are the product's, not a
+re-implementation's. The private _judge() is used rather than assess() because assess() refuses
+to judge below MIN_VALUES, and the rows below MIN_VALUES are how MIN_VALUES is chosen.
 
 Data: the bench's own amount distribution, log-uniform over [100, 250,000] at 2 dp. Reference:
 30 runs x PAGE_SIZE values. Seeds are fixed, so a rerun prints the same numbers.
 
-MIN_VALUES rule (docs/methodology.md): the smallest current n at which a x10 shift is detected
-at least 95% of the time, rounded up to a multiple of 10.
+MIN_VALUES rule (docs/methodology.md): the smallest current n at which BOTH a x10 shift and a x3
+shift are detected at least 95% of the time, rounded up to a multiple of 10. (x10 alone was the
+rule until the overflow bin made a x10 shift visible from a handful of values above the
+reference maximum; x3 keeps most of a shifted sample inside the reference range.)
 """
 
 from __future__ import annotations
@@ -32,15 +34,16 @@ from testbench.mutations.adversarial.decoy_column import DecoyColumn
 from testbench.portal.render import PAGE_SIZE, result_set
 
 CHECK = DistributionalAssertion()
-POWER_NS = (10, 15, 20, 25, 30, 35, 40, 45)
+POWER_NS = tuple(range(10, 65, 5))
 FALSE_BREACH_NS = (40, 50, 200)
 DRAWS = 1000
 DECOY_TRIALS = 300
 
 
 def breach(reference: list[str], current: list[str]) -> bool:
-    """The product's breach rule. A str from judge() is "no basis": not a breach."""
-    j = CHECK.judge(reference, current, "amount")
+    """The product's breach rule. A str from _judge() is "no basis": not a breach."""
+    # _judge, not assess(): the derivation must measure below MIN_VALUES, where assess() refuses.
+    j = CHECK._judge(reference, current, "amount")
     return not isinstance(j, str) and j.breach
 
 
@@ -60,18 +63,22 @@ def false_breach() -> None:
 
 
 def power() -> int | None:
-    print("x10 shift detected / false breach, by current n")
+    print("x10 and x3 shifts detected / false breach, by current n")
     first: int | None = None
     for n in POWER_NS:
         rng = np.random.default_rng(1000 + n)
-        hit = fp = 0
+        x10 = x3 = fp = 0
         for _ in range(DRAWS):
             reference = money(rng, REFERENCE_RUNS * PAGE_SIZE)
-            hit += breach(reference, money(rng, n, 10.0))
+            x10 += breach(reference, money(rng, n, 10.0))
+            x3 += breach(reference, money(rng, n, 3.0))
             fp += breach(reference, money(rng, n))
-        if first is None and hit / DRAWS >= 0.95:
+        if first is None and min(x10, x3) / DRAWS >= 0.95:
             first = n
-        print(f"  n={n:3d}  x10 detected {hit / DRAWS:6.1%}  false breach {fp / DRAWS:6.1%}")
+        print(
+            f"  n={n:3d}  x10 detected {x10 / DRAWS:6.1%}  x3 detected {x3 / DRAWS:6.1%}  "
+            f"false breach {fp / DRAWS:6.1%}"
+        )
     return first
 
 
@@ -103,7 +110,7 @@ if __name__ == "__main__":
     first = power()
     derived = None if first is None else 10 * math.ceil(first / 10)
     print(
-        f"smallest n with x10 detected >= 95%: {first}; MIN_VALUES by the rule: {derived}; "
+        f"smallest n with x10 AND x3 detected >= 95%: {first}; MIN_VALUES by the rule: {derived}; "
         f"product MIN_VALUES: {MIN_VALUES}"
     )
     decoy()
