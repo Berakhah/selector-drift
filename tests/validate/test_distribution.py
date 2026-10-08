@@ -726,3 +726,30 @@ def test_the_non_blank_floor_does_not_touch_the_categorical_path() -> None:
     a = DA.assess(current, h, "status")
     assert isinstance(a, Assessment) and a.categorical
     assert DA.check(current, h, ctx(status, rung=3)).outcome is not Outcome.INSUFFICIENT
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("history", "current"),
+    [
+        (None, SHIFTED),  # no history: warm-up
+        (amount_history(3), SHIFTED),  # warm-up
+        (amount_history(40), SAME),  # no breach
+        (amount_history(40), SHIFTED),  # first breach
+        (amount_history(40, prior_breaches=1), SHIFTED),  # persisted: alert
+        (amount_history(40, prior_breaches=1, marked_expected=True), SHIFTED),  # suppressed
+        (amount_history(40), column(AMOUNT.name, grid(100, 9, 10))),  # too few values
+    ],
+)
+def test_assess_values_is_assess_without_the_candidate(
+    history: History | None, current: object
+) -> None:
+    """Task 29's quality rule reads values from the lake, not from a candidate: assess_values
+    is the same judgement -- every guard, the breach rule, persistence and suppression."""
+    from selector_drift.extract.models import CandidateExtraction
+    from selector_drift.validate.assertions.base import column as values_of
+
+    assert isinstance(current, CandidateExtraction)
+    via_candidate = DA.assess(current, history, "amount")
+    via_values = DA.assess_values(history, values_of(current, "amount"), "amount")
+    assert via_values == via_candidate
