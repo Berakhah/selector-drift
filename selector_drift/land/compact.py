@@ -29,6 +29,7 @@ from selector_drift.land.layout import (
     STAGING_DIR,
     WRITE_ID_COL,
     check_target,
+    dedup_sql,
     parse_file_name,
 )
 
@@ -65,16 +66,14 @@ def _acquire(lock: Path) -> bool:
 
 
 def _dedup(table: pa.Table) -> pa.Table:
-    """The view's rule within one run: per natural key, greatest ingested_at, then write id."""
+    """The view's own rule (layout.dedup_sql), within one run's files in one partition -- where
+    target and window are constant, so the natural key alone partitions."""
     con = duckdb.connect(database=":memory:")
     try:
         con.execute("SET TimeZone = 'UTC'")
         con.register("t", table)
         return con.execute(
-            "SELECT * EXCLUDE (_sd_rank) FROM (SELECT *, row_number() OVER ("
-            f"PARTITION BY {NATURAL_KEY_COL} ORDER BY {INGESTED_AT_COL} DESC, "
-            f"{WRITE_ID_COL} DESC) AS _sd_rank FROM t) WHERE _sd_rank = 1 "
-            f"ORDER BY {INGESTED_AT_COL}, {WRITE_ID_COL}"
+            f"{dedup_sql('t', [NATURAL_KEY_COL])} ORDER BY {INGESTED_AT_COL}, {WRITE_ID_COL}"
         ).to_arrow_table()
     finally:
         con.close()

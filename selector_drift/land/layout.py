@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -61,3 +62,23 @@ def parse_file_name(name: str) -> tuple[str, int, str]:
 
 def is_data_column(name: str) -> bool:
     return name not in RESERVED and not name.startswith(META_PREFIX)
+
+
+def check_field_names(names: Iterable[str]) -> None:
+    """Refuses spec field names that would collide with the lake's own columns. Names are the
+    spec's, never client data, so the message may quote them."""
+    clash = sorted({n for n in names if not is_data_column(n)})
+    if clash:
+        raise ValueError(f"field name(s) {clash} collide with the lake's metadata columns")
+
+
+def dedup_sql(source: str, partition_by: Sequence[str]) -> str:
+    """The one dedup rule: per partition, greatest ingested_at wins, the write id breaks ties.
+    The lake view and compaction both use it, so they always pick the same winner -- which is
+    what keeps the view's row set identical across a compaction swap."""
+    return (
+        "SELECT * EXCLUDE (_sd_rank) FROM (SELECT *, row_number() OVER ("
+        f"PARTITION BY {', '.join(partition_by)} "
+        f"ORDER BY {INGESTED_AT_COL} DESC, {WRITE_ID_COL} DESC) AS _sd_rank FROM {source}) "
+        "WHERE _sd_rank = 1"
+    )

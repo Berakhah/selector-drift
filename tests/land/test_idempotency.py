@@ -8,7 +8,8 @@ import pytest
 from selector_drift.extract.models import CandidateExtraction
 from selector_drift.land.catalog import query, run_columns
 from selector_drift.land.compact import compact
-from selector_drift.land.writer import fs_key, write
+from selector_drift.land.layout import check_field_names, dedup_sql
+from selector_drift.land.writer import SpecVersionMismatch, fs_key, write
 from tests.land.factory import RUN_KEY, make_validated, parquet_files, rows, scalar
 
 
@@ -183,3 +184,40 @@ def test_run_columns_are_the_runs_own_columns(lake_dir: Path) -> None:
     cols = run_columns(RUN_KEY)
     assert "status" not in cols
     assert {"claim_number", "amount", "run_key", "ingested_at"} <= set(cols)
+
+
+@pytest.mark.integration
+def test_a_run_from_another_spec_version_is_refused(lake_dir: Path) -> None:
+    # specs/ holds only the current version; its natural_key may have changed since that run,
+    # and rows landed under a different key are rows the dedup view can never collapse.
+    with pytest.raises(SpecVersionMismatch) as exc:
+        write(make_validated(rows(3), "testbench:1:2026-09-07"))
+    message = str(exc.value)
+    assert "testbench" in message and "1" in message and "2" in message
+    assert "AB10000000" not in message
+    assert isinstance(exc.value, ValueError)
+    assert parquet_files(lake_dir) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "name", ["run_key", "ingested_at", "target", "window", "_sd_natural_key", "_sd_anything"]
+)
+def test_check_field_names_refuses_every_metadata_name(name: str) -> None:
+    # The spec's FieldName pattern already forbids a leading '_', so the gate can never mint an
+    # _sd_ field; this pins the writer's own defence directly.
+    with pytest.raises(ValueError, match="metadata") as exc:
+        check_field_names(["claim_number", name])
+    assert name in str(exc.value)
+
+
+@pytest.mark.unit
+def test_check_field_names_accepts_ordinary_fields() -> None:
+    check_field_names(["claim_number", "amount", "sd_like", "windowed"])
+
+
+@pytest.mark.unit
+def test_the_view_and_compaction_share_one_dedup_rule() -> None:
+    sql = dedup_sql("src", ["a", "b"])
+    assert "PARTITION BY a, b ORDER BY ingested_at DESC, _sd_write_id DESC" in sql
+    assert "FROM src" in sql

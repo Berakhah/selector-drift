@@ -21,12 +21,11 @@ from selector_drift.config import get_settings
 from selector_drift.land import compact as _compact
 from selector_drift.land.layout import (
     INGESTED_AT_COL,
-    META_PREFIX,
     NATURAL_KEY_COL,
     PROVENANCE_COL,
-    RESERVED,
     RUN_KEY_COL,
     WRITE_ID_COL,
+    check_field_names,
     parse_file_name,
     partition_dir,
     split_run_key,
@@ -39,8 +38,21 @@ COMPACT_AFTER_FILES = 24  # module global so a test can lower it (P4)
 _META = (RUN_KEY_COL, INGESTED_AT_COL, NATURAL_KEY_COL, WRITE_ID_COL, PROVENANCE_COL)
 
 
-def _natural_key(target: str) -> list[str]:
-    return list(load_spec(get_settings().spec_dir / f"{target}.yaml").natural_key)
+class SpecVersionMismatch(ValueError):
+    """The run was extracted under a spec version that is no longer the one on disk."""
+
+
+def _natural_key(target: str, version: int) -> list[str]:
+    """The key of the spec the run was extracted under. specs/ keeps only the current version,
+    so a run from any other version is refused: its natural_key may since have changed, and
+    rows landed under a different key are rows the dedup view can never collapse."""
+    spec = load_spec(get_settings().spec_dir / f"{target}.yaml")
+    if spec.version != version:
+        raise SpecVersionMismatch(
+            f"run for target {target!r} was extracted under spec version {version}, but the "
+            f"spec on disk is version {spec.version}; its natural key cannot be trusted"
+        )
+    return list(spec.natural_key)
 
 
 def _records(validated: ValidatedExtraction, key_fields: list[str]) -> list[dict[str, Any]]:
@@ -48,9 +60,7 @@ def _records(validated: ValidatedExtraction, key_fields: list[str]) -> list[dict
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
     for i, row in enumerate(validated.rows):
-        clash = sorted(f for f in row if f in RESERVED or f.startswith(META_PREFIX))
-        if clash:
-            raise ValueError(f"field name(s) {clash} collide with the lake's metadata columns")
+        check_field_names(row)
         missing = [k for k in key_fields if k not in row]
         if missing:
             raise ValueError(f"row {i} lacks natural key field(s) {missing}")
@@ -105,8 +115,8 @@ def write(validated: ValidatedExtraction, *, attempt: int | None = None) -> Path
             "land.write accepts only a ValidatedExtraction, got "
             f"{type(validated).__name__} -- the gate is the only way into the lake"
         )
-    target, _version, window = split_run_key(validated.run_key)
-    records = _records(validated, _natural_key(target))
+    target, version, window = split_run_key(validated.run_key)
+    records = _records(validated, _natural_key(target, version))
     part = partition_dir(get_settings().lake_root, target, window)
     part.mkdir(parents=True, exist_ok=True)
     n = attempt if attempt is not None else _next_attempt(part, validated.run_key)
