@@ -21,6 +21,7 @@ from selector_drift.land.layout import (
     RUN_KEY_COL,
     WRITE_ID_COL,
     check_target,
+    dedup_sql,
     fs_key,
     partition_dir,
     split_run_key,
@@ -37,12 +38,7 @@ _EMPTY = (
 )
 
 # Deduplicated on (target, window, natural key): the same key on two days is two days of history.
-_DEDUP = (
-    "SELECT * EXCLUDE (_sd_rank) FROM (SELECT *, row_number() OVER ("
-    f'PARTITION BY target, "window", {NATURAL_KEY_COL} '
-    f"ORDER BY {INGESTED_AT_COL} DESC, {WRITE_ID_COL} DESC) AS _sd_rank FROM lake_raw) "
-    "WHERE _sd_rank = 1"
-)
+_DEDUP = dedup_sql("lake_raw", ["target", '"window"', NATURAL_KEY_COL])
 
 
 @dataclass(frozen=True)

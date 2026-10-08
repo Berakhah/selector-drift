@@ -90,7 +90,7 @@ def test_compaction_under_a_concurrent_reader_raises_nothing(lake_dir: Path) -> 
         stop.set()
         t.join()
     assert errors == []
-    assert counts <= {3}
+    assert counts == {3}  # the reader really read, and only ever saw the same rows
     assert len(parquet_files(lake_dir)) == 1
 
 
@@ -141,6 +141,10 @@ def test_a_write_after_compaction_numbers_its_attempt_past_the_folded_file(lake_
 def test_compaction_never_folds_two_runs_together(lake_dir: Path) -> None:
     # A spec bump mid-day puts two run keys in one partition; each folds only into itself.
     _writes(2)
+    spec = lake_dir.parent / "specs" / "testbench.yaml"
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace("version: 2", "version: 3", 1), encoding="utf-8"
+    )
     write(make_validated(rows(3), "testbench:3:2026-09-07"))
     write(make_validated(rows(3), "testbench:3:2026-09-07"))
     compact("testbench")
