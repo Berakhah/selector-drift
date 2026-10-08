@@ -13,7 +13,14 @@ from typing import Any, Final, Literal
 
 from selector_drift.config import get_settings
 from selector_drift.land.catalog import query
-from selector_drift.land.layout import fs_key, is_data_column, split_run_key
+from selector_drift.land.layout import (
+    NATURAL_KEY_COL,
+    RUN_KEY_COL,
+    dedup_sql,
+    fs_key,
+    is_data_column,
+    split_run_key,
+)
 from selector_drift.spec.loader import load_spec
 
 Action = Literal["add", "change", "unchanged"]
@@ -25,12 +32,18 @@ def _cell(value: str) -> str:
     return f"'{value}" if value.startswith(_FORMULA) else value
 
 
-def _read_prior(prior: Path, keys: list[str]) -> dict[tuple[str, ...], dict[str, str]]:
+def _read_prior(
+    prior: Path, keys: list[str], fields: list[str]
+) -> dict[tuple[str, ...], dict[str, str]]:
+    """Record numbers only in messages: a prior's cells are the client's data."""
     if prior.suffix.lower() == ".json":
         loaded = json.loads(prior.read_text(encoding="utf-8"))
         if not isinstance(loaded, list):
             raise ValueError(f"{prior.name}: a JSON prior is a list of objects")
-        records: list[dict[str, Any]] = [r for r in loaded if isinstance(r, dict)]
+        for i, r in enumerate(loaded):
+            if not isinstance(r, dict):
+                raise ValueError(f"{prior.name} record {i} is not an object")
+        records: list[dict[str, Any]] = loaded
     else:
         with prior.open(newline="", encoding="utf-8") as fh:
             records = list(csv.DictReader(fh))
@@ -39,7 +52,14 @@ def _read_prior(prior: Path, keys: list[str]) -> dict[tuple[str, ...], dict[str,
         missing = [k for k in keys if k not in r]
         if missing:
             raise ValueError(f"{prior.name} record {i} lacks natural key field(s) {missing}")
-        out[tuple(str(r[k]) for k in keys)] = {k: "" if v is None else str(v) for k, v in r.items()}
+        absent = [f for f in fields if f not in r]
+        if absent:
+            # A blank would read as "the client's value was empty" and fake a change.
+            raise ValueError(f"{prior.name} record {i} lacks column(s) {absent}")
+        ident = tuple(str(r[k]) for k in keys)
+        if ident in out:
+            raise ValueError(f"{prior.name} record {i} repeats an earlier natural key")
+        out[ident] = {k: "" if v is None else str(v) for k, v in r.items()}
     return out
 
 
@@ -47,9 +67,10 @@ def _lines(run_key: str, prior: Path) -> tuple[list[str], list[dict[str, Any]]]:
     target, _version, _window = split_run_key(run_key)
     spec = load_spec(get_settings().spec_dir / f"{target}.yaml")
     keys = list(spec.natural_key)
-    # `lake` is already deduplicated, so a later attempt of this run supersedes an earlier one;
-    # the run_key filter keeps a different run that shares the window out of the export.
-    result = query("select * from lake where run_key = ?", [run_key], target=target)
+    # Dedup WITHIN this run only: `lake` dedups across run_keys, so a later run in the same
+    # window would erode (or empty) this run's export. Latest attempt of this run wins.
+    within_run = dedup_sql(f"(SELECT * FROM lake_raw WHERE {RUN_KEY_COL} = ?)", [NATURAL_KEY_COL])
+    result = query(within_run, [run_key], target=target)
     current = result.dicts()
     if not current:
         raise LookupError(
@@ -62,7 +83,7 @@ def _lines(run_key: str, prior: Path) -> tuple[list[str], list[dict[str, Any]]]:
         for f in spec.expected_schema
         if f not in keys and f in result.columns and is_data_column(f)
     ]
-    before_by_key = _read_prior(prior, keys)
+    before_by_key = _read_prior(prior, keys, fields)
     lines: list[dict[str, Any]] = []
     for row in sorted(current, key=lambda r: [str(r[k]) for k in keys]):
         ident = tuple(str(row[k]) for k in keys)
