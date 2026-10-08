@@ -9,7 +9,8 @@ A breach is PSI over max(threshold, critical), where critical is the chi-square 
   An alert only when the breach persists `persistence` runs and the client has not marked it
   expected.
 
-"No basis yet" (warm-up, a reference window or current sample too small to be evidence) is
+"No basis yet" (warm-up, a reference window or current sample too small to be evidence, a
+categorical field with fewer than MIN_EXPECTED_PER_BIN current values per category) is
 INSUFFICIENT, never PASS: on a heal the gate treats INSUFFICIENT as FAIL, on a cache hit it is
 tolerated -- exactly the asymmetry the table needs."""
 
@@ -24,7 +25,9 @@ from selector_drift.validate.assertions.base import column
 from selector_drift.validate.history import History
 from selector_drift.validate.stats import (
     ALPHA,
+    MIN_EXPECTED_PER_BIN,
     PSI_BINS,
+    PsiResult,
     critical_psi,
     numeric_reference,
     psi_result,
@@ -37,13 +40,22 @@ if TYPE_CHECKING:
     from selector_drift.validate.gate import HealContext
 
 REFERENCE_RUNS: Final = 30
-# Set from measured power (fix round 3): a PASS from a check with no power is fail-open. The
-# smallest current n at which a x10 shift is detected >= 95% of the time (bench-like data,
-# reference 30 x 50 values, 1000 draws) was 35 (98.8%), rounded up to a multiple of 10. At 40:
-# 99.8% detected, 0.5% false breach. Below this on EITHER side the check has no basis:
-# INSUFFICIENT -- a heal quarantines, a cache hit is tolerated, no alert. docs/methodology.md.
-MIN_VALUES: Final = 40
-__all__ = ["ALPHA", "MIN_VALUES", "REFERENCE_RUNS", "Assessment", "DistributionalAssertion"]
+# Set from measured power: a PASS from a check with no power is fail-open. MIN_VALUES is the
+# smallest current n at which a x10 shift is detected >= 95% of the time, rounded up to a
+# multiple of 10, as scripts/measure_psi_power.py measures it through judge() (bench-like data,
+# reference 30 x 50 values, 1000 draws). Pre-review it was 40 (n=35: 98.8%). Once the overflow
+# bin existed (review fix round 1, C1) n=20 detected 97.1% (n=15: 80.3%) at 0.1% false breach,
+# so the rule gives 20. Below this on EITHER side the check has no basis: INSUFFICIENT -- a heal
+# quarantines, a cache hit is tolerated, no alert. docs/methodology.md.
+MIN_VALUES: Final = 20
+__all__ = [
+    "ALPHA",
+    "MIN_VALUES",
+    "REFERENCE_RUNS",
+    "Assessment",
+    "DistributionalAssertion",
+    "Judgement",
+]
 
 
 @dataclass(frozen=True)
@@ -59,6 +71,15 @@ class Assessment:
     alert: bool  # breach, persisted, not suppressed -- Task 29 notifies on this
 
 
+@dataclass(frozen=True)
+class Judgement:
+    """The breach rule applied to two value lists (DistributionalAssertion.judge)."""
+
+    result: PsiResult
+    critical: float  # 0.0 when k == 1
+    breach: bool  # PSI over max(threshold, critical)
+
+
 class DistributionalAssertion:
     name = "DistributionalAssertion"
 
@@ -72,12 +93,14 @@ class DistributionalAssertion:
     ) -> None:
         # NaN compares False against everything: a NaN threshold would never breach and a NaN
         # alpha would make the critical value NaN. Both disable the check, so both are refused.
+        # A threshold over 1 is far past any "significant shift" line, and MIN_VALUES was
+        # measured at PSI_BINS bins: more bins is an unmeasured check (review M5).
         if (
             not math.isfinite(threshold)
-            or threshold <= 0
+            or not 0.0 < threshold <= 1.0
             or warmup_runs < 1
             or persistence < 1
-            or bins < 2
+            or not 2 <= bins <= PSI_BINS
             or not 0.0 < alpha < 1.0  # NaN fails this too
             or not 1.0 - alpha < 1.0  # an alpha so small that 1 - alpha rounds to 1
         ):
@@ -122,12 +145,9 @@ class DistributionalAssertion:
                 f"{len(current)} {field} values were extracted, fewer than {MIN_VALUES}: "
                 "too few to be evidence"
             )
-        r = psi_result(reference, current, bins=self.bins)
-        # k == 1: every value on both sides in the same bin or category -- a constant field that
-        # stayed constant. PSI is 0 and there is no noise to floor: no shift, not "no basis"
-        # (fix round 2). Different constants are k == 2 and take the normal rule.
-        critical = critical_psi(r.k, r.reference_n, r.current_n, self.alpha) if r.k >= 2 else 0.0
-        breach = r.psi > max(self.threshold, critical)
+        j = self.judge(reference, current, field)
+        if isinstance(j, str):
+            return j
         prior = 0
         for run in reversed(history.runs):
             if field not in run.shift_alerts:
@@ -136,16 +156,35 @@ class DistributionalAssertion:
         previous = history.previous()
         suppressed = previous is not None and field in previous.marked_expected
         return Assessment(
-            psi=r.psi,
-            reference_n=r.reference_n,
-            current_n=r.current_n,
-            categorical=r.categorical,
-            critical=critical,
-            breach=breach,
+            psi=j.result.psi,
+            reference_n=j.result.reference_n,
+            current_n=j.result.current_n,
+            categorical=j.result.categorical,
+            critical=j.critical,
+            breach=j.breach,
             prior_breaches=prior,
             suppressed=suppressed,
-            alert=breach and not suppressed and 1 + prior >= self.persistence,
+            alert=j.breach and not suppressed and 1 + prior >= self.persistence,
         )
+
+    def judge(self, reference: list[str], current: list[str], field: str) -> Judgement | str:
+        """The breach rule on two non-empty value lists, or a str: the reason there is no basis.
+        assess() is this plus warm-up, empty sides and MIN_VALUES; scripts/measure_psi_power.py
+        measures through it, so the published power is the product's."""
+        r = psi_result(reference, current, bins=self.bins)
+        # Categorical k is unbounded (one per distinct value on either side), and the chi-square
+        # floor assumes ~MIN_EXPECTED_PER_BIN per bin: under it critical_psi swamps any PSI, so a
+        # "PASS" would mean nothing (review C2). Counts only -- never cell text.
+        if r.categorical and r.current_n < MIN_EXPECTED_PER_BIN * r.k:
+            return (
+                f"{field} is compared over {r.k} categories, and {r.current_n} {field} values "
+                f"are fewer than {MIN_EXPECTED_PER_BIN} per category: too few to be evidence"
+            )
+        # k == 1: every value on both sides in the same bin or category -- a constant field that
+        # stayed constant. PSI is 0 and there is no noise to floor: no shift, not "no basis"
+        # (fix round 2). Different constants are k == 2 and take the normal rule.
+        critical = critical_psi(r.k, r.reference_n, r.current_n, self.alpha) if r.k >= 2 else 0.0
+        return Judgement(result=r, critical=critical, breach=r.psi > max(self.threshold, critical))
 
     def check(
         self, candidate: CandidateExtraction, history: History | None, ctx: HealContext

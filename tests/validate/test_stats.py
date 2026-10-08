@@ -6,11 +6,12 @@ import math
 
 import numpy as np
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from selector_drift.validate.stats import (
     JEFFREYS,
+    MIN_EXPECTED_PER_BIN,
     NUMERIC_PARSE_FLOOR,
     PSI_BINS,
     bin_counts,
@@ -23,6 +24,7 @@ from selector_drift.validate.stats import (
     psi_of_values,
     psi_result,
     quantile_edges,
+    reference_bounds,
     smoothed,
 )
 
@@ -81,22 +83,56 @@ def test_quantile_edges_ignore_non_finite_reference_values() -> None:
 
 
 @pytest.mark.unit
-def test_bin_counts_add_the_unparseable_bin_last() -> None:
-    assert bin_counts([1.0, 5.0, 9.0], (2.0, 6.0), unparseable=1).tolist() == [1, 1, 1, 1]
+def test_bin_counts_layout_is_underflow_quantile_bins_overflow_then_unparseable() -> None:
+    # Fix round 1 (C1): [< min | quantile bins | > max | unparseable].
+    c = bin_counts([1.0, 5.0, 9.0], (2.0, 6.0), unparseable=1, bounds=(1.0, 9.0))
+    assert c.tolist() == [0, 1, 1, 1, 0, 1]
     # A value equal to an edge falls in the lower bin (side="left").
-    assert bin_counts([2.0], (2.0, 6.0), unparseable=0).tolist() == [1, 0, 0, 0]
+    assert bin_counts([2.0], (2.0, 6.0), unparseable=0, bounds=(1.0, 9.0)).tolist() == [
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+    ]
+
+
+@pytest.mark.unit
+def test_bin_counts_put_values_outside_the_reference_range_in_their_own_bins() -> None:
+    c = bin_counts([0.5, 1.0, 9.0, 9.5, 100.0], (2.0, 6.0), unparseable=0, bounds=(1.0, 9.0))
+    # Below min -> underflow; min itself and max itself are inside; above max -> overflow.
+    assert c.tolist() == [1, 1, 0, 1, 2, 0]
 
 
 @pytest.mark.unit
 def test_bin_counts_count_non_finite_values_as_unparseable() -> None:
-    c = bin_counts([math.nan, math.inf, -math.inf, 1.0], (2.0,), unparseable=0)
-    assert c.tolist() == [1, 0, 3]
+    c = bin_counts([math.nan, math.inf, -math.inf, 1.0], (2.0,), unparseable=0, bounds=(0.0, 3.0))
+    assert c.tolist() == [0, 1, 0, 0, 3]
 
 
 @pytest.mark.unit
 def test_bin_counts_refuse_an_empty_sample() -> None:
     with pytest.raises(ValueError):
-        bin_counts([], (2.0,), unparseable=0)
+        bin_counts([], (2.0,), unparseable=0, bounds=(0.0, 3.0))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bounds",
+    [(3.0, 0.0), (math.nan, 3.0), (0.0, math.inf), (-math.inf, 3.0)],
+    ids=["inverted", "nan", "inf", "-inf"],
+)
+def test_bin_counts_refuse_bounds_that_are_not_a_range(bounds: tuple[float, float]) -> None:
+    with pytest.raises(ValueError):
+        bin_counts([1.0], (2.0,), unparseable=0, bounds=bounds)
+
+
+@pytest.mark.unit
+def test_reference_bounds_are_the_finite_min_and_max() -> None:
+    assert reference_bounds([3.0, -1.0, math.inf, math.nan, 7.5]) == (-1.0, 7.5)
+    with pytest.raises(ValueError):
+        reference_bounds([math.nan, math.inf])
 
 
 @pytest.mark.unit
@@ -256,9 +292,12 @@ _hostile_float = st.one_of(
 def test_property_nan_and_inf_values_never_produce_a_nan_psi(
     reference: list[float], current: list[float]
 ) -> None:
-    edges = quantile_edges(reference)
+    assume(any(math.isfinite(x) for x in reference))
+    edges, bounds = quantile_edges(reference), reference_bounds(reference)
     assert all(math.isfinite(e) for e in edges)
-    score = psi(*smoothed(bin_counts(reference, edges, 0), bin_counts(current, edges, 0)))
+    score = psi(
+        *smoothed(bin_counts(reference, edges, 0, bounds), bin_counts(current, edges, 0, bounds))
+    )
     assert math.isfinite(score)
 
 
@@ -346,7 +385,7 @@ def test_one_unparseable_reference_value_does_not_make_a_numeric_field_categoric
     reference = [f"{100 + i:,.2f}" for i in range(99)] + ["N/A"]
     assert numeric_reference(reference) is not None
     r = psi_result(reference, [f"{100 + i:,.2f}" for i in range(99)])
-    # 0.01 of the reference in a bin the current leaves empty costs ~0.01 * ln(1e4) = 0.09.
+    # The reference's one N/A is a bin only it populates; Jeffreys-smoothed, it costs little.
     assert not r.categorical and r.psi < 0.20
     # The reference's own N/A sits in the unparseable bin, on its side only.
     assert psi_result(reference, ["n/a"] * 100).psi > 0.20
@@ -359,3 +398,66 @@ def test_the_parse_floor_boundary() -> None:
     assert numeric_reference(at_floor) is not None and not psi_result(at_floor, ["1"]).categorical
     assert numeric_reference(below) is None and psi_result(below, ["1"]).categorical
     assert numeric_reference([]) is None
+
+
+# -- fix round 1 (review a9318221f39156743): under/overflow bins, blanks, expected counts --------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("current", [["50.00"] * 100, [f"{i}.00" for i in range(100)]])
+def test_a_constant_reference_sees_a_move_to_lower_values(current: list[str]) -> None:
+    # C1: a constant reference collapses the quantile edges to (c,). Without an underflow bin
+    # every value <= c shares the reference's one bin: k 1, PSI 0, "unchanged".
+    r = psi_result(["100.00"] * 3000, current)
+    assert r.k >= 2 and not r.categorical
+    assert r.psi > max(0.20, critical_psi(r.k, r.reference_n, r.current_n))
+
+
+@pytest.mark.unit
+def test_values_above_the_reference_max_land_in_the_overflow_bin() -> None:
+    reference = [f"{i}.00" for i in range(100)]
+    r = psi_result(reference, ["1000.00"] * 100)
+    assert r.k == 11 and r.psi > max(0.20, critical_psi(r.k, 100, 100))
+
+
+@pytest.mark.unit
+def test_a_constant_reference_and_the_same_constant_is_still_one_bin() -> None:
+    r = psi_result(["100.00"] * 3000, ["100.00"] * 100)
+    assert (r.k, r.psi) == (1, 0.0)
+
+
+@pytest.mark.unit
+def test_values_inside_the_reference_range_never_reach_the_outer_bins() -> None:
+    reference = [f"{i}.00" for i in range(100)]
+    assert psi_result(reference, reference).k == 10  # under/overflow empty on both: dropped
+
+
+@pytest.mark.unit
+def test_the_expected_count_floor_is_published() -> None:
+    assert MIN_EXPECTED_PER_BIN == 5
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "blank", ["", "   ", "\t", "\u00a0"], ids=["empty", "spaces", "tab", "nbsp"]
+)
+def test_blank_cells_do_not_count_against_the_parse_floor(blank: str) -> None:
+    # C2(b): 6% blanks keep a numeric field numeric; 6% "n/a" does not.
+    amounts = [f"{100 + i:,.2f}" for i in range(94)]
+    assert numeric_reference([*amounts, *[blank] * 6]) == [100.0 + i for i in range(94)]
+    assert numeric_reference([*amounts, *["n/a"] * 6]) is None
+
+
+@pytest.mark.unit
+def test_blank_cells_still_go_to_the_unparseable_bin() -> None:
+    amounts = [f"{100 + i:,.2f}" for i in range(94)]
+    with_blanks = [*amounts, *[""] * 6]
+    r = psi_result(with_blanks, with_blanks)
+    assert not r.categorical and r.k == 11 and r.psi == pytest.approx(0.0, abs=1e-12)
+    assert psi_result(with_blanks, amounts).k == 11  # the reference's blanks are a bin
+
+
+@pytest.mark.unit
+def test_an_all_blank_reference_is_categorical() -> None:
+    assert numeric_reference(["", " "]) is None
+    assert psi_result(["", " "] * 30, ["1"] * 40).categorical

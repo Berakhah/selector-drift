@@ -15,10 +15,17 @@ from selector_drift.validate.assertions.distribution import (
     REFERENCE_RUNS,
     Assessment,
     DistributionalAssertion,
+    Judgement,
 )
 from selector_drift.validate.gate import QuarantinedRun, ValidatedExtraction, gate_run
 from selector_drift.validate.history import History
-from selector_drift.validate.stats import critical_psi, psi_of_values, psi_result
+from selector_drift.validate.stats import (
+    MIN_EXPECTED_PER_BIN,
+    PSI_BINS,
+    critical_psi,
+    psi_of_values,
+    psi_result,
+)
 from selector_drift.validate.verdict import Outcome
 from tests.validate.helpers import (
     AMOUNT,
@@ -261,9 +268,10 @@ def test_a_tiny_current_sample_is_not_evidence() -> None:
 
 @pytest.mark.unit
 def test_min_values_is_set_from_measured_power() -> None:
-    # The smallest n at which a x10 shift is detected >= 95% of the time on the fix-round
-    # harness (n=35: 98.8%), rounded up to a multiple of 10. See docs/methodology.md.
-    assert MIN_VALUES == 40
+    # The smallest n at which a x10 shift is detected >= 95% of the time, rounded up to a
+    # multiple of 10: n=20 (97.1%; n=15 80.3%) on scripts/measure_psi_power.py once the
+    # overflow bin existed (review fix round 1). See docs/methodology.md.
+    assert MIN_VALUES == 20
 
 
 @pytest.mark.unit
@@ -315,6 +323,10 @@ def test_assess_and_psi_of_values_agree_so_task_29_cannot_print_a_second_psi() -
         {"alpha": -0.01},
         {"alpha": math.nan},
         {"alpha": 1e-300},
+        {"threshold": 1.5},
+        {"threshold": -0.1},
+        {"bins": 11},
+        {"bins": 0},
     ],
 )
 def test_parameters_that_would_disable_the_check_are_refused(kw: dict[str, float]) -> None:
@@ -374,9 +386,8 @@ def test_synthetic_seasonality_is_not_alerted_after_warmup() -> None:
 
 
 def _bunched() -> list[str]:
-    """MIN_VALUES values against the 100..991 reference, five in each of the eight lowest
-    deciles and none in the top two: over 0.20, and under the chi-square critical value."""
-    assert MIN_VALUES == 40
+    """40 values against the 100..991 reference, five in each of the eight lowest deciles and
+    none in the top two: over 0.20, and under the chi-square critical value."""
     return [v for d in range(8) for v in grid(110 + 89 * d, 1, n=5)]
 
 
@@ -481,3 +492,132 @@ def test_the_constant_field_pass_still_needs_min_values() -> None:
     assert few.outcome is Outcome.INSUFFICIENT
     enough = DA.check(column("currency", ["USD"] * MIN_VALUES), h, ctx(usd, rung=3))
     assert enough.outcome is Outcome.PASS
+
+
+# -- fix round 1 (review a9318221f39156743) -----------------------------------------------------
+
+
+@pytest.mark.unit
+def test_the_widest_legal_parameters_are_accepted() -> None:
+    # M5: threshold in (0, 1]; bins in [2, PSI_BINS] -- MIN_VALUES was measured at PSI_BINS.
+    DistributionalAssertion(threshold=1.0, bins=2)
+    DistributionalAssertion(bins=PSI_BINS)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "current",
+    [[f"{i}.00" for i in range(100)], ["50.00"] * 100],
+    ids=["0..99", "constant-50"],
+)
+def test_a_heal_from_a_constant_onto_lower_values_fails(current: list[str]) -> None:
+    # C1: a constant 100.00 reference; the heal lands on values at or below it.
+    h = history_of("amount", 40, values=lambda i: ["100.00"] * 100)
+    v = DA.check(column("amount", current), h, HEALED)
+    assert v.outcome is Outcome.FAIL
+    a = DA.assess(column("amount", current), h, "amount")
+    assert isinstance(a, Assessment) and a.breach
+
+
+@pytest.mark.unit
+def test_a_heal_from_a_constant_onto_the_same_constant_still_passes() -> None:
+    h = history_of("amount", 40, values=lambda i: ["100.00"] * 100)
+    assert DA.check(column("amount", ["100.00"] * 100), h, HEALED).outcome is Outcome.PASS
+
+
+@pytest.mark.unit
+def test_a_heal_wholly_above_the_reference_range_fails_via_the_overflow_bin() -> None:
+    h = amount_history(40)  # 100..993
+    a = DA.assess(column("amount", grid(994, 0.01)), h, "amount")  # just above max
+    assert isinstance(a, Assessment) and a.breach
+
+
+def _codes(i: int) -> list[str]:
+    return [f"C{(30 * i + j) % 900:03d}" for j in range(30)]
+
+
+@pytest.mark.unit
+def test_a_disjoint_heal_on_a_900_category_field_is_insufficient_not_pass() -> None:
+    # C2(a): k categories need ~5 expected per category for the chi-square floor to mean
+    # anything. 1000 categories against 100 current values is no basis -- never a PASS.
+    h = history_of("code", 40, values=_codes)
+    code = field_target("code", distributional=True)
+    current = column("code", [f"D<b>{j:03d}" for j in range(100)])
+    v = DA.check(current, h, ctx(code, rung=3))
+    assert v.outcome is Outcome.INSUFFICIENT
+    assert "1000 categories" in v.reason and "100 code values" in v.reason
+    assert f"{MIN_EXPECTED_PER_BIN}" in v.reason
+    assert "<b>" not in v.reason and "C000" not in v.reason  # never cell text
+    assert isinstance(DA.assess(current, h, "code"), str)
+
+
+@pytest.mark.unit
+def test_the_expected_count_floor_boundary() -> None:
+    # 12 categories (6 in the reference, 6 new): judged at 5 * 12 = 60 current values, not at 59.
+    old = ["Open", "Paid", "Closed", "Void", "Held", "Sent"]
+    new = ["Draft", "Lost", "Moved", "Merged", "Split", "Queued"]
+    h = history_of("status", 40, values=lambda i: old * 10)
+    status = field_target("status", distributional=True)
+    at = column("status", (new * 10)[: MIN_EXPECTED_PER_BIN * 12])
+    below = column("status", (new * 10)[: MIN_EXPECTED_PER_BIN * 12 - 1])
+    assert MIN_EXPECTED_PER_BIN * 12 - 1 >= MIN_VALUES  # the floor, not MIN_VALUES, refuses
+    assert DA.check(at, h, ctx(status, rung=3)).outcome is Outcome.FAIL
+    v = DA.check(below, h, ctx(status, rung=3))
+    assert v.outcome is Outcome.INSUFFICIENT and "12 categories" in v.reason
+
+
+def _enum(i: int) -> list[str]:
+    return ["Open"] * 70 + ["Paid"] * 20 + ["Closed"] * 5 + ["Void"] * 5
+
+
+@pytest.mark.unit
+def test_a_small_enum_still_judges_and_a_flipped_enum_fails() -> None:
+    h = history_of("status", 40, values=_enum)
+    status = field_target("status", distributional=True)
+    same = column("status", ["Open"] * 35 + ["Paid"] * 10 + ["Closed"] * 3 + ["Void"] * 2)
+    flipped = column("status", ["Open"] * 2 + ["Paid"] * 3 + ["Closed"] * 10 + ["Void"] * 35)
+    assert DA.check(same, h, ctx(status, rung=3)).outcome is Outcome.PASS
+    v = DA.check(flipped, h, ctx(status, rung=3))
+    assert v.outcome is Outcome.FAIL and "category proportions" in v.reason
+
+
+def _blank_amounts(i: int) -> list[str]:
+    # Every run's amounts distinct (as real amounts are), 6 of 100 cells blank.
+    g = grid(100 + 0.37 * i, 9)
+    return [("" if j % 17 == 0 else v) for j, v in enumerate(g)]
+
+
+@pytest.mark.unit
+def test_six_percent_blank_amounts_stay_numeric_and_a_matching_heal_passes() -> None:
+    h = history_of("amount", 40, values=_blank_amounts)
+    a = DA.assess(column("amount", _blank_amounts(1)), h, "amount")
+    assert isinstance(a, Assessment) and not a.categorical and not a.breach
+
+
+@pytest.mark.unit
+def test_six_percent_blank_amounts_healed_onto_ten_times_the_values_fails() -> None:
+    # C2(b): measured PSI 0.39 vs critical 31.5 -> PASS while blanks made the field categorical.
+    h = history_of("amount", 40, values=_blank_amounts)
+    x10 = [("" if j % 17 == 0 else f"{10 * (101 + 9 * j):,.2f}") for j in range(100)]
+    v = DA.check(column("amount", x10), h, HEALED)
+    assert v.outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+def test_six_percent_blank_amounts_healed_onto_an_na_column_fails() -> None:
+    h = history_of("amount", 40, values=_blank_amounts)
+    v = DA.check(column("amount", ["n/a"] * 100), h, HEALED)
+    assert v.outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+def test_judge_is_the_breach_rule_assess_applies() -> None:
+    # scripts/measure_psi_power.py measures through judge(); assess() must be judge() plus the
+    # warm-up and MIN_VALUES guards, nothing else.
+    h = amount_history(40)
+    reference = h.trailing(REFERENCE_RUNS).values("amount")
+    for current in (grid(101, 9), grid(5000, 9), _bunched()):
+        j = DA.judge(reference, current, "amount")
+        a = DA.assess(column("amount", current), h, "amount")
+        assert isinstance(j, Judgement) and isinstance(a, Assessment)
+        assert (j.result.psi, j.critical, j.breach) == (a.psi, a.critical, a.breach)
