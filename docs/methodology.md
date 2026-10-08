@@ -23,9 +23,22 @@ client targets 30 (the scope record's `warmup_runs`). During warm-up the check r
 so a heal quarantines until a human confirms it. INSUFFICIENT means only a genuine lack of basis:
 warm-up, an empty side, or too few values.
 
-Minimum sample: below **10** values in either the reference window or the current run the check
-also returns INSUFFICIENT (`MIN_VALUES`, the same floor as the row-key continuity check's
-`MIN_JOINED`) — a handful of values is not evidence of a shift or of its absence. The statistic is
+Minimum sample: below **40** values in either the reference window or the current run the check
+returns INSUFFICIENT (`MIN_VALUES`) -- a heal quarantines, a cache hit is tolerated, and no alert
+fires. A PASS from a check with no power would be fail-open, so the floor is set from measured
+power: the smallest current n at which a ×10 shift is detected at least 95% of the time (bench
+distribution, reference 30 runs × 50 values, 1000 draws per n), rounded up to a multiple of 10.
+
+| n_current | ×10 shift detected | False breach, same distribution |
+|---|---|---|
+| 20 | 13.7% | 0.0% |
+| 25 | 54.1% | 0.1% |
+| 30 | 87.4% | 0.1% |
+| 35 | 98.8% | 0.2% |
+| **40** (chosen) | **99.8%** | **0.5%** |
+| 45 | 100.0% | 0.9% |
+
+A constant field that stayed constant (PASS, PSI 0) needs the same 40 values. The statistic is
 implemented once, in `selector_drift/validate/stats.py` (`psi_of_values()`); the data-quality
 distribution-shift rule calls the same function, so the two can never print different PSIs for one
 field. A value equal to a bin edge falls in the lower bin (`np.searchsorted(..., side="left")`).
@@ -42,11 +55,12 @@ per cell.
 | 50 | 1.2% | 5.8% | 100.0% |
 | 200 | 0.1% | 9.9% | 100.0% |
 
+Rows below 40 are measurements of the statistic only: the check does not judge there (INSUFFICIENT).
+
 **Power is honest, and low for subtle shifts.** Against the bench's adversarial `DecoyColumn` (a
 "Prior Amount" column at 80–97% of the real amount) on a 50-row page, this check detected
 **1.7%** of 300 decoy heals (false breach on the true values of the same pages: 0.3%). A decoy that
 close to the real column barely moves a distribution that spans three orders of magnitude; it is
 caught by the row-key continuity and independent-rung checks, not by PSI. This check exists for
 gross shifts — another unit, another column of a different scale, a column of text — and the
-false-breach rate above is the price it does not charge. Below about 20 values it detects almost
-nothing; ALPHA was not tuned to make these numbers look better.
+false-breach rate above is the price it does not charge. Below 40 values it does not judge at all (see Minimum sample); ALPHA was not tuned to make these numbers look better.
