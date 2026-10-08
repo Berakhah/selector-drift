@@ -82,6 +82,7 @@ source_modules =
     selector_drift.orchestrate
     selector_drift.heallog
     selector_drift.api
+    selector_drift.credentials
 forbidden_modules = selector_drift.scope._token
 # Indirect imports are allowed ON PURPOSE (found 2026-09-26): orchestrate -> scope.gate ->
 # scope._token is the one legitimate path, and forbidden contracts count indirect imports by
