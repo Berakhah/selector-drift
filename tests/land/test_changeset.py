@@ -107,12 +107,15 @@ def test_changeset_opens_no_network_connection(run_with_changes, tmp_path, no_ne
 
 
 @pytest.mark.unit
-def test_a_formula_from_the_portal_cannot_execute_in_the_clients_spreadsheet(lake_dir, tmp_path):
+@pytest.mark.parametrize("lead", ["=", "+", "-", "@", "\t", "\r"])
+def test_a_formula_from_the_portal_cannot_execute_in_the_clients_spreadsheet(
+    lake_dir, tmp_path, lead
+):
     hostile = rows(1)
-    hostile[0]["amount"] = '=HYPERLINK("https://evil.example.invalid","1.00")'
+    hostile[0]["amount"] = lead + 'HYPERLINK("https://evil.example.invalid","1.00")'
     write(make_validated(hostile))
     line = _read_csv(changeset(RUN_KEY, _prior_csv(tmp_path), "csv"))[0]
-    assert line["new_value"].startswith("'=")
+    assert line["new_value"].startswith("'" + lead)
 
 
 @pytest.mark.unit
@@ -158,3 +161,62 @@ def test_only_the_specs_fields_are_exported(lake_dir, tmp_path):
     write(make_validated(rows(2, extra={"retired_col": "x"})))
     lines = _read_csv(changeset(RUN_KEY, _prior_csv(tmp_path), "csv"))
     assert {r["field"] for r in lines} == {"amount"}
+
+
+def _bump_spec(lake_dir: Path) -> None:
+    spec = lake_dir.parent / "specs" / "testbench.yaml"
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace("version: 2", "version: 3", 1), encoding="utf-8"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("overlap", ["partial", "full"])
+def test_a_later_run_in_the_same_window_does_not_erode_this_runs_export(
+    lake_dir, tmp_path, overlap
+):
+    write(make_validated(rows(3)))
+    _bump_spec(lake_dir)
+    other = rows(3 if overlap == "full" else 2)
+    for r in other:
+        r["amount"] = "777.77"
+    write(make_validated(other, "testbench:3:2026-09-07"))
+    lines = _read_csv(changeset(RUN_KEY, _prior_csv(tmp_path), "csv", out_dir=tmp_path / "o"))
+    assert len(lines) == 3
+    assert "777.77" not in {r["new_value"] for r in lines}
+    assert {r["claim_number"]: r["new_value"] for r in lines}["AB10000001"] == "107.50"
+
+
+@pytest.mark.unit
+def test_duplicate_natural_keys_in_the_prior_are_refused(run_with_changes, tmp_path):
+    bad = tmp_path / "prior.csv"
+    bad.write_text("claim_number,amount\nAB10000000,1.00\nAB10000000,2.00\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="record 1") as exc:
+        changeset(run_with_changes, bad, "csv")
+    assert "AB10000000" not in str(exc.value)
+
+
+@pytest.mark.unit
+def test_a_prior_lacking_a_spec_field_is_refused_csv(run_with_changes, tmp_path):
+    bad = tmp_path / "prior.csv"
+    bad.write_text("claim_number\nAB10000000\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="amount"):
+        changeset(run_with_changes, bad, "csv")
+
+
+@pytest.mark.unit
+def test_a_prior_lacking_a_spec_field_is_refused_json(run_with_changes, tmp_path):
+    bad = tmp_path / "prior.json"
+    bad.write_text(json.dumps([{"claim_number": "AB10000000"}]), encoding="utf-8")
+    with pytest.raises(ValueError, match="amount"):
+        changeset(run_with_changes, bad, "json")
+
+
+@pytest.mark.unit
+def test_a_non_object_json_record_is_refused_not_dropped(run_with_changes, tmp_path):
+    bad = tmp_path / "prior.json"
+    bad.write_text(
+        json.dumps([{"claim_number": "AB10000000", "amount": "1"}, "oops"]), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="record 1"):
+        changeset(run_with_changes, bad, "json")
