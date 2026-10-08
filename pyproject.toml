@@ -34,6 +34,7 @@ dependencies = [
     "psycopg[binary]>=3.3.4",
     "pyarrow>=25.0.1",
     "pydantic>=2.13.5",
+    "python-ulid>=4.0.1",
     "pyyaml>=6.0.3",
     "regex>=2026.7.19",
     "sqlalchemy>=2.0.52",
@@ -98,6 +99,11 @@ plugins = ["pydantic.mypy"]
 # bok_core's own (fully annotated, just unmarked) source and use its real types.
 module = "bok_core.*"
 follow_untyped_imports = true
+
+[[tool.mypy.overrides]]
+# pyarrow ships no type information (Task 28).
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
