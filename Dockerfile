@@ -20,6 +20,7 @@ COPY alembic.ini ./
 COPY alembic ./alembic
 COPY specs ./specs
 COPY scopes ./scopes
+COPY deploys.yaml ./
 RUN uv sync --frozen --no-dev \
  && playwright install --with-deps chromium \
  && chmod -R a+rX /opt/pw-browsers \
