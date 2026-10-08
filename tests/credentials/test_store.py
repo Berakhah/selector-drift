@@ -1,6 +1,5 @@
 import datetime as dt
 import hashlib
-import json
 import logging
 import os
 import secrets
@@ -12,7 +11,11 @@ import pytest
 
 from selector_drift.config import get_settings
 from selector_drift.credentials import store as store_mod
-from selector_drift.credentials.provider import Credentials, NotSupported
+from selector_drift.credentials.provider import (
+    Credentials,
+    CredentialsUnavailable,
+    NotSupported,
+)
 from selector_drift.credentials.store import AcknowledgementRequired, EncryptedStore, StoreError
 from selector_drift.scope.gate import authorise
 from selector_drift.scope.record import Basis, ScopeRecord
@@ -30,6 +33,17 @@ def kek(monkeypatch):
     get_settings.cache_clear()  # the KEK is a Settings field (config.py reads the environment)
     yield key
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def audited(monkeypatch):
+    """Unit tests have no Postgres: the audit_log write is recorded here instead. The real
+    write is covered by test_store_audit.py (integration)."""
+    rows: list[tuple[str, dict[str, str]]] = []
+    monkeypatch.setattr(
+        store_mod, "_audit_acknowledgement", lambda client, entry: rows.append((client, entry))
+    )
+    return rows
 
 
 @pytest.fixture
@@ -50,7 +64,7 @@ def _creds() -> Credentials:
     return Credentials(
         username=USERNAME,
         password=PASSWORD,
-        cookies=[{"name": "s", "value": COOKIE, "domain": "x.example.invalid"}],
+        cookies=[{"name": "s", "value": COOKIE, "domain": "bench.example.invalid"}],
     )
 
 
@@ -104,31 +118,107 @@ def test_nothing_is_stored_without_a_written_acknowledgement(tmp_path, target):
 def test_nothing_is_read_without_a_written_acknowledgement(tmp_path, target, ack):
     root = tmp_path / "store"
     _store(root, ack_doc=ack).put(target, _creds())
-    (root / "client-a" / "acknowledgement.json").unlink()
+    (root / "client-a" / "acknowledgements.bin").unlink()
     with pytest.raises(AcknowledgementRequired):
         EncryptedStore("client-a", root=root).get(target)
 
 
 @pytest.mark.unit
-def test_the_acknowledgement_records_the_documents_sha256(tmp_path, ack):
+def test_the_acknowledgement_records_the_documents_sha256(tmp_path, ack, audited):
     s = EncryptedStore("client-a", root=tmp_path / "store")
     digest = s.record_acknowledgement(ack, actor="op1")
     assert digest == hashlib.sha256(ack.read_bytes()).hexdigest()
-    body = json.loads((tmp_path / "store" / "client-a" / "acknowledgement.json").read_text())
-    assert body["sha256"] == digest and body["actor"] == "op1"
-    assert body["document"] == ack.name
+    (entry,) = s.acknowledgements()
+    assert entry["sha256"] == digest and entry["actor"] == "op1"
+    assert entry["document"] == ack.name
+    assert audited == [("client-a", entry)]  # and the same entry went to audit_log
+
+
+@pytest.mark.unit
+def test_the_acknowledgement_is_sealed_not_plaintext(tmp_path, ack):
+    s = _store(tmp_path / "store", ack_doc=ack)
+    digest = s.acknowledgements()[0]["sha256"]
+    raw = (tmp_path / "store" / "client-a" / "acknowledgements.bin").read_bytes()
+    assert digest.encode() not in raw and b"op1" not in raw
+
+
+@pytest.mark.unit
+def test_a_second_acknowledgement_keeps_the_first(tmp_path, ack, audited):
+    s = _store(tmp_path / "store", ack_doc=ack)
+    second = tmp_path / "renewed.pdf"
+    second.write_bytes(b"client countersigned again, 2027")
+    s.record_acknowledgement(second, actor="op2")
+    history = EncryptedStore("client-a", root=tmp_path / "store").acknowledgements()
+    assert [e["actor"] for e in history] == ["op1", "op2"]
+    assert [e["document"] for e in history] == [ack.name, second.name]
+    assert [entry for _, entry in audited] == history
+
+
+@pytest.mark.unit
+def test_a_tampered_acknowledgement_is_refused(tmp_path, target, ack):
+    root = tmp_path / "store"
+    s = _store(root, ack_doc=ack)
+    path = root / "client-a" / "acknowledgements.bin"
+    raw = bytearray(path.read_bytes())
+    raw[-1] ^= 0x01
+    path.write_bytes(bytes(raw))
+    with pytest.raises(AcknowledgementRequired, match="cannot be verified"):
+        s.put(target, _creds())
+
+
+@pytest.mark.unit
+def test_another_clients_acknowledgement_does_not_transfer(tmp_path, target, ack):
+    root = tmp_path / "store"
+    _store(root, "client-a", ack)
+    b = EncryptedStore("client-b", root=root)
+    b._data_key()
+    shutil.copy(
+        root / "client-a" / "acknowledgements.bin", root / "client-b" / "acknowledgements.bin"
+    )
+    with pytest.raises(AcknowledgementRequired, match="cannot be verified"):
+        b.put(target, _creds())
+
+
+@pytest.mark.unit
+def test_a_tampered_history_is_never_overwritten_by_a_new_recording(tmp_path, ack):
+    root = tmp_path / "store"
+    s = _store(root, ack_doc=ack)
+    path = root / "client-a" / "acknowledgements.bin"
+    path.write_bytes(path.read_bytes()[:-1] + bytes([path.read_bytes()[-1] ^ 0x01]))
+    before = path.read_bytes()
+    with pytest.raises(StoreError, match="cannot be decrypted"):
+        s.record_acknowledgement(ack, actor="op2")
+    assert path.read_bytes() == before
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "body", ["", "not json", "[]", '{"sha256": "short"}', '{"actor": "op1"}', '{"sha256": 7}']
+    "body",
+    [
+        "",
+        "not json",
+        '[{"sha256": "' + "a" * 64 + '", "actor": "op1"}]',  # forged in plaintext
+        "SDC1" + "0" * 40,  # shaped like a sealed file, sealed by no one
+    ],
 )
-def test_a_malformed_acknowledgement_is_no_acknowledgement(tmp_path, target, body):
-    d = tmp_path / "store" / "client-a"
-    d.mkdir(parents=True)
-    (d / "acknowledgement.json").write_text(body, encoding="utf-8")
+def test_a_forged_acknowledgement_is_no_acknowledgement(tmp_path, target, body):
+    root = tmp_path / "store"
+    EncryptedStore("client-a", root=root)._data_key()  # the KEK is present; the forger lacks it
+    (root / "client-a" / "acknowledgements.bin").write_text(body, encoding="utf-8")
     with pytest.raises(AcknowledgementRequired):
-        EncryptedStore("client-a", root=tmp_path / "store").put(target, _creds())
+        EncryptedStore("client-a", root=root).put(target, _creds())
+
+
+@pytest.mark.unit
+def test_an_acknowledgement_that_cannot_be_audited_is_not_recorded(tmp_path, ack, monkeypatch):
+    def down(client, entry):
+        raise RuntimeError("audit_log unavailable")
+
+    monkeypatch.setattr(store_mod, "_audit_acknowledgement", down)
+    s = EncryptedStore("client-a", root=tmp_path / "store")
+    with pytest.raises(RuntimeError):
+        s.record_acknowledgement(ack, actor="op1")
+    assert s.acknowledgements() == []
 
 
 @pytest.mark.unit
@@ -258,14 +348,14 @@ def test_every_file_is_owner_only(tmp_path, target, ack):
     root = tmp_path / "store"
     _store(root, ack_doc=ack).put(target, _creds())
     files = [p for p in root.rglob("*") if p.is_file()]
-    assert {p.name for p in files} == {"acknowledgement.json", "datakey.bin", "testbench.bin"}
+    assert {p.name for p in files} == {"acknowledgements.bin", "datakey.bin", "testbench.bin"}
     for p in files:
         assert p.stat().st_mode & 0o077 == 0, p.name
     assert (root / "client-a").stat().st_mode & 0o077 == 0
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("name", ["datakey.bin", "testbench.bin"])
+@pytest.mark.parametrize("name", ["datakey.bin", "testbench.bin", "acknowledgements.bin"])
 def test_the_permission_check_runs_whenever_os_name_is_posix(
     tmp_path, target, ack, monkeypatch, name
 ):
@@ -307,3 +397,134 @@ def test_the_permission_check_passes_owner_only_files_under_posix(
     monkeypatch.setattr(store_mod.os, "name", "posix")
     monkeypatch.setattr(Path, "stat", stat_0600)
     assert s.get(target).username == USERNAME
+
+
+# -- H2 (fix round 1): stored cookies reach only the authorised host --------------------------
+
+
+def _with_cookies(*cookies, password=PASSWORD) -> Credentials:
+    return Credentials(
+        username=USERNAME if password else None, password=password, cookies=list(cookies)
+    )
+
+
+@pytest.mark.unit
+def test_an_off_origin_stored_cookie_is_dropped(tmp_path, target, ack, caplog):
+    s = _store(tmp_path / "store", ack_doc=ack)
+    keep = {"name": "a", "value": COOKIE, "domain": "bench.example.invalid"}
+    drop = {"name": "b", "value": f"v-{secrets.token_hex(6)}", "domain": "evil.invalid"}
+    s.put(target, _with_cookies(keep, drop))
+    with caplog.at_level(logging.DEBUG):
+        got = s.get(target)
+    assert got.cookies == [keep]
+    assert COOKIE not in caplog.text and drop["value"] not in caplog.text
+
+
+@pytest.mark.unit
+def test_a_parent_domain_stored_cookie_is_cloned_host_only(tmp_path, target, ack):
+    s = _store(tmp_path / "store", ack_doc=ack)
+    s.put(target, _with_cookies({"name": "a", "value": COOKIE, "domain": ".example.invalid"}))
+    expected = [{"name": "a", "value": COOKIE, "domain": "bench.example.invalid"}]
+    assert s.get(target).cookies == expected
+
+
+@pytest.mark.unit
+def test_a_stored_credential_with_only_off_origin_cookies_is_refused(tmp_path, target, ack):
+    s = _store(tmp_path / "store", ack_doc=ack)
+    off = {"name": "a", "value": COOKIE, "domain": "evil.invalid"}
+    s.put(target, _with_cookies(off, password=None))
+    with pytest.raises(CredentialsUnavailable) as exc:
+        s.get(target)
+    assert COOKIE not in str(exc.value)
+
+
+@pytest.mark.unit
+def test_off_origin_cookies_do_not_hide_a_username_and_password(tmp_path, target, ack):
+    s = _store(tmp_path / "store", ack_doc=ack)
+    s.put(target, _with_cookies({"name": "a", "value": COOKIE, "domain": "evil.invalid"}))
+    got = s.get(target)
+    assert got.cookies is None and got.username == USERNAME
+
+
+# -- atomic key creation and temp-file hygiene (fix round 1) ----------------------------------
+
+
+@pytest.mark.unit
+def test_a_crash_mid_write_never_leaves_a_truncated_data_key(tmp_path, monkeypatch):
+    s = EncryptedStore("client-a", root=tmp_path)
+    real_fsync = os.fsync
+
+    def crash(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store_mod.os, "fsync", crash)
+    with pytest.raises(OSError, match="disk full"):
+        s._data_key()
+    assert not (tmp_path / "client-a" / "datakey.bin").exists()
+    assert list((tmp_path / "client-a").iterdir()) == []  # no temp file left behind
+    monkeypatch.setattr(store_mod.os, "fsync", real_fsync)
+    key = s._data_key()
+    assert s._data_key() == key and len(key) == 32
+
+
+@pytest.mark.unit
+def test_a_racing_creator_wins_and_both_use_its_key(tmp_path, monkeypatch):
+    s = EncryptedStore("client-a", root=tmp_path)
+    real_link = os.link
+    winner: dict[str, bytes] = {}
+
+    def racing_link(src, dst, *a, **kw):
+        monkeypatch.setattr(store_mod.os, "link", real_link)
+        winner["key"] = EncryptedStore("client-a", root=tmp_path)._data_key()  # the other process
+        return real_link(src, dst, *a, **kw)  # now FileExistsError
+
+    monkeypatch.setattr(store_mod.os, "link", racing_link)
+    assert s._data_key() == winner["key"]
+    assert [p.name for p in (tmp_path / "client-a").iterdir()] == ["datakey.bin"]
+
+
+@pytest.mark.unit
+def test_temp_files_are_exclusive_random_and_synced_before_replace(
+    tmp_path, target, ack, monkeypatch
+):
+    events: list[tuple[str, str]] = []
+    real_open, real_fsync, real_replace = os.open, os.fsync, os.replace
+
+    def spy_open(path, flags, *a, **kw):
+        if str(path).endswith(".tmp"):
+            assert flags & os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                assert flags & os.O_NOFOLLOW
+            events.append(("open", Path(path).name))
+        return real_open(path, flags, *a, **kw)
+
+    def spy_fsync(fd):
+        events.append(("fsync", ""))
+        return real_fsync(fd)
+
+    def spy_replace(src, dst, *a, **kw):
+        events.append(("replace", Path(src).name))
+        return real_replace(src, dst, *a, **kw)
+
+    monkeypatch.setattr(store_mod.os, "open", spy_open)
+    monkeypatch.setattr(store_mod.os, "fsync", spy_fsync)
+    monkeypatch.setattr(store_mod.os, "replace", spy_replace)
+    s = _store(tmp_path / "store", ack_doc=ack)
+    s.put(target, _creds())
+    s.put(target, _creds())
+    replaced = [name for kind, name in events if kind == "replace"]
+    assert len(replaced) == 3 and len(set(replaced)) == 3  # ack + two puts: no reused name
+    assert f".{os.getpid()}." not in "".join(replaced)
+    for i, (kind, _) in enumerate(events):
+        if kind == "replace":
+            assert events[i - 1][0] == "fsync"  # synced before it becomes visible
+
+
+@pytest.mark.unit
+def test_a_stored_cookie_with_an_unreadable_expiry_is_refused(tmp_path, target, ack):
+    s = _store(tmp_path / "store", ack_doc=ack)
+    bad = {"name": "a", "value": COOKIE, "domain": "bench.example.invalid", "expires": "soon"}
+    s.put(target, _with_cookies(bad))
+    with pytest.raises(StoreError, match="unreadable expiry") as exc:
+        s.get(target)
+    assert COOKIE not in str(exc.value)
