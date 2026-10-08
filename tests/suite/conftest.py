@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -25,7 +25,7 @@ from selector_drift.resolve.page import StaticPageSource
 from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
 from selector_drift.resolve.rungs.r3_anchors import AnchorRung
 from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
-from selector_drift.resolve.trace import CascadeTrace, ResolvedElement
+from selector_drift.resolve.trace import CascadeTrace, ResolvedElement, Rung
 from selector_drift.scope.record import FirstHealPolicy
 from selector_drift.spec.loader import load_spec
 from selector_drift.spec.schema import FieldTarget
@@ -45,15 +45,17 @@ AMOUNT = next(t for t in SPEC.targets if t.name == "amount")
 BASE_DAY = dt.date(2026, 10, 1)  # fixed: the suite must not depend on the clock (M20)
 AT = dt.datetime(2026, 10, 1, 4, 12, tzinfo=dt.UTC)
 RUN_KEY = f"testbench:2:{BASE_DAY}"
-CONFIRMERS = [AxTreeRung(), AnchorRung(), HeuristicRung()]
+CONFIRMERS: list[Rung] = [AxTreeRung(), AnchorRung(), HeuristicRung()]
 ALL_BENIGN_MUTATION_CLASSES = [e for e in CATALOGUE if not e.adversarial]  # 8
 ALL_ADVERSARIAL_MUTATION_CLASSES = [e for e in CATALOGUE if e.adversarial]  # 7
 
 
-def all_checks(field: FieldTarget) -> list[Assertion]:
-    # The bench's scope record: warm-up 5, first_heal_policy auto_promote (Task 5).
+def all_checks(field: FieldTarget, confirmers: Sequence[Rung] = CONFIRMERS) -> list[Assertion]:
+    # The bench's scope record: warm-up 5, first_heal_policy auto_promote (Task 5). `confirmers`
+    # is overridden only where a test swaps a rung into the cascade too, so the heal and its
+    # re-derivation use the same rung instance, as in production.
     return checks_for(
-        SPEC, field, CONFIRMERS, warmup_runs=5, first_heal_policy=FirstHealPolicy.AUTO_PROMOTE
+        SPEC, field, confirmers, warmup_runs=5, first_heal_policy=FirstHealPolicy.AUTO_PROMOTE
     )
 
 
@@ -91,7 +93,11 @@ def extract(
 
 
 def judge_run(
-    ev: Evidence, *, history: History | None, cache: CacheReader
+    ev: Evidence,
+    *,
+    history: History | None,
+    cache: CacheReader,
+    confirmers: Sequence[Rung] = CONFIRMERS,
 ) -> tuple[dict[str, ResolvedElement], ValidatedExtraction | QuarantinedRun | None]:
     """The pipeline's decision core without its I/O (Task 26A): every field replayed against
     the cache on the stored DOM, extracted, and judged by gate_run with the REAL contexts --
@@ -127,7 +133,7 @@ def judge_run(
     except RowMisaligned:
         return elements, None
     return elements, gate_run(
-        candidate, history, contexts, {t.name: all_checks(t) for t in SPEC.targets}
+        candidate, history, contexts, {t.name: all_checks(t, confirmers) for t in SPEC.targets}
     )
 
 

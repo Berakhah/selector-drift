@@ -89,3 +89,7 @@ it does not charge. ALPHA and the threshold were not tuned to make these numbers
 ## First-heal confirmation: a known limit
 
 The selector cache holds one selector per field, so a portal that flips between two layouts asks a human once per flip, not once ever: each flip is a heal to a selector the cache no longer holds, and `FirstHealConfirmation` quarantines it again.
+
+## Value attacks on correct nodes: a known limit
+
+A value attack on the right nodes (the bench's `ValueSwap`) is refused only once a target has history: on its first run there is no accepted run for `RowKeyContinuity` to compare against, so it is written (pinned by `tests/suite/test_adversarial_refused.py`).

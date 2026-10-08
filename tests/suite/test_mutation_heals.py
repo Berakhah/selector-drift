@@ -1,12 +1,12 @@
 import pytest
 
 from selector_drift.heallog.replay import replay
-from tests.suite.conftest import ALL_BENIGN_MUTATION_CLASSES, AMOUNT, CLAIM_NUMBER
+from tests.suite.conftest import ALL_BENIGN_MUTATION_CLASSES, SPEC
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("m", ALL_BENIGN_MUTATION_CLASSES, ids=lambda m: m.name)
-@pytest.mark.parametrize("field", [CLAIM_NUMBER, AMOUNT], ids=lambda f: f.name)
+@pytest.mark.parametrize("field", SPEC.targets, ids=lambda f: f.name)  # every field
 def test_every_mutation_class_heals_to_the_right_element(
     m, field, bench_evidence, truth, warm_cache
 ):
