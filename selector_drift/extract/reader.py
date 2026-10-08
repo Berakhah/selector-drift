@@ -47,6 +47,9 @@ def read(
     anchor_field = spec.natural_key[0]
     if anchor_field not in resolved:
         raise LookupError(f"natural key {anchor_field!r} was not resolved")
+    missing = [t.name for t in spec.targets if t.name not in resolved]
+    if missing:
+        raise LookupError(f"no resolved cell for target(s) {missing}: a field must not vanish")
     cells = {name: locate(root, el.node_id) for name, el in resolved.items()}
     try:
         anchor_row = row_of(cells[anchor_field], contains=cells.values())
@@ -61,8 +64,9 @@ def read(
     rows: list[Row] = []
     for row in siblings[siblings.index(anchor_row) :]:
         found = {name: follow(row, p) for name, p in paths.items()}
-        if any(c is None for c in found.values()):
-            continue
+        present = {name: cell for name, cell in found.items() if cell is not None}
+        if len(present) < len(found):
+            continue  # a pagination or footer row: some field's path leads nowhere
         rows.append(
             {
                 name: Claim(
@@ -76,8 +80,7 @@ def read(
                         rung=resolved[name].rung_id,
                     ),
                 )
-                for name, cell in found.items()
-                if cell is not None
+                for name, cell in present.items()
             }
         )
     return CandidateExtraction(
