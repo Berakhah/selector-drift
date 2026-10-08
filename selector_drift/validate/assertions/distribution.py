@@ -1,5 +1,6 @@
 """PSI with a documented threshold, per-target warm-up, and persistence for ALERTING only
-(design 5.7, M16/M17/M18). The statistic itself is validate/stats.py, shared with Task 29.
+(design 5.7, M16/M17/M18). The statistic itself is validate/stats.py. Task 29's distribution-shift
+rule calls assess(), so the gate and the quality screen share every guard and the breach rule.
 
 A breach is PSI over max(threshold, critical), where critical is the chi-square noise floor
 (validate/stats.critical_psi at `alpha`): over a small sample, PSI over 0.20 is sampling noise.
@@ -10,7 +11,8 @@ A breach is PSI over max(threshold, critical), where critical is the chi-square 
   expected.
 
 "No basis yet" (warm-up, a reference window or current sample too small to be evidence, a
-categorical field with fewer than MIN_EXPECTED_PER_BIN current values per category) is
+numeric reference with fewer than MIN_VALUES parseable values, a categorical field with fewer
+than MIN_EXPECTED_PER_BIN current values per category) is
 INSUFFICIENT, never PASS: on a heal the gate treats INSUFFICIENT as FAIL, on a cache hit it is
 tolerated -- exactly the asymmetry the table needs."""
 
@@ -41,13 +43,15 @@ if TYPE_CHECKING:
 
 REFERENCE_RUNS: Final = 30
 # Set from measured power: a PASS from a check with no power is fail-open. MIN_VALUES is the
-# smallest current n at which a x10 shift is detected >= 95% of the time, rounded up to a
-# multiple of 10, as scripts/measure_psi_power.py measures it through judge() (bench-like data,
-# reference 30 x 50 values, 1000 draws). Pre-review it was 40 (n=35: 98.8%). Once the overflow
-# bin existed (review fix round 1, C1) n=20 detected 97.1% (n=15: 80.3%) at 0.1% false breach,
-# so the rule gives 20. Below this on EITHER side the check has no basis: INSUFFICIENT -- a heal
-# quarantines, a cache hit is tolerated, no alert. docs/methodology.md.
-MIN_VALUES: Final = 20
+# smallest current n at which BOTH a x10 and a x3 shift are detected >= 95% of the time, rounded
+# up to a multiple of 10, as scripts/measure_psi_power.py measures it through _judge() (bench-like
+# data, reference 30 x 50 values, 1000 draws). x10 alone was the rule until the overflow bin
+# (fix round 1) made a x10 shift visible from the ~29% of values above the reference max: it gave
+# 20, where x3 was caught 49.1% of the time. With both: n=35 x3 93.7%, n=40 x3 98.0% (x10 100%,
+# false breach 0.9%), so 40 (fix round 2). Below this on EITHER side -- or below it in parseable
+# reference values -- the check has no basis: INSUFFICIENT -- a heal quarantines, a cache hit is
+# tolerated, no alert. docs/methodology.md.
+MIN_VALUES: Final = 40
 __all__ = [
     "ALPHA",
     "MIN_VALUES",
@@ -73,7 +77,7 @@ class Assessment:
 
 @dataclass(frozen=True)
 class Judgement:
-    """The breach rule applied to two value lists (DistributionalAssertion.judge)."""
+    """The breach rule applied to two value lists (DistributionalAssertion._judge)."""
 
     result: PsiResult
     critical: float  # 0.0 when k == 1
@@ -145,7 +149,15 @@ class DistributionalAssertion:
                 f"{len(current)} {field} values were extracted, fewer than {MIN_VALUES}: "
                 "too few to be evidence"
             )
-        j = self.judge(reference, current, field)
+        ref_num = numeric_reference(reference)
+        if ref_num is not None and len(ref_num) < MIN_VALUES:
+            # Numeric, but mostly blank: quantile edges from a handful of numbers are degenerate
+            # (fix round 2) -- no basis, never a verdict.
+            return (
+                f"the reference window holds {len(ref_num)} parseable {field} values, fewer than "
+                f"{MIN_VALUES}: too few to place bin edges"
+            )
+        j = self._judge(reference, current, field)
         if isinstance(j, str):
             return j
         prior = 0
@@ -167,10 +179,12 @@ class DistributionalAssertion:
             alert=j.breach and not suppressed and 1 + prior >= self.persistence,
         )
 
-    def judge(self, reference: list[str], current: list[str], field: str) -> Judgement | str:
+    def _judge(self, reference: list[str], current: list[str], field: str) -> Judgement | str:
         """The breach rule on two non-empty value lists, or a str: the reason there is no basis.
-        assess() is this plus warm-up, empty sides and MIN_VALUES; scripts/measure_psi_power.py
-        measures through it, so the published power is the product's."""
+        PRIVATE (fix round 2): it skips warm-up and MIN_VALUES, so a caller reading "no breach"
+        as PASS would fail open -- assess() is the only path to a verdict. assess() is this plus
+        its guards; scripts/measure_psi_power.py measures through it below MIN_VALUES, so the
+        published power is the product's."""
         r = psi_result(reference, current, bins=self.bins)
         # Categorical k is unbounded (one per distinct value on either side), and the chi-square
         # floor assumes ~MIN_EXPECTED_PER_BIN per bin: under it critical_psi swamps any PSI, so a
