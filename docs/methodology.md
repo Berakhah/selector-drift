@@ -85,3 +85,7 @@ it is caught by the row-key continuity and independent-rung checks, not by PSI. 
 for gross shifts — another unit, another column of a different scale, a column of text, a heal
 onto values outside the range history has ever seen — and the false-breach rate above is the price
 it does not charge. ALPHA and the threshold were not tuned to make these numbers look better.
+
+## First-heal confirmation: a known limit
+
+The selector cache holds one selector per field, so a portal that flips between two layouts asks a human once per flip, not once ever: each flip is a heal to a selector the cache no longer holds, and `FirstHealConfirmation` quarantines it again.
