@@ -11,8 +11,9 @@ A breach is PSI over max(threshold, critical), where critical is the chi-square 
   expected.
 
 "No basis yet" (warm-up, a reference window or current sample too small to be evidence, a
-numeric reference with fewer than MIN_VALUES parseable values, a categorical field with fewer
-than MIN_EXPECTED_PER_BIN current values per category) is
+numeric reference with fewer than MIN_VALUES parseable values, a numeric current run with fewer
+than MIN_VALUES non-blank cells, a categorical field with fewer than MIN_EXPECTED_PER_BIN current
+values per category) is
 INSUFFICIENT, never PASS: on a heal the gate treats INSUFFICIENT as FAIL, on a cache hit it is
 tolerated -- exactly the asymmetry the table needs."""
 
@@ -31,6 +32,7 @@ from selector_drift.validate.stats import (
     PSI_BINS,
     PsiResult,
     critical_psi,
+    is_blank,
     numeric_reference,
     psi_result,
     quantile_edges,
@@ -157,6 +159,17 @@ class DistributionalAssertion:
                 f"the reference window holds {len(ref_num)} parseable {field} values, fewer than "
                 f"{MIN_VALUES}: too few to place bin edges"
             )
+        if ref_num is not None:
+            # The current side counts NON-BLANK cells (fix round 3): ten amounts among ninety
+            # blanks are ten values of evidence, not a hundred. Text counts -- a numeric
+            # reference is at most 5% text, so text in the current run is itself a shift and
+            # cannot dilute power. Counts only, never cell text.
+            filled = sum(1 for v in current if not is_blank(v))
+            if filled < MIN_VALUES:
+                return (
+                    f"{filled} non-blank {field} values were extracted, fewer than "
+                    f"{MIN_VALUES}: too few to be evidence"
+                )
         j = self._judge(reference, current, field)
         if isinstance(j, str):
             return j

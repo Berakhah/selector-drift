@@ -12,7 +12,7 @@
 | Categorical fields | category counts over the union of categories, no binning, smoothed the same way. Judged only when n_current ≥ **5** · k (`MIN_EXPECTED_PER_BIN`), k = categories on either side; below that, INSUFFICIENT (the reason states k and n_current, never cell text) | a reference of text values selects this path. The χ² null assumes ~5 expected per bin; a categorical k is unbounded, so a 900-category field healed onto a disjoint column scored PSI 0.75 against a critical value of 11.4 and passed. The numeric path is not capped: its k is at most 14 and its behaviour is measured below |
 | Threshold | **0.20**; a configured threshold must be in (0, 1], and `bins` in [2, 10] (power was measured at 10) | the conventional "significant shift" line; stated in every verdict |
 | Noise floor | breach needs PSI > max(0.20, critical); critical = χ²₍ₖ₋₁₎(1 − α) · (1/n_current + 1/n_reference), **α = 0.01** (`ALPHA`), k = bins (or categories) populated in the reference or the current run. k = 1 (both sides entirely in the same bin or category: a constant that stayed constant) is PSI 0, no shift; two different constants are k = 2 and take the normal rule | under the null PSI ≈ χ²₍ₖ₋₁₎ · (1/n_c + 1/n_r): over a small page, 0.20 is sampling noise. χ² quantile: exact for df 1–2, Wilson–Hilferty otherwise (stdlib, no scipy); stated in every verdict |
-| Numeric or categorical | numeric when **≥ 95%** of the reference's **non-blank** cells parse (`NUMERIC_PARSE_FLOOR`); blank and whitespace-only cells are left out of that denominator and go to the blank bin. A numeric reference with fewer than `MIN_VALUES` parseable values is INSUFFICIENT | one accepted `N/A` must not turn every amount into its own category, and neither must empty cells: amounts with 6% blanks were categorical, and a heal onto ten times the values passed (PSI 0.39 against critical 31.5). Quantile edges from a handful of numbers (599 blanks and one `5`) are degenerate, so that is no basis rather than a verdict |
+| Numeric or categorical | numeric when **≥ 95%** of the reference's **non-blank** cells parse (`NUMERIC_PARSE_FLOOR`); blank and whitespace-only cells are left out of that denominator and go to the blank bin. A numeric reference with fewer than `MIN_VALUES` parseable values, or a numeric current run with fewer than `MIN_VALUES` non-blank cells, is INSUFFICIENT | one accepted `N/A` must not turn every amount into its own category, and neither must empty cells: amounts with 6% blanks were categorical, and a heal onto ten times the values passed (PSI 0.39 against critical 31.5). Quantile edges from a handful of numbers (599 blanks and one `5`) are degenerate, so that is no basis rather than a verdict |
 | Which fields | `FieldTarget.distributional` (Task 5), default `False` | PSI over an identifier column is noise |
 | Persistence | **2** consecutive breaching runs before alerting (steady state only) | B7 |
 
@@ -21,12 +21,18 @@ A heal-log line such as "distribution unchanged (PSI 0.03, threshold 0.20, n=847
 number of reference values in the trailing 30 accepted runs. Warm-up per target: the bench 5 runs,
 client targets 30 (the scope record's `warmup_runs`). During warm-up the check returns INSUFFICIENT,
 so a heal quarantines until a human confirms it. INSUFFICIENT means only a genuine lack of basis:
-warm-up, an empty side, too few values, a numeric reference with too few parseable values, or a
-categorical field with fewer than 5 current values per category.
+warm-up, an empty side, too few values, a numeric reference with too few parseable values, a
+numeric current run with too few non-blank cells, or a categorical field with fewer than 5 current
+values per category.
 
-Minimum sample: below **40** values in either the reference window or the current run -- or below
-40 parseable values in a numeric reference -- the check returns INSUFFICIENT (`MIN_VALUES`): a
-heal quarantines, a cache hit is tolerated, and no alert fires. A PASS from a check with no power
+Minimum sample: below **40** values in either the reference window or the current run the check
+returns INSUFFICIENT (`MIN_VALUES`): a heal quarantines, a cache hit is tolerated, and no alert
+fires. On the numeric path n counts **parseable values** on the reference side and **non-blank
+cells** (numbers and unparseable text, blanks excluded) on the current side, so ten amounts among
+ninety blanks are ten values of evidence, not a hundred (fix round 3: they caught a ×3 shift 6.3%
+of the time, and one wild value among 99 blanks passed). Text counts on the current side because
+it cannot dilute power: a numeric reference is at most 5% text, so text in the current run is
+itself a shift. A PASS from a check with no power
 would be fail-open, so the floor is set from measured power: the smallest current n at which
 **both a ×10 and a ×3 shift** are detected at least 95% of the time (bench distribution,
 reference 30 runs × 50 values, 1000 draws per n), rounded up to a multiple of 10.
@@ -64,7 +70,8 @@ check does not judge there (INSUFFICIENT).
 A constant field that stayed constant (PASS, PSI 0) needs the same 40 values. The statistic is
 implemented once, in `selector_drift/validate/stats.py`. Task 29's distribution-shift rule calls
 `DistributionalAssertion.assess()`, so the gate and the quality screen share every guard (warm-up,
-`MIN_VALUES`, the parseable-reference floor, the categorical expected-count floor) and the breach
+`MIN_VALUES`, the parseable-reference and non-blank-current floors, the categorical expected-count
+floor) and the breach
 rule, and can never print different PSIs or disagree on a breach for one field. A value equal to a
 bin edge falls in the lower bin (`np.searchsorted(..., side="left")`).
 

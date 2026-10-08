@@ -636,7 +636,8 @@ def _mostly_blank(i: int) -> list[str]:
 @pytest.mark.unit
 def test_a_mostly_blank_field_healed_onto_a_text_column_fails() -> None:
     h = history_of("amount", 40, values=_mostly_blank)
-    current = column("amount", ["see notes" if j % 10 == 0 else "" for j in range(100)])
+    # 400 cells, 10% text: MIN_VALUES non-blank cells, so judged (fix round 3 sized it up).
+    current = column("amount", ["see notes" if j % 10 == 0 else "" for j in range(400)])
     v = DA.check(current, h, HEALED)
     assert v.outcome is Outcome.FAIL and "see notes" not in v.reason
 
@@ -644,7 +645,9 @@ def test_a_mostly_blank_field_healed_onto_a_text_column_fails() -> None:
 @pytest.mark.unit
 def test_a_mostly_blank_field_healed_onto_the_same_mix_passes() -> None:
     h = history_of("amount", 40, values=_mostly_blank)
-    assert DA.check(column("amount", _mostly_blank(41)), h, HEALED).outcome is Outcome.PASS
+    # Five runs' worth of cells: 50 amounts among 450 blanks, so judged (fix round 3 sized it up).
+    same_mix = [cell for i in range(41, 46) for cell in _mostly_blank(i)]
+    assert DA.check(column("amount", same_mix), h, HEALED).outcome is Outcome.PASS
 
 
 def _thin(numbers: int) -> History:
@@ -674,3 +677,52 @@ def test_the_parseable_reference_floor_boundary() -> None:
     assert below.outcome is Outcome.INSUFFICIENT and "parseable" in below.reason
     at = DA.check(column("amount", ["n/a"] * 100), _thin(MIN_VALUES), HEALED)
     assert at.outcome is Outcome.FAIL  # judged: a column of text where blanks and amounts were
+
+
+# -- fix round 3 (re-review a814b0eb4285043dd): the current side counts non-blank cells ---------
+
+
+@pytest.mark.unit
+def test_ten_amounts_among_blanks_are_no_basis_even_shifted() -> None:
+    # Measured: 90 blanks + 10 amounts x3 breached on 6.3% of trials -- a PASS with no power.
+    h = history_of("amount", 40, values=_mostly_blank)
+    x3 = [("" if j % 10 else f"{3 * (100 + 9 * j):,.2f}") for j in range(100)]
+    v = DA.check(column("amount", x3), h, HEALED)
+    assert v.outcome is Outcome.INSUFFICIENT
+    assert "10 non-blank amount values" in v.reason and f"fewer than {MIN_VALUES}" in v.reason
+
+
+@pytest.mark.unit
+def test_one_wild_value_among_blanks_is_no_basis() -> None:
+    # Measured: PSI 0.105 against critical 0.256 -- a heal PASSed on one number.
+    h = history_of("amount", 40, values=_mostly_blank)
+    v = DA.check(column("amount", [""] * 99 + ["98,765,432.10"]), h, HEALED)
+    assert v.outcome is Outcome.INSUFFICIENT
+    assert "1 non-blank amount values" in v.reason and "98,765" not in v.reason
+
+
+def _non_blank_among_blanks(n: int) -> list[str]:
+    """n non-blank cells -- five of them text, the rest amounts in the reference range -- among
+    200 blanks: text counts toward the floor, blanks do not."""
+    return [""] * 200 + ["n/a"] * 5 + [f"{100 + 9 * j:,.2f}" for j in range(n - 5)]
+
+
+@pytest.mark.unit
+def test_the_current_non_blank_floor_boundary() -> None:
+    h = history_of("amount", 40, values=_mostly_blank)
+    below = DA.check(column("amount", _non_blank_among_blanks(MIN_VALUES - 1)), h, HEALED)
+    assert below.outcome is Outcome.INSUFFICIENT
+    assert f"{MIN_VALUES - 1} non-blank amount values" in below.reason
+    at = DA.assess(column("amount", _non_blank_among_blanks(MIN_VALUES)), h, "amount")
+    assert isinstance(at, Assessment) and at.current_n == 200 + MIN_VALUES  # judged
+
+
+@pytest.mark.unit
+def test_the_non_blank_floor_does_not_touch_the_categorical_path() -> None:
+    # 45 cells, 30 of them blank: a categorical field still judges on its own rules.
+    h = history_of("status", 40, values=lambda i: ["Open", "Paid"] * 50)
+    status = field_target("status", distributional=True)
+    current = column("status", [""] * 30 + ["Open", "Paid"] * 7 + ["Open"])
+    a = DA.assess(current, h, "status")
+    assert isinstance(a, Assessment) and a.categorical
+    assert DA.check(current, h, ctx(status, rung=3)).outcome is not Outcome.INSUFFICIENT
