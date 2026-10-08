@@ -98,11 +98,8 @@ def test_the_layout_table_still_extracts_every_row() -> None:
         (BASE, "//tbody/tr[1]/td[1]/a"),
     ],
 )
-def test_single_field_extracts_every_data_row_or_refuses(html: str, xpath: str) -> None:
-    try:
-        c = _read(html, {"claim_number": _el(html, xpath)}, ONE_FIELD_SPEC)
-    except RowMisaligned:
-        return
+def test_single_field_extracts_every_data_row(html: str, xpath: str) -> None:
+    c = _read(html, {"claim_number": _el(html, xpath)}, ONE_FIELD_SPEC)
     assert [r["claim_number"].value for r in c.rows] == CLAIMS
 
 

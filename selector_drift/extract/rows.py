@@ -51,38 +51,40 @@ def _has_same_tag_sibling(node: HtmlElement) -> bool:
     return parent is not None and sum(1 for s in parent if s.tag == node.tag) >= 2
 
 
+def _is_explicit_row(node: HtmlElement) -> bool:
+    return bool(node.tag == _ROW_TAG or node.get("role") == _ROW_ROLE)
+
+
 def row_of(el: HtmlElement, *, contains: Iterable[HtmlElement] = ()) -> HtmlElement:
-    """The row container of a cell: the FIRST ancestor of `el`, walking up from its parent,
-    that is not itself a cell (td/th or role cell/gridcell/columnheader/rowheader) and has
-    a same-tag sibling. There is no further climbing: a higher repeated ancestor (a layout
-    <div>) that happens to hold two unrelated cells is not a row.
+    """The row container of a cell, found walking up from `el`'s parent (cells skipped:
+    td/th or role cell/gridcell/columnheader/rowheader).
 
-    Raises LookupError when there is no such ancestor, when it does not contain every element
-    in `contains` (the other fields' cells: they do not share a row), or, for a single field,
-    when the choice is ambiguous: a row that is neither a <tr> nor [role=row] whose own parent
-    is also a repeated level (a wrapper <div> inside a repeated row <div>) cannot be told from
-    a real row with one field to go on, so it is refused rather than guessed.
+    An EXPLICIT row (a <tr> or [role=row]) is the row whether or not it has siblings, so a
+    one-result table is a table of one row and a following footer or second table is never
+    zipped in. Otherwise the row is the first ancestor with a same-tag sibling. Either way
+    there is no further climbing: a higher repeated ancestor (a layout <div>) that holds two
+    unrelated cells is not a row.
 
-    Rows before the anchor row, and rows in other row groups (a second <tbody>), are not part
-    of the result: extraction drops them by position and Task 29's row-count contract is the
-    net for a table that really spans groups."""
+    Raises LookupError when there is no such ancestor; when it does not contain every element
+    in `contains` (the other fields' cells: they do not share a row); or when a non-explicit
+    row's own parent is also a repeated level (a wrapper or group <div> inside a repeated row
+    <div>), which cannot be told from a real row and so is refused rather than guessed.
+
+    Rows before the anchor row, and rows in other row groups (a second <tbody>, a tfoot), are
+    not part of the result: extraction drops them by position and Task 29's row-count
+    contract is the net for a table that really spans groups."""
     others = [o for o in contains if o is not el]
     node = el
     while (parent := node.getparent()) is not None:
         node = parent
-        if _is_cell(node) or not _has_same_tag_sibling(node):
+        explicit = _is_explicit_row(node)
+        if _is_cell(node) or not (explicit or _has_same_tag_sibling(node)):
             continue
         if not all(node in o.iterancestors() for o in others):
             raise LookupError("the fields do not share the anchor's row")
-        explicit = node.tag == _ROW_TAG or node.get("role") == _ROW_ROLE
         container = node.getparent()
-        if (
-            not others
-            and not explicit
-            and container is not None
-            and _has_same_tag_sibling(container)
-        ):
-            raise LookupError("one field, and the row is ambiguous (nested repeated levels)")
+        if not explicit and container is not None and _has_same_tag_sibling(container):
+            raise LookupError("the row is ambiguous (nested repeated levels)")
         return node
     raise LookupError("no repeated ancestor: not inside a list of rows")
 
