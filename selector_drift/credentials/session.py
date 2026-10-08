@@ -8,6 +8,7 @@ session with no live cookie is refused rather than run logged out, and only coun
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import math
@@ -31,10 +32,32 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _domain_matches(domain: str, hosts: set[str]) -> bool:
-    """RFC 6265 domain-match: the cookie's domain is the host, or a parent of it."""
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _domain_matches(domain: str, host: str) -> bool:
+    """RFC 6265 domain-match: the cookie's domain is the host, or a parent of it. An IP-literal
+    host matches only exactly -- `0.0.1` is not a parent of `127.0.0.1`."""
     d = domain.lstrip(".").lower()
-    return bool(d) and any(h == d or h.endswith("." + d) for h in hosts)
+    if not d:
+        return False
+    if _is_ip_literal(host):
+        return d == host
+    return host == d or host.endswith("." + d)
+
+
+def _host_only_clones(cookie: dict[str, Any], hosts: list[str]) -> list[dict[str, Any]]:
+    """H2 (fix round 1): a matching cookie is never handed over as scoped. Each authorised host
+    it matches gets its own copy with `domain=<host>` -- no leading dot, which Playwright treats
+    as host-only -- so a parent-domain or public-suffix cookie (`.example.invalid`, `com`) can
+    only ever reach the exact authorised host."""
+    domain = str(cookie.get("domain", ""))
+    return [{**cookie, "domain": h} for h in hosts if _domain_matches(domain, h)]
 
 
 def _expiry(cookie: dict[str, Any]) -> float | None:
@@ -73,14 +96,11 @@ class SessionInjection:
         return cookies
 
     def get(self, target: AuthorisedTarget) -> Credentials:
-        hosts = {h.lower() for o in target.origins if (h := urlsplit(o).hostname)}
+        hosts = sorted({h.lower() for o in target.origins if (h := urlsplit(o).hostname)})
         now = self._now().timestamp()
         cookies = self._read()
-        for_origin = [
-            c
-            for c in cookies
-            if isinstance(c, dict) and _domain_matches(str(c.get("domain", "")), hosts)
-        ]
+        matching = [c for c in cookies if isinstance(c, dict) and _host_only_clones(c, hosts)]
+        for_origin = [clone for c in matching for clone in _host_only_clones(c, hosts)]
         live: list[dict[str, Any]] = []
         unreadable = 0
         for c in for_origin:
@@ -104,7 +124,7 @@ class SessionInjection:
             "session injection for %s: %d live cookie(s); %d dropped as off-origin, %d expired",
             target.target,
             len(live),
-            len(cookies) - len(for_origin),
+            len(cookies) - len(matching),
             len(for_origin) - len(live),
         )
         return Credentials(cookies=live)
