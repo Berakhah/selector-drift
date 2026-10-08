@@ -220,9 +220,7 @@ def record_authorisation(
                 legal_review=record.legal_review,
                 warmup_runs=record.warmup_runs,
                 evidence_retention_days=record.evidence_retention_days,
-                # ScopeRecord gains credential_posture in Task 32; until then every target is the
-                # column's default posture, and this line needs no edit when the field arrives.
-                credential_posture=str(getattr(record, "credential_posture", "session_injection")),
+                credential_posture=record.credential_posture,
                 record_sha256=record_sha256,
                 loaded_at=now,
             )

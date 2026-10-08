@@ -68,7 +68,10 @@ def test_a_registered_factory_receives_the_whole_scope_record(scopes, monkeypatc
 
 @pytest.mark.unit
 def test_register_adds_a_posture(monkeypatch):
+    # Task 32: every posture is registered at import and register() refuses a re-registration
+    # (controller ruling a), so the slot is emptied first to exercise the add path.
     monkeypatch.setattr(registry, "_FACTORIES", dict(registry._FACTORIES))
+    del registry._FACTORIES["client_broker"]
 
     def factory(record):
         return SessionInjection(registry.session_path(record.target))

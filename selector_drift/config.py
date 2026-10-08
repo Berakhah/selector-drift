@@ -2,12 +2,14 @@
 
 The one Settings definition in the product (2026-09-26). Later tasks read fields from here and
 define none: Task 6 (alert webhook), Task 18 (escalation corpus), Task 28 (lake root), Task 31
-(session directory), Task 33 (fixture mode, web origin, public base URL, typegen).
+(session directory), Task 32 (credential store, KEK; per-target broker via `broker_env`),
+Task 33 (fixture mode, web origin, public base URL, typegen).
 """
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -41,6 +43,10 @@ class Settings:
     # SD_GITHUB_TOKEN -- optional, read-only deployments scope, for gh-actions feeds (Task 29A).
     # A SecretStr so the dataclass repr can never print it.
     github_token: SecretStr | None
+    credential_store: Path  # SD_CREDENTIAL_STORE -- the encrypted store's root (Task 32)
+    # SD_CREDENTIAL_KEK -- 64 hex chars, the key-encryption key (Task 32). Never on disk, never
+    # committed; a SecretStr so no repr, log line or exception can print it.
+    credential_kek: SecretStr | None
     _redaction_key_hex: str  # SD_REDACTION_KEY -- hex, >= 32 bytes, never committed
 
     @property
@@ -83,6 +89,8 @@ class Settings:
             escalation_corpus=Path("corpus/escalations"),
             deploys_file=Path("deploys.yaml"),
             github_token=None,
+            credential_store=Path("credentials"),
+            credential_kek=None,
             _redaction_key_hex="",
         )
 
@@ -121,7 +129,41 @@ def get_settings() -> Settings:
         deploys_file=Path(_env_or_default("SD_DEPLOYS_FILE", "deploys.yaml")),
         # No default (a credential): set-but-empty behaves as unset.
         github_token=SecretStr(token) if (token := e("SD_GITHUB_TOKEN", "").strip()) else None,
+        credential_store=Path(_env_or_default("SD_CREDENTIAL_STORE", "credentials")),
+        # No default (a secret): set-but-empty behaves as unset.
+        credential_kek=SecretStr(kek) if (kek := e("SD_CREDENTIAL_KEK", "").strip()) else None,
         # No default (a secret): a set-but-empty SD_REDACTION_KEY already behaves as unset --
         # `redaction_key` raises ConfigError on any falsy `_redaction_key_hex`.
         _redaction_key_hex=e("SD_REDACTION_KEY", ""),
     )
+
+
+# The target-name pattern of scope.record.TARGET_SLUG, repeated rather than imported: config is
+# the bottom of the import graph and must not import the scope package.
+_TARGET_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+@dataclass(frozen=True)
+class BrokerEnv:
+    """One target's client-broker configuration (Task 32). The token is a SecretStr, so the
+    dataclass repr can never print it; the variable names are kept for refusal messages."""
+
+    url_var: str
+    token_var: str
+    url: str | None
+    token: SecretStr | None
+
+
+def broker_env(target: str) -> BrokerEnv:
+    """`SD_BROKER_URL_<TARGET>` / `SD_BROKER_TOKEN_<TARGET>` for one target (`claims-portal` ->
+    `CLAIMS_PORTAL`). Per-target names cannot be fixed fields on `Settings`, so this is the one
+    accessor that reads them -- still here, the only module that reads the environment. Read on
+    every call (not cached): a rotated token is picked up by the next run. Set-but-empty is
+    unset."""
+    if not _TARGET_NAME.fullmatch(target):
+        raise ValueError(f"{target!r} is not a target name")
+    suffix = target.upper().replace("-", "_")
+    url_var, token_var = f"SD_BROKER_URL_{suffix}", f"SD_BROKER_TOKEN_{suffix}"
+    url = os.environ.get(url_var, "").strip() or None
+    token = os.environ.get(token_var, "").strip()
+    return BrokerEnv(url_var, token_var, url, SecretStr(token) if token else None)

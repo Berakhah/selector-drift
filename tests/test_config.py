@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import secrets
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from selector_drift.config import DEFAULT_DATABASE_URL, ConfigError, get_settings
+from selector_drift.config import DEFAULT_DATABASE_URL, ConfigError, broker_env, get_settings
 
 VARS = (
     "SD_ENV",
@@ -22,6 +23,10 @@ VARS = (
     "SD_ALERT_WEBHOOK_URL",
     "SD_SESSION_DIR",
     "SD_ESCALATION_CORPUS",
+    "SD_CREDENTIAL_STORE",
+    "SD_CREDENTIAL_KEK",
+    "SD_BROKER_URL_CLAIMS_PORTAL",
+    "SD_BROKER_TOKEN_CLAIMS_PORTAL",
 )
 
 
@@ -125,3 +130,55 @@ def test_a_set_but_empty_variable_falls_back_to_the_default(
     assert s.database_url == DEFAULT_DATABASE_URL
     assert s.public_base_url == "https://selector-drift.invalid"
     assert s.spec_dir == Path("specs")
+
+
+@pytest.mark.unit
+def test_the_credential_store_and_kek_are_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Task 32, controller ruling (b): only config.py reads the environment."""
+    s = get_settings()
+    assert s.credential_store == Path("credentials") and s.credential_kek is None
+    kek = secrets.token_hex(32)  # generated: no key material in the repo
+    monkeypatch.setenv("SD_CREDENTIAL_STORE", str(tmp_path / "creds"))
+    monkeypatch.setenv("SD_CREDENTIAL_KEK", kek)
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.credential_store == tmp_path / "creds"
+    assert s.credential_kek is not None and s.credential_kek.get_secret_value() == kek
+    assert kek not in repr(s) and kek not in str(s)
+
+
+@pytest.mark.unit
+def test_a_set_but_empty_kek_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SD_CREDENTIAL_KEK", "  ")
+    assert get_settings().credential_kek is None
+
+
+@pytest.mark.unit
+def test_broker_env_reads_one_targets_endpoint_and_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    token = f"broker-test-only-{secrets.token_hex(16)}"
+    monkeypatch.setenv("SD_BROKER_URL_CLAIMS_PORTAL", " https://broker.example.invalid/v1 ")
+    monkeypatch.setenv("SD_BROKER_TOKEN_CLAIMS_PORTAL", token)
+    env = broker_env("claims-portal")
+    assert (env.url_var, env.token_var) == (
+        "SD_BROKER_URL_CLAIMS_PORTAL",
+        "SD_BROKER_TOKEN_CLAIMS_PORTAL",
+    )
+    assert env.url == "https://broker.example.invalid/v1"
+    assert env.token is not None and env.token.get_secret_value() == token
+    assert token not in repr(env)
+
+
+@pytest.mark.unit
+def test_broker_env_unset_or_empty_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SD_BROKER_TOKEN_CLAIMS_PORTAL", "")
+    env = broker_env("claims-portal")
+    assert env.url is None and env.token is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("target", ["../x", "Claims", "", "a_b", "-a"])
+def test_broker_env_refuses_a_name_that_is_not_a_target(target: str) -> None:
+    with pytest.raises(ValueError):
+        broker_env(target)

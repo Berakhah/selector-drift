@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
+from typing import Literal
 from urllib.parse import urlsplit
 
 from bok_core.boundary.sensitivity import Sensitivity
@@ -40,6 +41,13 @@ class Basis(StrEnum):
 class FirstHealPolicy(StrEnum):
     REQUIRED = "required"
     AUTO_PROMOTE = "auto_promote"
+
+
+# Design 2.1 Q2 (Task 32): the three credential postures, in the brief's preference order.
+# A Literal, so an unknown posture is refused when the scope record loads -- never downgraded
+# to a default. No posture holds a second factor: only `client_broker` can produce a one-time
+# code, and it asks the client's own endpoint for it; the seed never leaves the client.
+CredentialPosture = Literal["session_injection", "client_broker", "encrypted_store"]
 
 
 TARGET_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
@@ -92,6 +100,9 @@ class ScopeRecord(BaseModel):
     # quietly lower lives on the scope record, next to the authorisation basis.
     warmup_runs: int = Field(default=30, ge=1)
     evidence_retention_days: int | None = Field(default=None, ge=1)
+    # Design 2.1 Q2 -- the default offer. On the record (and so in `record_sha256`) because
+    # how we hold a client's access is part of what they authorised.
+    credential_posture: CredentialPosture = "session_injection"
 
     @field_validator("target")
     @classmethod
