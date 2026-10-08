@@ -37,9 +37,12 @@ if TYPE_CHECKING:
     from selector_drift.validate.gate import HealContext
 
 REFERENCE_RUNS: Final = 30
-# The brief is silent on tiny samples. Task 22's precedent (MIN_JOINED = 10): a handful of
-# values is not evidence either way, so below this on EITHER side the check has no basis.
-MIN_VALUES: Final = 10
+# Set from measured power (fix round 3): a PASS from a check with no power is fail-open. The
+# smallest current n at which a x10 shift is detected >= 95% of the time (bench-like data,
+# reference 30 x 50 values, 1000 draws) was 35 (98.8%), rounded up to a multiple of 10. At 40:
+# 99.8% detected, 0.5% false breach. Below this on EITHER side the check has no basis:
+# INSUFFICIENT -- a heal quarantines, a cache hit is tolerated, no alert. docs/methodology.md.
+MIN_VALUES: Final = 40
 __all__ = ["ALPHA", "MIN_VALUES", "REFERENCE_RUNS", "Assessment", "DistributionalAssertion"]
 
 

@@ -249,18 +249,30 @@ def test_a_reference_window_without_the_field_is_insufficient() -> None:
 
 @pytest.mark.unit
 def test_a_tiny_current_sample_is_not_evidence() -> None:
-    # Same thinking as Task 22's MIN_JOINED: PSI over a handful of values is noise either way.
-    few = column("amount", grid(101, 9, n=MIN_VALUES - 1))
-    v = DA.check(few, amount_history(40), HEALED)
+    # A PASS from a check with no power is fail-open: ten values wholly outside the reference
+    # range are not a PASS, they are no basis -- a heal quarantines (fix round 3).
+    outside = column("amount", grid(5000, 9, n=10))
+    v = DA.check(outside, amount_history(40), HEALED)
     assert v.outcome is Outcome.INSUFFICIENT and f"fewer than {MIN_VALUES}" in v.reason
-    # At MIN_VALUES the check judges (not INSUFFICIENT). With Jeffreys smoothing and the
-    # chi-square floor, ten values all above the reference range score PSI ~1.83 against a
-    # critical ~2.18 -- not yet a breach; twenty are (fix round 2: the measured power at small n).
-    enough = column("amount", grid(5000, 9, n=MIN_VALUES))
-    v = DA.check(enough, amount_history(40), HEALED)
-    assert v.outcome is not Outcome.INSUFFICIENT and v.observed is not None
-    twenty = column("amount", grid(5000, 9, n=2 * MIN_VALUES))
-    assert DA.check(twenty, amount_history(40), HEALED).outcome is Outcome.FAIL
+    steady = DA.check(outside, amount_history(40, prior_breaches=1), STEADY)
+    assert steady.outcome is Outcome.INSUFFICIENT  # tolerated on a cache hit; no alert
+    assert isinstance(DA.assess(outside, amount_history(40), "amount"), str)
+
+
+@pytest.mark.unit
+def test_min_values_is_set_from_measured_power() -> None:
+    # The smallest n at which a x10 shift is detected >= 95% of the time on the fix-round
+    # harness (n=35: 98.8%), rounded up to a multiple of 10. See docs/methodology.md.
+    assert MIN_VALUES == 40
+
+
+@pytest.mark.unit
+def test_min_values_boundary() -> None:
+    below = column("amount", grid(5000, 9, n=MIN_VALUES - 1))
+    at = column("amount", grid(5000, 9, n=MIN_VALUES))
+    assert DA.check(below, amount_history(40), HEALED).outcome is Outcome.INSUFFICIENT
+    v = DA.check(at, amount_history(40), HEALED)
+    assert v.outcome is Outcome.FAIL and v.observed is not None  # judged, and wholly outside
 
 
 @pytest.mark.unit
@@ -362,9 +374,10 @@ def test_synthetic_seasonality_is_not_alerted_after_warmup() -> None:
 
 
 def _bunched() -> list[str]:
-    """Ten values against the 100..991 reference, five in each of two deciles: over 0.20 on
-    ten values is what sampling noise does, and it is under the chi-square critical value."""
-    return grid(110, 1, n=5) + grid(560, 1, n=5)
+    """MIN_VALUES values against the 100..991 reference, five in each of the eight lowest
+    deciles and none in the top two: over 0.20, and under the chi-square critical value."""
+    assert MIN_VALUES == 40
+    return [v for d in range(8) for v in grid(110 + 89 * d, 1, n=5)]
 
 
 @pytest.mark.unit
@@ -458,3 +471,13 @@ def test_one_na_in_a_numeric_reference_keeps_the_field_numeric_and_a_matching_he
     assert isinstance(a, Assessment) and not a.categorical
     assert DA.check(SAME, h, HEALED).outcome is Outcome.PASS
     assert DA.bin_edges_for(h, "amount") != ()
+
+
+@pytest.mark.unit
+def test_the_constant_field_pass_still_needs_min_values() -> None:
+    h = history_of("currency", 40, values=lambda i: ["USD"] * 100)
+    usd = field_target("currency", distributional=True)
+    few = DA.check(column("currency", ["USD"] * (MIN_VALUES - 1)), h, ctx(usd, rung=3))
+    assert few.outcome is Outcome.INSUFFICIENT
+    enough = DA.check(column("currency", ["USD"] * MIN_VALUES), h, ctx(usd, rung=3))
+    assert enough.outcome is Outcome.PASS
