@@ -339,3 +339,154 @@ def test_a_plain_http_webhook_is_refused_and_not_logged(monkeypatch, caplog) -> 
 @pytest.mark.unit
 def test_a_configured_channel_is_ready() -> None:
     assert check_alert_channel() is True
+
+
+# ------------------------------------------------------------------ fix round 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "logger",
+    [
+        "httpx",
+        "httpcore",
+        "httpcore.connection",
+        "httpcore.http11",
+        "httpcore.http2",
+        "httpcore.proxy",
+    ],
+)
+def test_every_http_client_logger_drops_the_webhook(logger: str, caplog) -> None:
+    # A logger-level filter does not see records propagated from child loggers (M1, round 1).
+    with caplog.at_level(logging.DEBUG):
+        logging.getLogger(logger).debug("send_request_headers.started url=%s", WEBHOOK)
+    assert "T0/B0" not in caplog.text
+
+
+@pytest.mark.unit
+def test_a_refused_webhook_says_refused_not_unset(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("SD_ALERT_WEBHOOK_URL", "http://hooks.example.invalid/T9/B9/plain")
+    get_settings.cache_clear()
+    with caplog.at_level(logging.WARNING, logger="selector_drift.quality.alerts"):
+        assert check_alert_channel() is False
+        notify([], _run("quarantined"), now=NOW)  # undeliverable: nothing touches the database
+    assert "refused" in caplog.text and "https" in caplog.text
+    assert "unset" not in caplog.text and "not set" not in caplog.text
+    assert "ALERT NOT DELIVERED" in caplog.text and "T9/B9" not in caplog.text
+
+
+def _scored(at: dt.datetime, subject: str = "7", judgement: str = "false_accept") -> None:
+    with Session() as s:
+        s.add(
+            AuditLog(
+                at=at,
+                actor="testbench.score",
+                action="scored",
+                subject=subject,
+                detail={"judgement": judgement, "run_key": KEY},
+            )
+        )
+        s.commit()
+
+
+@pytest.mark.integration
+def test_an_old_false_accept_does_not_page_when_the_channel_is_configured(httpx_mock) -> None:
+    # M3, round 1: configuring a webhook must not page every historical day at once.
+    _scored(NOW - dt.timedelta(days=5))
+    _scored(NOW - dt.timedelta(days=2, hours=1))  # before the start of yesterday (UTC)
+    notify_false_accepts(now=NOW)
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.integration
+def test_yesterdays_false_accept_still_pages(httpx_mock) -> None:
+    httpx_mock.add_response(url=WEBHOOK, method="POST")
+    _scored(dt.datetime(2026, 9, 30, 0, 5, tzinfo=dt.UTC))
+    notify_false_accepts(now=NOW)
+    (request,) = httpx_mock.get_requests()
+    assert json.loads(request.content)["day"] == "2026-09-30"
+
+
+@pytest.mark.integration
+def test_an_unconfigured_channel_does_not_rewarn_the_whole_history(monkeypatch, caplog) -> None:
+    monkeypatch.delenv("SD_ALERT_WEBHOOK_URL")
+    get_settings.cache_clear()
+    for days in range(3, 30):
+        _scored(NOW - dt.timedelta(days=days), subject=str(days))
+    with caplog.at_level(logging.WARNING, logger="selector_drift.quality.alerts"):
+        notify_false_accepts(now=NOW)
+    assert "ALERT NOT DELIVERED" not in caplog.text
+
+
+# M7, round 1: title and threshold are the only free text in the allow-listed body. Every rule
+# notify() can send has its shape pinned here -- rule names, field names, counts, rates and
+# numbers only -- so no cell value can ride into a webhook in either field.
+FIELD = r"(claim_number|amount)"
+NUM = r"[0-9][0-9.]*"
+TITLE_SHAPES = {
+    "row_count": rf"Row count \d+ is below half the trailing median \({NUM}\)",
+    "null_rate": rf"{FIELD} is empty in \d+% of rows",
+    "schema_drift": r"Landed columns differ from the spec's expected schema",
+    "distribution_shift": rf"{FIELD} distribution shifted \(PSI {NUM}\)",
+}
+THRESHOLD_SHAPES = {
+    "row_count": rf">= {NUM}",
+    "null_rate": rf"<= {NUM}",
+    "schema_drift": r"columns and types exactly as expected_schema \(spec v\d+\)",
+    "distribution_shift": rf"PSI {NUM}",
+}
+
+
+@pytest.mark.unit
+def test_every_contract_rule_has_a_pinned_shape() -> None:
+    import re
+
+    src = (Path(__file__).resolve().parents[2] / "selector_drift/quality/contracts.py").read_text(
+        encoding="utf-8"
+    )
+    rules = set(re.findall(r'rule="(\w+)"', src))
+    assert rules == set(TITLE_SHAPES) == set(THRESHOLD_SHAPES), "pin the new rule's shape here"
+
+
+@pytest.mark.integration
+def test_every_rule_notify_can_send_carries_only_its_pinned_shape(land, httpx_mock) -> None:
+    import re
+
+    from selector_drift.quality.contracts import evaluate
+    from tests.land.factory import rows
+    from tests.quality.conftest import BASE
+
+    for i in range(6):
+        land(BASE + dt.timedelta(days=i), rows())
+    day = BASE + dt.timedelta(days=6)
+    findings = evaluate(land(day, rows(49, scale=3.0, blank_amounts=5, extra={"surprise": "x"})))
+    assert {f.properties["rule"] for f in findings} == set(TITLE_SHAPES)
+    for f in findings:
+        rule = f.properties["rule"]
+        assert re.fullmatch(TITLE_SHAPES[rule], f.title), (rule, f.title)
+        assert re.fullmatch(THRESHOLD_SHAPES[rule], f.properties["threshold"]), rule
+    httpx_mock.add_response(url=WEBHOOK, method="POST", is_reusable=True)
+    run = _run()
+    run.run_key = f"testbench:2:{day.isoformat()}"
+    notify(findings, run, now=NOW)
+    bodies = [json.loads(r.content) for r in httpx_mock.get_requests()]
+    assert bodies and {b["rule"] for b in bodies} <= set(TITLE_SHAPES)
+    for b in bodies:
+        assert re.fullmatch(TITLE_SHAPES[b["rule"]], b["title"])
+        assert re.fullmatch(THRESHOLD_SHAPES[b["rule"]], b["threshold"])
+
+
+@pytest.mark.integration
+def test_the_internal_rules_titles_carry_no_free_text(httpx_mock) -> None:
+    import re
+
+    httpx_mock.add_response(url=WEBHOOK, method="POST", is_reusable=True)
+    _scored(NOW, subject="AB12345678 <td>")  # a malformed subject must not reach the title
+    notify_false_accepts(now=NOW)
+    notify([], _run("quarantined"), now=NOW)
+    bodies = {b["rule"]: b for b in (json.loads(r.content) for r in httpx_mock.get_requests())}
+    assert re.fullmatch(
+        r"the gate accepted a wrong heal \(heal (\d+|unknown)\)", bodies["false_accept"]["title"]
+    )
+    assert CELL not in json.dumps(bodies)
+    assert bodies["quarantine"]["title"] == f"{KEY} quarantined: data held, nothing written"

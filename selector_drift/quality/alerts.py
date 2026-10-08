@@ -108,6 +108,20 @@ _RANK: Final = {
 }
 HEARTBEAT_GRACE: Final = dt.timedelta(minutes=30)
 SLOT_TOLERANCE: Final = dt.timedelta(minutes=1)
+# notify_false_accepts looks at today and yesterday (UTC) only: configuring a webhook must not
+# page every historical day at once, nor an unconfigured channel re-warn the whole history.
+FALSE_ACCEPT_DAYS: Final = 2
+# A logger-level filter sees only records logged on that exact logger, never ones propagated
+# from its children, so every logger the http client stack writes to is named here.
+HTTP_CLIENT_LOGGERS: Final = (
+    "httpx",
+    "httpcore",
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.proxy",
+    "httpcore.socks",
+)
 # The whole webhook body. Anything not named here never leaves the boundary (rule 6).
 BODY_KEYS: Final = ("target", "rule", "severity", "title", "run_key", "threshold", "day")
 
@@ -130,18 +144,19 @@ class _HideWebhook(logging.Filter):
 
 
 _HIDE_WEBHOOK: Final = _HideWebhook()
-for _name in ("httpx", "httpcore"):
+for _name in HTTP_CLIENT_LOGGERS:
     logging.getLogger(_name).addFilter(_HIDE_WEBHOOK)
 
 
-def _delivery_url() -> str | None:
-    """Task 6's webhook_url() (Settings), refused unless https: the URL is a bearer credential
-    and must not cross the network in the clear."""
+def _channel() -> tuple[str | None, str]:
+    """(deliverable URL, why not). Task 6's webhook_url() (Settings), refused unless https: the
+    URL is a bearer credential and must not cross the network in the clear."""
     url = webhook_url()
-    if url and not url.startswith("https://"):
-        _log.error("%s is not an https URL; alerts will be LOGGED ONLY", WEBHOOK_ENV)
-        return None
-    return url
+    if url is None:
+        return None, f"{WEBHOOK_ENV} is unset"
+    if not url.startswith("https://"):
+        return None, f"{WEBHOOK_ENV} is set but refused (not an https URL)"
+    return url, ""
 
 
 @dataclass(frozen=True)
@@ -168,8 +183,9 @@ class Alert:
 
 
 def check_alert_channel() -> bool:
-    if _delivery_url() is None:
-        _log.warning("%s is not set: alerts will be LOGGED ONLY and reach nobody", WEBHOOK_ENV)
+    url, why = _channel()
+    if url is None:
+        _log.warning("%s: alerts will be LOGGED ONLY and reach nobody", why)
         return False
     return True
 
@@ -197,15 +213,15 @@ def _unique(alerts: Sequence[Alert]) -> list[Alert]:
 
 
 def _dispatch(alerts: Sequence[Alert], now: dt.datetime) -> None:
-    url = _delivery_url()
+    url, why = _channel()
     for alert in _unique(alerts):
         day = alert.day or now.astimezone(UTC).date()
         subject = f"{alert.target}:{alert.rule}:{day.isoformat()}"
         if url is None:
             # Said every time, recorded never: nothing was delivered.
             _log.warning(
-                "ALERT NOT DELIVERED (%s unset): %s %s %s -- %s",
-                WEBHOOK_ENV,
+                "ALERT NOT DELIVERED (%s): %s %s %s -- %s",
+                why,
                 alert.severity.value,
                 alert.target,
                 alert.rule,
@@ -288,11 +304,15 @@ def _target_of(s: OrmSession, row: AuditLog) -> str | None:
 def notify_false_accepts(*, now: dt.datetime | None = None) -> None:
     """HIGH on every scored row whose judgement is false_accept: a wrong heal the gate let
     through (Task 26C). Deduplicated per (target, false_accept) per UTC day of the scoring."""
+    now = now or dt.datetime.now(UTC)
+    today = now.astimezone(UTC).date()
+    since = dt.datetime.combine(today - dt.timedelta(days=FALSE_ACCEPT_DAYS - 1), dt.time(), UTC)
     alerts: list[Alert] = []
     with Session() as s:
         rows = s.scalars(
             select(AuditLog).where(
                 AuditLog.actor == SCORER,
+                AuditLog.at >= since,
                 AuditLog.action == "scored",
                 AuditLog.detail["judgement"].astext == "false_accept",
             )
@@ -306,12 +326,14 @@ def notify_false_accepts(*, now: dt.datetime | None = None) -> None:
                         target,
                         "false_accept",
                         Severity.HIGH,
-                        f"the gate accepted a wrong heal (heal {row.subject})",
+                        # The subject is a heal id; anything else is never echoed (rule 6).
+                        "the gate accepted a wrong heal (heal "
+                        f"{row.subject if row.subject.isdigit() else 'unknown'})",
                         run_key if isinstance(run_key, str) else None,
                         day=row.at.astimezone(UTC).date(),
                     )
                 )
-    _dispatch(alerts, now or dt.datetime.now(UTC))
+    _dispatch(alerts, now)
 
 
 def notify_missed_heartbeats(*, now: dt.datetime | None = None) -> None:
@@ -352,3 +374,20 @@ def notify_missed_heartbeats(*, now: dt.datetime | None = None) -> None:
                     )
                 )
     _dispatch(alerts, now)
+
+
+def notify_deploy_feed_missing(target: str, *, now: dt.datetime | None = None) -> None:
+    """A declared self-host deploy log that does not exist yet is a condition, not a crash: one
+    deduplicated alert per target per UTC day (Task 29A fix round 1). The path is not sent."""
+    _dispatch(
+        [
+            Alert(
+                target,
+                "deploy_feed_missing",
+                Severity.MEDIUM,
+                f"{target}: self-host deploy log not found; no deploy history ingested",
+                None,
+            )
+        ],
+        now or dt.datetime.now(UTC),
+    )

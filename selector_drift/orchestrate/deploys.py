@@ -4,7 +4,11 @@ deploy, verified against deploy history' is checkable only against a stored feed
 Each target's feed is declared in `deploys.yaml` (path: Settings.deploys_file, SD_DEPLOYS_FILE):
 `self-host` -- the VM's deploy script appends one JSON line per deploy -- or `gh-actions` --
 GitHub's deployments API. Ingest is idempotent on (target, deployed_at, ref), the deploys
-table's primary key. The GitHub token (Settings.github_token) travels in a header only, never
+table's primary key. A relative self-host `path` resolves against deploys.yaml's own directory,
+never the process cwd. A self-host log that does not exist yet is a condition, not a crash: no
+records, and one deduplicated `deploy_feed_missing` alert per target per UTC day (fix round 1);
+a log that exists but cannot be read or parsed still raises. The GitHub token
+(Settings.github_token) travels in a header only, never
 in a URL, a log line or an exception message.
 """
 
@@ -13,7 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Final, Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -26,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert
 from selector_drift.config import get_settings
 from selector_drift.db.models import Deploy, HealEvent, Run
 from selector_drift.db.session import Session
+from selector_drift.quality.alerts import notify_deploy_feed_missing
 
 Source = Literal["self-host", "gh-actions", "manual"]
 GITHUB_API: Final = "https://api.github.com"
@@ -57,7 +62,13 @@ class SelfHostLog:
     path: Path
     source: Source = "self-host"
 
+    @property
+    def missing(self) -> bool:
+        return not self.path.exists()
+
     def fetch(self) -> list[DeployRecord]:
+        if self.missing:
+            return []  # nothing deployed through this feed yet; ingest_deploys alerts on it
         out: list[DeployRecord] = []
         for i, line in enumerate(self.path.read_text(encoding="utf-8").splitlines(), start=1):
             if line.strip():
@@ -108,6 +119,15 @@ def declared_feeds() -> dict[str, Any]:
     return declared
 
 
+def resolve_feed_path(raw: str, deploys_file: PurePath) -> PurePath:
+    """An absolute path as given (a leading '/' counts, whatever the host OS); anything else
+    relative to the directory deploys.yaml lives in."""
+    path = type(deploys_file)(raw)
+    if path.is_absolute() or raw.startswith("/"):
+        return path
+    return deploys_file.parent / path
+
+
 def feed_for(target: str) -> DeployFeed:
     entry = declared_feeds().get(target)
     if not isinstance(entry, dict):
@@ -115,7 +135,7 @@ def feed_for(target: str) -> DeployFeed:
             f"{target}: no deploy feed declared in {get_settings().deploys_file.name}"
         )
     if entry.get("source") == "self-host":
-        return SelfHostLog(Path(str(entry["path"])))
+        return SelfHostLog(Path(resolve_feed_path(str(entry["path"]), get_settings().deploys_file)))
     if entry.get("source") == "gh-actions":
         return GitHubDeployments(
             str(entry["repo"]),
@@ -131,6 +151,9 @@ def ingest_deploys(
     """The number of deploys newly stored. Re-ingesting a feed stores nothing twice."""
     feed = feed or feed_for(target)
     now = now or dt.datetime.now(dt.UTC)
+    if isinstance(feed, SelfHostLog) and feed.missing:
+        notify_deploy_feed_missing(target, now=now)
+        return 0
     records = {(r.deployed_at, r.ref) for r in feed.fetch()}
     if not records:
         return 0
