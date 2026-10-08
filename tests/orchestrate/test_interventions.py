@@ -172,3 +172,50 @@ def test_a_target_field_called_schedule_cannot_collide_with_the_schedule() -> No
 def test_spec_changes_names_top_level_fields_and_skips_the_version() -> None:
     changes = spec_changes(_spec(), _spec(version=3, natural_key=["claim_number", "amount"]))
     assert [c[0] for c in changes] == ["natural_key"]
+
+
+# ------------------------------------------------------------------ fix round 1
+
+
+def _store_baseline(spec_body: dict[str, Any], at: dt.datetime) -> None:
+    with Session() as s:
+        s.add(
+            AuditLog(
+                at=at,
+                actor="system:spec_loader",
+                action="spec_seen",
+                subject="testbench",
+                detail={"sha256": "0" * 64, "spec": spec_body},
+            )
+        )
+        s.commit()
+
+
+@pytest.mark.integration
+def test_a_new_defaulted_schema_field_is_not_a_spec_edit(ledger) -> None:
+    # A baseline stored before FieldTarget gained `label`/`relation`/`distributional` lacks those
+    # keys; the first run after the upgrade must not write false spec_edit rows (the headline
+    # "zero manual selector fixes" is falsified against this ledger).
+    old = _spec().model_dump(mode="json")
+    defaults = {"label": None, "relation": None, "distributional": False}
+    for t in old["targets"]:
+        for key, default in defaults.items():
+            if t.get(key) == default:  # absent then means exactly what the default says
+                t.pop(key)
+    assert any("label" not in t for t in old["targets"])
+    _store_baseline(old, T0)
+    assert observe_spec("testbench", _spec(), now=T0 + dt.timedelta(days=1)) == []
+    assert _rows(ledger) == []
+
+
+@pytest.mark.integration
+def test_a_baseline_that_no_longer_validates_is_diffed_raw(ledger) -> None:
+    old = _spec().model_dump(mode="json") | {"retired_field": "x"}  # extra="forbid" refuses it
+    _store_baseline(old, T0)
+    observe_spec("testbench", _spec(), now=T0 + dt.timedelta(days=1))
+    (row,) = _rows(ledger)
+    assert (row.field, row.before, row.after) == (
+        "retired_field",
+        {"retired_field": "x"},
+        {"retired_field": None},
+    )

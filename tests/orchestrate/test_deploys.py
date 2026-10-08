@@ -9,7 +9,7 @@ import datetime as dt
 import json
 import logging
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from pydantic import SecretStr
@@ -250,10 +250,92 @@ def test_an_unknown_source_is_refused(tmp_path, monkeypatch) -> None:
         feed_for("app")
 
 
+# ------------------------------------------------------------------ fix round 1
+
+WEBHOOK = "https://hooks.example.invalid/services/T0/B0/test-only-not-a-secret"
+REPO = Path(__file__).resolve().parents[2]
+
+
 @pytest.mark.unit
-def test_the_shipped_deploys_file_declares_the_bench() -> None:
-    repo = Path(__file__).resolve().parents[2]
+def test_a_relative_feed_path_resolves_against_the_deploys_file_not_the_cwd(
+    tmp_path, monkeypatch
+) -> None:
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "deploys.yaml").write_text(
+        "a: { source: self-host, path: logs/a.jsonl }\n"
+        "b: { source: self-host, path: /data/deploys/b.jsonl }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SD_DEPLOYS_FILE", str(conf / "deploys.yaml"))
+    monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+    a = feed_for("a")
+    assert isinstance(a, SelfHostLog) and a.path == conf / "logs" / "a.jsonl"
+    b = feed_for("b")
+    assert isinstance(b, SelfHostLog) and b.path.as_posix().endswith("/data/deploys/b.jsonl")
+    assert not b.path.as_posix().startswith(conf.as_posix())
+
+
+@pytest.mark.unit
+def test_shipped_compose_and_deploys_file_put_the_self_host_log_on_a_writable_mount() -> None:
     import yaml
 
-    declared = yaml.safe_load((repo / "deploys.yaml").read_text(encoding="utf-8"))
-    assert declared == {"testbench": {"source": "self-host", "path": "deploy/deploys.jsonl"}}
+    from selector_drift.orchestrate.deploys import resolve_feed_path
+
+    worker = yaml.safe_load((REPO / "docker-compose.yml").read_text(encoding="utf-8"))["services"][
+        "worker"
+    ]
+    deploys_file = PurePosixPath(worker["environment"]["SD_DEPLOYS_FILE"])
+    declared = yaml.safe_load((REPO / "deploys.yaml").read_text(encoding="utf-8"))
+    mounts = []
+    for v in worker["volumes"]:
+        parts = str(v).split(":")
+        if len(parts) == 2 or (len(parts) == 3 and "ro" not in parts[2].split(",")):
+            mounts.append(PurePosixPath(parts[1]))
+    assert mounts, "the worker has no writable volume"
+    for target, entry in declared.items():
+        if entry["source"] != "self-host":
+            continue
+        log = resolve_feed_path(str(entry["path"]), deploys_file)
+        assert isinstance(log, PurePosixPath) and log.is_absolute(), target
+        assert any(log.is_relative_to(m) for m in mounts), (target, log, mounts)
+        assert not log.is_relative_to(PurePosixPath("/app")), "the rootfs is read-only"
+
+
+@pytest.mark.integration
+def test_a_missing_self_host_log_is_a_condition_alerted_once_a_day(
+    tmp_path, monkeypatch, httpx_mock
+) -> None:
+    monkeypatch.setenv("SD_ALERT_WEBHOOK_URL", WEBHOOK)
+    get_settings.cache_clear()
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE audit_log RESTART IDENTITY CASCADE"))
+    httpx_mock.add_response(url=WEBHOOK, method="POST")
+    feed = SelfHostLog(tmp_path / "never-written.jsonl")
+    assert feed.fetch() == []
+    assert ingest_deploys("testbench", feed=feed, now=at(2)) == 0
+    assert ingest_deploys("testbench", feed=feed, now=at(2, 4, 27)) == 0  # same UTC day
+    (request,) = httpx_mock.get_requests()
+    body = json.loads(request.content)
+    assert (body["target"], body["rule"]) == ("testbench", "deploy_feed_missing")
+    assert set(body) == {"target", "rule", "severity", "title", "run_key", "threshold", "day"}
+    assert "never-written" not in request.content.decode()
+
+
+@pytest.mark.integration
+def test_a_corrupt_self_host_log_still_raises(tmp_path) -> None:
+    p = tmp_path / "deploys.jsonl"
+    p.write_text("{not json\n", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        ingest_deploys("testbench", feed=SelfHostLog(p))
+
+
+@pytest.mark.unit
+def test_the_shipped_deploys_file_declares_the_bench() -> None:
+    import yaml
+
+    declared = yaml.safe_load((REPO / "deploys.yaml").read_text(encoding="utf-8"))
+    assert declared == {
+        "testbench": {"source": "self-host", "path": "/data/deploys/testbench.jsonl"}
+    }

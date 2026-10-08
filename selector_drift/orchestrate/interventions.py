@@ -14,6 +14,7 @@ import hashlib
 import json
 from typing import Any, Final, Literal, get_args
 
+from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session as OrmSession
 
@@ -96,8 +97,7 @@ def spec_changes(old: TaskSpec, new: TaskSpec) -> list[Change]:
 
 
 def _changes(o: dict[str, Any], n: dict[str, Any]) -> list[Change]:
-    """On the JSON dumps, so a stored spec_seen body is diffed as stored: an older spec that
-    no longer validates against today's schema must not stop every run at its first step."""
+    """On the JSON dumps (see _baseline for how a stored body is normalised first)."""
     out: list[Change] = []
     for key in sorted((set(o) | set(n)) - _NOT_A_FIELD):
         if o.get(key) != n.get(key):
@@ -118,6 +118,17 @@ def _last_seen(s: OrmSession, target: str) -> dict[str, Any] | None:
         .limit(1)
     ).first()
     return dict(last.detail) if last is not None else None
+
+
+def _baseline(stored: dict[str, Any]) -> dict[str, Any]:
+    """A stored spec_seen body, normalised through today's TaskSpec so a field the schema gained
+    since (with a default) is not a false spec_edit row in the ledger the headline is checked
+    against (fix round 1). A body that no longer validates is diffed raw: it must not stop every
+    run at its first step."""
+    try:
+        return TaskSpec.model_validate(stored).model_dump(mode="json")
+    except ValidationError:
+        return stored
 
 
 def observe_spec(
@@ -156,7 +167,7 @@ def observe_spec(
             )
             rows = [
                 _row("spec_edit", actor, target, field, before, after, reason, now)
-                for field, before, after in _changes(dict(previous["spec"]), body)
+                for field, before, after in _changes(_baseline(dict(previous["spec"])), body)
             ]
             s.add_all(rows)
         s.commit()

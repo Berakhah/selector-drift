@@ -2,8 +2,10 @@
 # selector_drift/orchestrate/deploys.py; path overridable with SD_DEPLOYS_FILE.
 testbench:
   source: self-host
-  path: deploy/deploys.jsonl      # appended by the VM's deploy script, one JSON line per deploy
+  # Appended by the VM's deploy script, one JSON line per deploy. Under the worker's writable
+  # /data volume (the rootfs is read-only); a relative path resolves against this file's directory.
+  path: /data/deploys/testbench.jsonl
 # The two control-arm targets are added here when P-3 names them, as either
-#   <name>: { source: self-host, path: deploy/<name>.jsonl }
+#   <name>: { source: self-host, path: /data/deploys/<name>.jsonl }
 # or
 #   <name>: { source: gh-actions, repo: <real-account>/<repo>, environment: production }
