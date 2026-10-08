@@ -1,6 +1,7 @@
 """PSI with a documented threshold, per-target warm-up, and persistence for ALERTING only
 (design 5.7, M16/M17/M18). The statistic itself is validate/stats.py. Task 29's distribution-shift
-rule calls assess(), so the gate and the quality screen share every guard and the breach rule.
+rule calls assess_values() -- assess() without the candidate -- so the gate and the quality
+screen share every guard and the breach rule.
 
 A breach is PSI over max(threshold, critical), where critical is the chi-square noise floor
 (validate/stats.critical_psi at `alpha`): over a small sample, PSI over 0.20 is sampling noise.
@@ -132,11 +133,18 @@ class DistributionalAssertion:
         self, candidate: CandidateExtraction, history: History | None, field: str
     ) -> Assessment | str:
         """The Assessment, or a str: the reason there is no basis to judge."""
+        return self.assess_values(history, column(candidate, field), field)
+
+    def assess_values(
+        self, history: History | None, current: list[str], field: str
+    ) -> Assessment | str:
+        """assess() over a field's current values rather than a candidate: every guard, the
+        breach rule, persistence and suppression. Task 29's quality rule reads the current run
+        from the lake, and calls this so it never re-implements any of it."""
         runs = 0 if history is None else len(history)
         if history is None or runs < self.warmup_runs:
             return f"warm-up: {runs} of {self.warmup_runs} accepted runs"
         reference = history.trailing(REFERENCE_RUNS).values(field)
-        current = column(candidate, field)
         if not reference:
             return f"the reference window holds no {field} values"
         if not current:
@@ -195,9 +203,9 @@ class DistributionalAssertion:
     def _judge(self, reference: list[str], current: list[str], field: str) -> Judgement | str:
         """The breach rule on two non-empty value lists, or a str: the reason there is no basis.
         PRIVATE (fix round 2): it skips warm-up and MIN_VALUES, so a caller reading "no breach"
-        as PASS would fail open -- assess() is the only path to a verdict. assess() is this plus
-        its guards; scripts/measure_psi_power.py measures through it below MIN_VALUES, so the
-        published power is the product's."""
+        as PASS would fail open -- assess_values() (which assess() delegates to) is the only path to
+        a verdict: it is this plus its guards. scripts/measure_psi_power.py measures through it
+        below MIN_VALUES, so the published power is the product's."""
         r = psi_result(reference, current, bins=self.bins)
         # Categorical k is unbounded (one per distinct value on either side), and the chi-square
         # floor assumes ~MIN_EXPECTED_PER_BIN per bin: under it critical_psi swamps any PSI, so a
