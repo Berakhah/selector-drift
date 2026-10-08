@@ -85,9 +85,84 @@ def test_session_injection_returns_the_cookies_for_the_authorised_origin(tmp_pat
 def test_a_parent_domain_cookie_and_a_browser_session_cookie_are_live(tmp_path, target):
     # Playwright writes expires=-1 for a browser-session cookie; a leading-dot parent domain is
     # a cookie the portal set for itself and its subdomains.
+    # H2 (fix round 1): matched, but rewritten host-only to the exact authorised host -- never
+    # handed over scoped wider than the authorised origin.
     state = _state(tmp_path, [_cookie(domain=".example.invalid", expires=-1)])
     creds = SessionInjection(state).get(target)
-    assert [c["domain"] for c in creds.cookies or []] == [".example.invalid"]
+    assert [c["domain"] for c in creds.cookies or []] == ["bench.example.invalid"]
+    assert creds.cookies and creds.cookies[0]["value"] == COOKIE
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "domain", ["invalid", ".invalid", "example.invalid", ".BENCH.example.invalid"]
+)
+def test_a_broad_or_public_suffix_cookie_is_rewritten_to_the_host(tmp_path, target, domain):
+    creds = SessionInjection(_state(tmp_path, [_cookie(domain=domain)])).get(target)
+    assert [c["domain"] for c in creds.cookies or []] == ["bench.example.invalid"]
+
+
+def _target(*origins: str):
+    from selector_drift.scope.gate import authorise
+    from selector_drift.scope.record import Basis, ScopeRecord
+
+    rec = ScopeRecord(
+        target="testbench",
+        basis=Basis.SELF_OWNED,
+        authorising_party="me",
+        authorised_on=dt.date(2026, 1, 1),
+        expires_on=dt.date(2027, 12, 31),
+        evidence_uri=None,
+        evidence_sha256=None,
+        origins=list(origins),
+        rate_limit={"requests": 1, "per_seconds": 30},
+        user_agent_contact="https://example.invalid/contact",
+        first_heal_policy="required",
+        legal_review="self_drafted",
+    )
+    return authorise(rec, today=dt.date(2026, 9, 7))
+
+
+@pytest.mark.unit
+def test_a_com_cookie_never_stays_broad(tmp_path):
+    t = _target("https://portal.saasvendor.com")
+    state = _state(tmp_path, [_cookie(domain="com"), _cookie(domain=".saasvendor.com")])
+    creds = SessionInjection(state).get(t)
+    assert [c["domain"] for c in creds.cookies or []] == ["portal.saasvendor.com"] * 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("domain", ["0.0.1", ".0.0.1", "0.1", "1"])
+def test_an_ip_literal_host_matches_only_exactly(tmp_path, domain):
+    t = _target("http://127.0.0.1:8080")
+    with pytest.raises(CredentialsUnavailable, match="fresh session"):
+        SessionInjection(_state(tmp_path, [_cookie(domain=domain)])).get(t)
+    creds = SessionInjection(_state(tmp_path, [_cookie(domain="127.0.0.1")])).get(t)
+    assert [c["domain"] for c in creds.cookies or []] == ["127.0.0.1"]
+
+
+@pytest.mark.unit
+def test_each_authorised_host_under_one_parent_gets_its_own_host_only_clone(tmp_path):
+    t = _target("https://a.example.invalid", "https://b.example.invalid")
+    creds = SessionInjection(_state(tmp_path, [_cookie(domain=".example.invalid")])).get(t)
+    assert sorted(c["domain"] for c in creds.cookies or []) == [
+        "a.example.invalid",
+        "b.example.invalid",
+    ]
+    assert all(c["value"] == COOKIE for c in creds.cookies or [])
+
+
+@pytest.mark.unit
+def test_serialisation_never_carries_a_cookie_value(tmp_path, target):
+    creds = SessionInjection(_state(tmp_path, [_cookie()])).get(target)
+    assert creds.cookies and creds.cookies[0]["value"] == COOKIE  # in-process: the real value
+    dumped = creds.model_dump()
+    assert COOKIE not in repr(dumped)
+    assert COOKIE not in creds.model_dump_json()
+    assert COOKIE not in repr(creds.model_dump(mode="json"))
+    # Everything but the value survives, so a dump is still useful for counts and diagnostics.
+    assert dumped["cookies"][0]["domain"] == "bench.example.invalid"
+    assert dumped["cookies"][0]["name"] == "session"
 
 
 @pytest.mark.unit
