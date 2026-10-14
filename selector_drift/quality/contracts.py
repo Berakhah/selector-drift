@@ -20,12 +20,13 @@ from typing import Any, Final
 from bok_core.findings import Finding, Severity
 from bok_core.provenance.claim import Claim, Method
 from bok_core.provenance.source import DomSource
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 
-from selector_drift.db.models import AuditLog, FindingRow
+from selector_drift.db.models import FindingRow
 from selector_drift.db.session import Session
 from selector_drift.land.catalog import query, run_columns
 from selector_drift.land.layout import PROVENANCE_COL, is_data_column, split_run_key
+from selector_drift.orchestrate.history import history_for
 from selector_drift.scope.errors import ScopeRefusal
 from selector_drift.spec.loader import load_scope, load_spec, scope_file, spec_file
 from selector_drift.spec.schema import TaskSpec
@@ -35,7 +36,7 @@ from selector_drift.validate.assertions.distribution import (
     REFERENCE_RUNS,
     DistributionalAssertion,
 )
-from selector_drift.validate.history import AcceptedRun, History
+from selector_drift.validate.history import History
 
 ROW_COUNT_RATIO: Final = 0.5
 ROW_COUNT_MIN_WINDOWS: Final = 3
@@ -201,12 +202,26 @@ def _null_rate(run: _Run) -> list[Finding]:
     if not run.rows:
         return []
     out: list[Finding] = []
-    windows = _windows(run.history, REFERENCE_WINDOWS).values()
+    windows = list(_windows(run.history, REFERENCE_WINDOWS).values())
+    columns: dict[str, list[str]] = {}
+
+    def existed(window: list[dict[str, Any]], name: str) -> bool:
+        """M2 (Task 29 review, carried into 26A): a window whose files predate a newly added
+        field reads it as NULL through the union view. Counting that window as 100% null
+        raised the bar to ~2.0 and silenced the rule for 30 windows -- a fail-open."""
+        keys = {str(r["run_key"]) for r in window}
+        for key in keys:
+            if key not in columns:
+                columns[key] = run_columns(key)
+        return any(name in columns[k] for k in keys)
+
     for t in run.spec.targets:
         if t.name in run.spec.expected_schema and t.name not in run.columns:
             continue  # an absent column is schema drift; one fact, one finding
         rate = sum(_is_null(r.get(t.name)) for r in run.rows) / len(run.rows)
-        past = [sum(_is_null(r.get(t.name)) for r in w) / len(w) for w in windows]
+        past = [
+            sum(_is_null(r.get(t.name)) for r in w) / len(w) for w in windows if existed(w, t.name)
+        ]
         bar = max(NULL_RATE_FLOOR, 2 * (statistics.fmean(past) if past else 0.0))
         if rate <= bar:
             continue
@@ -285,50 +300,20 @@ def _schema_drift(run: _Run) -> list[Finding]:
 
 
 def _history(run: _Run) -> History:
-    """The accepted runs before this one, one per window, oldest first -- what the gate's
-    DistributionalAssertion reads. Only accepted runs reach the lake (the gate is the only way
-    in). shift_alerts are this target's persisted distribution_shift findings for those runs
-    (every breach is one, so persistence is countable); marked_expected are the client's
-    audit_log marks on them."""
-    windows = _windows(run.history, max(REFERENCE_WINDOWS, run.warmup_runs))
-    keys = sorted({str(r["run_key"]) for rows in windows.values() for r in rows})
-    breached: dict[str, set[str]] = {}
-    marked: dict[str, set[str]] = {}
-    if keys:
-        with Session() as s:
-            for key, payload in s.execute(
-                select(FindingRow.run_key, FindingRow.payload).where(
-                    FindingRow.run_key.in_(keys), FindingRow.rule == "distribution_shift"
-                )
-            ):
-                field = payload.get("properties", {}).get("field")
-                if isinstance(field, str):
-                    breached.setdefault(key, set()).add(field)
-            for key, detail in s.execute(
-                select(AuditLog.subject, AuditLog.detail).where(
-                    AuditLog.action == "marked_expected", AuditLog.subject.in_(keys)
-                )
-            ):
-                field = detail.get("field")
-                if isinstance(field, str):
-                    marked.setdefault(key, set()).add(field)
-    runs: list[AcceptedRun] = []
-    for window, rows in windows.items():
-        run_keys = {str(r["run_key"]) for r in rows}
-        runs.append(
-            AcceptedRun(
-                run_key=max(run_keys),
-                window=dt.date.fromisoformat(window),
-                rows=tuple(
-                    {k: str(v) for k, v in r.items() if is_data_column(k) and v is not None}
-                    for r in rows
-                ),
-                natural_key=tuple(run.spec.natural_key),
-                shift_alerts=frozenset(f for k in run_keys for f in breached.get(k, ())),
-                marked_expected=frozenset(f for k in run_keys for f in marked.get(k, ())),
-            )
+    """The accepted runs before this one, oldest first -- what the gate's DistributionalAssertion
+    reads -- from orchestrate.history.history_for, the ONE builder the gate uses too (ledger
+    583): accepted or promoted runs, under the current spec version only (ledger 471), with
+    their persisted breaches and the client's marks. Enough runs to leave the scope record's
+    warm-up, which may be longer than the reference window."""
+    with Session() as s:
+        found = history_for(
+            s,
+            run.target,
+            run.spec,
+            before=dt.date.fromisoformat(run.window),
+            limit=max(REFERENCE_WINDOWS, run.warmup_runs),
         )
-    return History(runs=tuple(runs))
+    return found if found is not None else History()
 
 
 def _distribution_shift(run: _Run) -> list[Finding]:

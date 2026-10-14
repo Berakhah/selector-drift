@@ -87,6 +87,21 @@ def test_row_count_baseline_is_the_median_so_one_spike_does_not_move_the_bar(lan
 
 
 @pytest.mark.integration
+def test_null_rate_judges_a_newly_added_field_against_the_floor_not_its_absence(land):
+    """M2 (Task 29 review; carried into 26A, a fail-open): windows landed before `amount`
+    existed read it as NULL through the union view. Counted as 100% null, they raised the bar to
+    ~2.0 and no blank rate could ever fire until 30 windows rolled over."""
+    for i in range(6):
+        land(BASE + dt.timedelta(days=i), [{"claim_number": r["claim_number"]} for r in rows()])
+    f = next(
+        f
+        for f in evaluate(land(DAY, rows(blank_amounts=10)))
+        if f.properties["rule"] == "null_rate"
+    )
+    assert f.properties["field"] == "amount" and f.properties["threshold"] == "<= 0.050"
+
+
+@pytest.mark.integration
 def test_null_rate_spike_is_reported(land):
     _history(land, 6)
     f = next(
