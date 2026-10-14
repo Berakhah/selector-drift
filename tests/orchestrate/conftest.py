@@ -194,3 +194,181 @@ def mismatch_spec(tmp_path: Path, scope_dir: Path) -> str:
     (specs / "mismatch.yaml").write_text(body, encoding="utf-8")
     write_scope(scope_dir, scope_record("testbench", "https://testbench.example.invalid"))
     return str(specs / "mismatch.yaml")
+
+
+# ------------------------------------------------------------------------------------------------
+# Task 26A: the bench fixtures the pipeline tests use. APPENDED -- Task 6's fixtures above stay.
+#
+# They serve the real portal in-process on a free port with a fixed, settable clock, never the
+# signed override (the product never sends one, bench spec 3). The scope record is Task 6's
+# synthetic `scope_record()` with the bench's local origin, so the scope gate is exercised, not
+# bypassed; only its rate limit is raised so a run does not sleep through the production limit.
+# Every root the product writes to is a per-test tmp directory, and the redaction key is minted
+# per test (never a literal in the repo).
+
+import os  # noqa: E402
+import secrets  # noqa: E402
+from collections.abc import Callable, Sequence  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+
+from pydantic import SecretStr  # noqa: E402
+from sqlalchemy.orm import Session as OrmSession  # noqa: E402
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import PlainTextResponse, Response  # noqa: E402
+
+from selector_drift.credentials.provider import Credentials, NotSupported  # noqa: E402
+from testbench.mutations.base import CatalogueEntry  # noqa: E402
+from testbench.mutations.catalogue import CATALOGUE  # noqa: E402
+from testbench.portal.app import create_app  # noqa: E402
+from tests.testbench.conftest import _bench_env, _serve  # noqa: E402
+from tests.testbench.helpers import first_day_scheduling  # noqa: E402
+
+START = dt.date(2026, 1, 1)
+FAST = {"requests": 100, "per_seconds": 1}  # the limiter still runs; it just waits less
+_CLEARED_TABLES = "selector_cache, interventions"  # no FK to runs, so `db` does not reach them
+
+
+@dataclass
+class Bench:
+    """The served portal. `day` is the portal's clock and may be moved between runs, so one
+    bench can serve a clean day and then the day a mutation is scheduled."""
+
+    url: str
+    day: dt.date
+    mutated_day: dt.date | None = None
+
+
+class _DemoAccount:
+    """The bench's public demo account (bench spec 3.2: printed in its README, not a secret).
+    The spec's login steps need a username and password; SessionInjection has neither."""
+
+    def get(self, target: object) -> Credentials:
+        return Credentials(cookies=None, username="demo", password=SecretStr("demo"))
+
+    def get_totp_code(self, target: object) -> str:
+        raise NotSupported("the bench has no second factor")
+
+
+def _point_product_at(
+    url: str, scopes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_scope(scopes, scope_record("testbench", url, rate_limit=FAST))
+    for name, sub in (
+        ("SD_LAKE_ROOT", "lake"),
+        ("SD_EVIDENCE_ROOT", "evidence"),
+        ("SD_SESSION_DIR", "sessions"),
+        ("SD_ESCALATION_CORPUS", "corpus"),
+    ):
+        monkeypatch.setenv(name, str(tmp_path / sub))
+    monkeypatch.setenv("SD_SPEC_DIR", str(REPO / "specs"))  # absolute: cwd-independent (M-4)
+    monkeypatch.setenv("SD_REDACTION_KEY", os.urandom(32).hex())  # per test, never in the repo
+    get_settings.cache_clear()  # after SD_SCOPE_DIR and friends are set
+    monkeypatch.setattr("selector_drift.browser.registry.url_for", lambda target: url)
+    monkeypatch.setattr(
+        "selector_drift.credentials.registry.provider_for", lambda target: _DemoAccount()
+    )
+    with engine.begin() as c:  # the per-worker *_test database only (tests/conftest.py)
+        c.execute(text(f"TRUNCATE {_CLEARED_TABLES} RESTART IDENTITY CASCADE"))
+
+
+def _clock(state: Bench) -> Callable[[], dt.datetime]:
+    return lambda: dt.datetime.combine(state.day, dt.time(4, 12), tzinfo=dt.UTC)
+
+
+def _bench(
+    catalogue: Sequence[CatalogueEntry],
+    day: dt.date,
+    scopes: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    mutated_day: dt.date | None = None,
+    middleware: Callable[[Any], None] | None = None,
+) -> Iterator[Bench]:
+    _bench_env(monkeypatch, secrets.token_hex(32))
+    state = Bench(url="", day=day, mutated_day=mutated_day)
+    app = create_app(clock=_clock(state), catalogue=tuple(catalogue))
+    if middleware is not None:
+        middleware(app)
+    for url in _serve(app):
+        state.url = url
+        _point_product_at(url, scopes, tmp_path, monkeypatch)
+        yield state
+    get_settings.cache_clear()
+
+
+def _only(name: str) -> tuple[CatalogueEntry, ...]:
+    return tuple(e for e in CATALOGUE if e.name == name)
+
+
+def _mutated(name: str) -> tuple[dt.date, dt.date]:
+    """(a clean day, the next day -- the first on which `name` is scheduled)."""
+    first = first_day_scheduling(name, START + dt.timedelta(days=1))
+    return first - dt.timedelta(days=1), first
+
+
+@pytest.fixture
+def session(db: None) -> Iterator[OrmSession]:
+    from selector_drift.db.session import Session
+
+    with Session() as s:
+        yield s
+
+
+@pytest.fixture
+def bench(
+    db: None, scope_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Bench]:
+    yield from _bench((), START, scope_dir, tmp_path, monkeypatch)  # no mutations at all
+
+
+@pytest.fixture
+def bench_mutated(
+    db: None, scope_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Bench]:
+    """LabelReword only, on a day it is scheduled; `day` starts on the clean day before."""
+    clean, first = _mutated("LabelReword")
+    yield from _bench(
+        _only("LabelReword"), clean, scope_dir, tmp_path, monkeypatch, mutated_day=first
+    )
+
+
+@pytest.fixture
+def bench_decoy(
+    db: None, scope_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Bench]:
+    """DecoyColumn only (the plausible-but-wrong adjacent column); `day` starts clean."""
+    clean, first = _mutated("DecoyColumn")
+    yield from _bench(
+        _only("DecoyColumn"), clean, scope_dir, tmp_path, monkeypatch, mutated_day=first
+    )
+
+
+@pytest.fixture
+def flaky_bench(
+    db: None, scope_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Bench]:
+    """503 for the first request, then normal service: the first attempt fails (the driver
+    refuses a 5xx page), a retry succeeds, and the failed attempt survives in run_attempts."""
+    calls = {"n": 0}
+
+    def install(app: Any) -> None:
+        @app.middleware("http")  # type: ignore[misc]
+        async def flake(request: Request, call_next: Callable[..., Any]) -> Response:
+            calls["n"] += 1
+            if calls["n"] <= 1:
+                return PlainTextResponse("unavailable", status_code=503)
+            response: Response = await call_next(request)
+            return response
+
+    yield from _bench((), START, scope_dir, tmp_path, monkeypatch, middleware=install)
+
+
+@pytest.fixture
+def demo_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """For Task 6's local_site / dead_site tests, which now run the whole pipeline: the target's
+    real provider (SessionInjection) has no session file there and would fail every run before
+    the page it is testing is ever reached."""
+    monkeypatch.setattr(
+        "selector_drift.credentials.registry.provider_for", lambda target: _DemoAccount()
+    )

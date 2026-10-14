@@ -7,7 +7,7 @@ import pytest
 
 from selector_drift.db.models import AuditLog, Heartbeat, Run, RunAttempt, ScopeRecordRow
 from selector_drift.db.session import Session
-from selector_drift.orchestrate.flows import StartPageError, extraction_flow
+from selector_drift.orchestrate.flows import extraction_flow
 from selector_drift.orchestrate.run_record import (
     NO_TERMINAL_STATE,
     heartbeat,
@@ -18,6 +18,20 @@ from selector_drift.spec.loader import load_spec
 from selector_drift.spec.schema import SpecError
 
 AlertCall = tuple[str, str, str | None, str]
+
+
+class StartPageError(RuntimeError):
+    """Task 26A: flows.load_start_page is gone (run_once loads the page through driver.open), so
+    a post-authorisation failure is now injected at driver.open, which run_once calls only
+    after authorise() has opened an attempt."""
+
+
+def _fail_open(message: str):  # type: ignore[no-untyped-def]
+    def fail(*a: object, **k: object) -> None:
+        raise StartPageError(message)
+
+    return fail
+
 
 REPO = Path(__file__).resolve().parents[2]
 # A failing test must not sleep through two 300 s retries. The retry policy itself is pinned
@@ -38,13 +52,16 @@ def _bench_key() -> str:
 
 
 @pytest.mark.integration
-def test_flow_writes_a_run_record(prefect_api, db, local_site) -> None:
-    """Tightened from the first draft, which accepted `failed` as a pass."""
+def test_flow_writes_a_run_record(prefect_api, db, bench) -> None:
+    """Tightened from the first draft, which accepted `failed` as a pass. Task 26A: the whole
+    pipeline runs; a cold-start target's first run settles as `quarantined` (ledger 557)."""
     key = ONCE("specs/testbench.yaml")
     with Session() as s:
-        assert s.get(Run, key).state == "completed"
+        run = s.get(Run, key)
+        assert run.state == "quarantined" and run.rows_written == 0
         (attempt,) = s.query(RunAttempt).filter_by(run_key=key).all()
-        assert (attempt.attempt, attempt.state, attempt.error) == (1, "completed", None)
+        assert (attempt.attempt, attempt.state) == (1, "quarantined")
+        assert attempt.error == run.error and attempt.finished_at is not None
         assert s.query(Heartbeat).filter_by(run_key=key).count() == 1
 
 
@@ -82,7 +99,7 @@ def test_the_heartbeat_is_written_before_authorisation(
     def boom(*a: object, **k: object) -> None:
         raise RuntimeError("scope gate unreachable")
 
-    monkeypatch.setattr("selector_drift.orchestrate.flows.authorise", boom)
+    monkeypatch.setattr("selector_drift.orchestrate.pipeline.authorise", boom)  # Task 26A
     with pytest.raises(RuntimeError, match="unreachable"):
         ONCE("specs/testbench.yaml")
     with Session() as s:
@@ -119,7 +136,7 @@ def test_an_unknown_target_is_refused_not_failed(prefect_api, db, tmp_path, scop
 
 @pytest.mark.integration
 def test_a_page_that_will_not_load_is_a_failed_attempt_and_the_flow_raises(
-    prefect_api, db, dead_site
+    prefect_api, db, dead_site, demo_account
 ) -> None:
     """Design 9.3 Fail: marked failed, alerted, and raised so Prefect's retry policy applies."""
     # The exception type is Task 4's; any failure that carries a reason will do.
@@ -134,7 +151,7 @@ def test_a_page_that_will_not_load_is_a_failed_attempt_and_the_flow_raises(
 
 @pytest.mark.integration
 def test_a_second_run_in_the_same_window_is_a_second_attempt_not_an_overwrite(
-    prefect_api, db, local_site
+    prefect_api, db, bench
 ) -> None:
     """M13. A retry must not erase the attempt it retried."""
     first = ONCE("specs/testbench.yaml")
@@ -142,7 +159,7 @@ def test_a_second_run_in_the_same_window_is_a_second_attempt_not_an_overwrite(
     assert first == second
     with Session() as s:
         attempts = s.query(RunAttempt).filter_by(run_key=first).order_by(RunAttempt.attempt).all()
-    assert [(a.attempt, a.state) for a in attempts] == [(1, "completed"), (2, "completed")]
+    assert [(a.attempt, a.state) for a in attempts] == [(1, "quarantined"), (2, "quarantined")]
 
 
 @pytest.mark.integration
@@ -166,7 +183,7 @@ def test_a_retry_of_the_same_slot_does_not_double_count_its_heartbeat(db) -> Non
 
 
 @pytest.mark.integration
-def test_every_authorised_run_audits_the_scope_record_hash(prefect_api, db, local_site) -> None:
+def test_every_authorised_run_audits_the_scope_record_hash(prefect_api, db, bench) -> None:
     """Task 2: which authorisation was in force is answerable from the database."""
     key = ONCE("specs/testbench.yaml")
     with Session() as s:
@@ -177,7 +194,7 @@ def test_every_authorised_run_audits_the_scope_record_hash(prefect_api, db, loca
 
 
 @pytest.mark.integration
-def test_every_authorised_run_mirrors_its_scope_record(prefect_api, db, local_site) -> None:
+def test_every_authorised_run_mirrors_its_scope_record(prefect_api, db, bench) -> None:
     """Found 2026-09-26: nothing wrote scope_records, which the targets screen and the retention
     job read. The mirror carries the hash the audit row carries."""
     key = ONCE("specs/testbench.yaml")
@@ -210,10 +227,11 @@ def test_a_spec_whose_scope_ref_names_another_target_is_refused(
 @pytest.mark.integration
 def test_a_refusal_posts_an_alert(prefect_api, db, expired_spec, monkeypatch) -> None:
     """M-5 (final review): a later rewrite that drops the post_alert call at the refusal branch
-    must go red here, not silently alert nobody for 90 days."""
+    must go red here, not silently alert nobody for 90 days. Task 26A: the refusal branch now
+    lives in pipeline.run_once."""
     calls: list[AlertCall] = []
     monkeypatch.setattr(
-        "selector_drift.orchestrate.flows.post_alert",
+        "selector_drift.orchestrate.pipeline.post_alert",
         lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
     )
     key = ONCE(expired_spec)
@@ -223,7 +241,7 @@ def test_a_refusal_posts_an_alert(prefect_api, db, expired_spec, monkeypatch) ->
 
 
 @pytest.mark.integration
-def test_a_failure_posts_an_alert(prefect_api, db, dead_site, monkeypatch) -> None:
+def test_a_failure_posts_an_alert(prefect_api, db, dead_site, demo_account, monkeypatch) -> None:
     """M-5 (final review): same as above, for the post-authorisation failure branch."""
     calls: list[AlertCall] = []
     monkeypatch.setattr(
@@ -239,7 +257,7 @@ def test_a_failure_posts_an_alert(prefect_api, db, dead_site, monkeypatch) -> No
 
 @pytest.mark.integration
 def test_the_failure_alert_never_carries_page_content(
-    prefect_api, db, local_site, monkeypatch
+    prefect_api, db, local_site, demo_account, monkeypatch
 ) -> None:
     """I-2 (final review): a Playwright locator timeout's "Call log:" section quotes the DOM
     content it was matching against -- here, a claim number cell. That must never reach the
@@ -275,7 +293,7 @@ def test_the_failure_alert_never_carries_page_content(
 
 @pytest.mark.integration
 def test_fail_post_auth_then_fail_pre_auth_alerts_exactly_twice(
-    prefect_api, db, local_site, monkeypatch
+    prefect_api, db, local_site, demo_account, monkeypatch
 ) -> None:
     """Hookfix brief, regression test A. Attempt 1 fails post-authorisation (the flow body's own
     `except Exception` branch posts an alert and records its run_count before raising). Attempt 2
@@ -300,11 +318,11 @@ def test_fail_post_auth_then_fail_pre_auth_alerts_exactly_twice(
             raise SpecError("synthetic pre-auth failure on the retry attempt")
         return real_load_spec(path)
 
-    async def always_fail_start_page(target: object) -> int:
-        raise StartPageError("synthetic post-auth failure on the first attempt")
-
     monkeypatch.setattr("selector_drift.orchestrate.flows.load_spec", flaky_load_spec)
-    monkeypatch.setattr("selector_drift.orchestrate.flows.load_start_page", always_fail_start_page)
+    monkeypatch.setattr(
+        "selector_drift.browser.driver.open",
+        _fail_open("synthetic post-auth failure on the first attempt"),
+    )
 
     with pytest.raises(Exception, match=r"\S"):
         ONE_RETRY("specs/testbench.yaml")
@@ -327,38 +345,42 @@ def test_fail_post_auth_then_fail_pre_auth_alerts_exactly_twice(
 
 @pytest.mark.integration
 def test_fail_post_auth_then_succeed_alerts_exactly_once(
-    prefect_api, db, local_site, monkeypatch
+    prefect_api, db, bench, monkeypatch
 ) -> None:
     """Hookfix brief, regression test B. Attempt 1 fails post-authorisation and alerts in-body.
     Attempt 2 (the retry) succeeds. The flow completes, so the on_failure hook never runs at
-    all -- exactly one alert, from attempt 1's own branch."""
+    all -- exactly one alert, from attempt 1's own branch. (Task 26A: the retry runs the whole
+    pipeline against the bench and settles; a cold-start first run is held, ledger 557.)"""
     calls: list[AlertCall] = []
     monkeypatch.setattr(
         "selector_drift.orchestrate.flows.post_alert",
         lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
     )
 
+    from selector_drift.browser import driver
+
+    real_open = driver.open
     start_calls = {"n": 0}
 
-    async def fail_then_succeed(target: object) -> int:
+    def fail_then_succeed(*a: object, **k: object):  # type: ignore[no-untyped-def]
         start_calls["n"] += 1
         if start_calls["n"] == 1:
             raise StartPageError("synthetic post-auth failure on the first attempt")
-        return 42
+        return real_open(*a, **k)  # type: ignore[arg-type]
 
-    monkeypatch.setattr("selector_drift.orchestrate.flows.load_start_page", fail_then_succeed)
+    monkeypatch.setattr("selector_drift.browser.driver.open", fail_then_succeed)
 
     key = ONE_RETRY("specs/testbench.yaml")
 
     assert len(calls) == 1
     assert calls[0][0] == "failed"
     with Session() as s:
-        assert s.get(Run, key).state == "completed"
+        assert s.get(Run, key).state == "quarantined"  # settled, not failed
 
 
 @pytest.mark.integration
 def test_fail_post_auth_then_fail_post_auth_alerts_exactly_twice_hook_skips(
-    prefect_api, db, local_site, monkeypatch
+    prefect_api, db, local_site, demo_account, monkeypatch
 ) -> None:
     """Hookfix brief, regression test C. Both attempts fail post-authorisation, each posting its
     own in-body alert and recording its own run and attempt identity. When the hook fires after
@@ -371,10 +393,10 @@ def test_fail_post_auth_then_fail_post_auth_alerts_exactly_twice_hook_skips(
         lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
     )
 
-    async def always_fail_start_page(target: object) -> int:
-        raise StartPageError("synthetic post-auth failure on every attempt")
-
-    monkeypatch.setattr("selector_drift.orchestrate.flows.load_start_page", always_fail_start_page)
+    monkeypatch.setattr(
+        "selector_drift.browser.driver.open",
+        _fail_open("synthetic post-auth failure on every attempt"),
+    )
 
     with pytest.raises(Exception, match=r"\S"):
         ONE_RETRY("specs/testbench.yaml")
@@ -390,7 +412,7 @@ def test_fail_post_auth_then_fail_post_auth_alerts_exactly_twice_hook_skips(
 
 @pytest.mark.integration
 def test_a_second_flow_run_is_not_suppressed_by_the_first_runs_alert_flag(
-    prefect_api, db, local_site, monkeypatch
+    prefect_api, db, local_site, demo_account, monkeypatch
 ) -> None:
     """Hookfix brief, round 1, Important finding: Prefect 3.8.4 runs a *sync* flow body in the
     caller's context with no `copy_context()` (flow_engine.py: call_with_parameters), so
@@ -415,8 +437,7 @@ def test_a_second_flow_run_is_not_suppressed_by_the_first_runs_alert_flag(
         lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
     )
 
-    async def always_fail_start_page(target: object) -> int:
-        raise StartPageError("synthetic post-auth failure, run 1")
+    always_fail_start_page = _fail_open("synthetic post-auth failure, run 1")
 
     real_load_spec = load_spec
     stage = {"n": 1}
@@ -426,7 +447,7 @@ def test_a_second_flow_run_is_not_suppressed_by_the_first_runs_alert_flag(
             raise SpecError("synthetic pre-auth failure, run 2")
         return real_load_spec(path)
 
-    monkeypatch.setattr("selector_drift.orchestrate.flows.load_start_page", always_fail_start_page)
+    monkeypatch.setattr("selector_drift.browser.driver.open", always_fail_start_page)
     monkeypatch.setattr("selector_drift.orchestrate.flows.load_spec", routed_load_spec)
 
     # Run 1: fails post-auth, alerts in-body, hook correctly skips (only 1 alert).
