@@ -100,3 +100,20 @@ forbidden_modules =
 
 # There is no no-model-calls contract here: the bok_core import allow-list is enforced by
 # tests/test_bok_core_allowlist.py instead.
+
+[importlinter:contract:only-orchestrate-writes-the-cache]
+name = The selector cache is written only by orchestrate.cache_writer
+type = forbidden
+source_modules =
+    selector_drift.resolve
+    selector_drift.validate
+    selector_drift.api
+    selector_drift.heallog
+    selector_drift.land
+    selector_drift.quality
+    selector_drift.extract
+    selector_drift.browser
+forbidden_modules =
+    selector_drift.orchestrate.cache_writer
+# Task 17 Step 8, landed with Task 26A. Widened from the plan's four source packages to every
+# product package outside orchestrate/: none of them has a reason to hold the writer.
