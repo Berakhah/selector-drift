@@ -71,17 +71,25 @@ def _launch_args() -> list[str]:
     return args
 
 
+class PortalUnavailable(RuntimeError):
+    """A navigation the portal answered with a server error (5xx). The run fails and is retried;
+    nothing is resolved or extracted from an error page (Task 26A)."""
+
+
 async def _navigate(page: Page, url: str, ledger: RequestLedger) -> None:
     """I-2. An off-scope redirect hop fails at the dead proxy with a generic Playwright net
     error; report it as the scope violation it is, so an orchestrator refuses, not retries."""
     try:
-        await page.goto(url)
+        response = await page.goto(url)
     except PlaywrightError as exc:
         error = ledger.off_scope_error()
         if error is not None:
             raise error from exc
         raise
     ledger.raise_if_off_scope()
+    if response is not None and response.status >= 500:
+        # The status only: the URL may carry a client's identifiers and the body is page text.
+        raise PortalUnavailable(f"the portal answered HTTP {response.status}")
 
 
 def _resolve_step_path(base: str, step_path: object, target: AuthorisedTarget) -> str:

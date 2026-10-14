@@ -1,6 +1,9 @@
-"""Day one: the cron fires, the target is authorised, the start page loads, a run record is
-written. No cascade exists yet. Task 26A replaces everything after the authorisation block with
-pipeline.run_once(); the heartbeat prologue stays first.
+"""The scheduled run. Task 6's prologue is unchanged -- heartbeat first, then the spec, the run
+key and link_heartbeat -- and pipeline.run_once() now does everything after it (Task 26A): the
+scope gate, the browser, the cascade, the gate, the lake, quality and evidence.
+
+This module owns the Prefect concerns: retries, the 600 s timeout, and recording a failure --
+in the body for an exception run_once raised, in the on_failure hook for one it never saw.
 """
 
 from __future__ import annotations
@@ -14,24 +17,24 @@ from uuid import UUID
 
 from prefect import flow
 from prefect.runtime import flow_run
+from sqlalchemy import func, select
 
-from selector_drift.browser import driver  # attribute access, so tests can patch driver.open
 from selector_drift.browser.limits import FLOW_TIMEOUT_SECONDS  # B8: 600 s (Task 4)
+from selector_drift.credentials import registry  # module attribute: tests patch provider_for
+from selector_drift.db.models import RunAttempt
+from selector_drift.db.session import Session
+from selector_drift.orchestrate.pipeline import default_confirmers, run_for, run_once
 from selector_drift.orchestrate.run_record import (
     heartbeat,
     link_heartbeat,
-    next_attempt,
+    parse_run_key,
     record_attempt,
-    record_authorisation,
     record_run,
     run_key,
     window_for,
 )
-from selector_drift.quality.alerts import post_alert, sanitize_for_alert
-from selector_drift.scope.errors import ScopeRefusal
-from selector_drift.scope.gate import authorise
-from selector_drift.scope.record import AuthorisedTarget
-from selector_drift.spec.loader import load_scope, load_spec, scope_file, spec_file, target_of
+from selector_drift.quality.alerts import notify, post_alert, sanitize_for_alert
+from selector_drift.spec.loader import load_spec, spec_file, target_of
 
 if TYPE_CHECKING:
     from prefect.client.schemas.objects import FlowRun, State
@@ -68,10 +71,6 @@ _log = logging.getLogger(__name__)
 _ALERTED_IN_FLOW: ContextVar[tuple[UUID, int] | None] = ContextVar("_ALERTED_IN_FLOW", default=None)
 
 
-class StartPageError(RuntimeError):
-    """The authorised start page did not return an HTML document."""
-
-
 def scheduled_slot() -> datetime:
     """The cron slot this run belongs to, in UTC. Outside a flow run Prefect returns now()."""
     slot = flow_run.scheduled_start_time
@@ -82,15 +81,49 @@ def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-async def load_start_page(target: AuthorisedTarget) -> int:
-    # browser.ratelimit.acquire() (called inside driver.open()) blocks synchronously in a worker
-    # thread while it waits out the target's rate limit; that wait counts against this flow's
-    # 600 s timeout (ruling 5), same as any other time spent inside the `async with` below.
-    async with driver.open(target) as session:
-        html = (await session.page.content()).value  # only its size and shape are used
-    if "<html" not in html.lower():
-        raise StartPageError("the start page did not return an HTML document")
-    return len(html)
+def _open_attempt(key: str) -> RunAttempt | None:
+    """The latest attempt, if it started and nothing settled it. A refusal has no attempt, and
+    a settled attempt must never be re-marked failed."""
+    with Session() as s:
+        latest = s.scalar(select(func.max(RunAttempt.attempt)).where(RunAttempt.run_key == key))
+        if latest is None:
+            return None
+        row = s.scalar(
+            select(RunAttempt).where(RunAttempt.run_key == key, RunAttempt.attempt == latest)
+        )
+        if row is None or row.state != "started":
+            return None
+        s.expunge(row)
+        return row
+
+
+def _record_failure(attempt: RunAttempt, error: str) -> None:
+    """Design 9.3 Fail: the attempt and the run are marked failed (the full text stays inside
+    the boundary, in run_attempts.error / runs.error), and the run is notified (Task 29A)."""
+    target, version, window = parse_run_key(attempt.run_key)
+    record_attempt(attempt.run_key, attempt.attempt, "failed", error, attempt.scope_record_sha256)
+    record_run(
+        attempt.run_key, target=target, spec_version=version, window=window, state="failed",
+        error=error,
+    )  # fmt: skip
+    notify([], run_for(attempt.run_key))
+
+
+def _record_unseen_failure(flow_run: FlowRun, state: State[Any]) -> None:
+    """A crash or timeout the body's `except` never saw leaves the attempt `started`; record it
+    failed now (Task 26A). Best-effort: the hook must never raise."""
+    try:
+        spec_path = str(flow_run.parameters["spec_path"])
+        slot = (flow_run.expected_start_time or datetime.now(UTC)).astimezone(UTC)
+        key = run_key(target_of(spec_path), load_spec(spec_file(spec_path)).version,
+                      window_for(slot))  # fmt: skip
+        attempt = _open_attempt(key)
+        if attempt is not None:
+            _record_failure(
+                attempt, state.message or "the flow run failed without a recorded error"
+            )
+    except Exception:
+        _log.error("on_failure hook could not record the open attempt")
 
 
 def alert_on_flow_failure(flow: Flow[Any, Any], flow_run: FlowRun, state: State[Any]) -> None:
@@ -114,6 +147,7 @@ def alert_on_flow_failure(flow: Flow[Any, Any], flow_run: FlowRun, state: State[
     Best-effort and defensive: this must never itself raise into Prefect's state machine, so
     any failure while building or sending the alert is only logged.
     """
+    _record_unseen_failure(flow_run, state)
     if _ALERTED_IN_FLOW.get() == (flow_run.id, flow_run.run_count):
         return
     spec_path = flow_run.parameters.get("spec_path")
@@ -146,52 +180,28 @@ def extraction_flow(spec_path: str) -> str:
     window = window_for(slot)
     key = run_key(stem, spec.version, window)
     link_heartbeat(beat, key)
-    day = date.fromisoformat(window)
-
     try:
-        record = load_scope(scope_file(spec.scope_ref))
-        if record.target != stem:
-            raise ScopeRefusal(
-                f"spec {spec_path} is for target {stem!r} but its scope record "
-                f"names {record.target!r}"
+        asyncio.run(
+            run_once(
+                spec_path,
+                window=date.fromisoformat(window),
+                credentials_for=registry.provider_for,
+                confirmers=default_confirmers(),
             )
-        target = authorise(record, today=day)  # UTC date of the slot (M20)
-    except ScopeRefusal as exc:
-        record_run(
-            key,
-            target=stem,
-            spec_version=spec.version,
-            window=day,
-            state="refused",
-            error=exc.reason,
         )
-        post_alert("refused", stem, key, exc.reason)
-        return key  # no attempt row, no browser
-
-    attempt = next_attempt(key)
-    record_attempt(key, attempt, "started", None, target.record_sha256)
-    record_authorisation(key, target.target, target.record_sha256, record=record)
-    try:
-        asyncio.run(load_start_page(target))
     except Exception as exc:
-        error = _describe(exc)
-        record_attempt(key, attempt, "failed", error, target.record_sha256)
-        record_run(
-            key, target=stem, spec_version=spec.version, window=day, state="failed", error=error
-        )
+        attempt = _open_attempt(key)
+        if attempt is None:
+            raise  # failed before authorise() opened an attempt: the on_failure hook alerts
+        _record_failure(attempt, _describe(exc))
         # I-2 (final review): the alert webhook is third-party and outside the client boundary
-        # (CLAUDE.md rule 6) -- `error` (raw `str(exc)`) is what stays in run_attempts.error /
-        # runs.error, but the alert body carries only the sanitised summary. A Playwright locator
-        # timeout's "Call log:" section routinely quotes DOM content.
+        # (CLAUDE.md rule 6) -- the raw `str(exc)` stays in run_attempts.error / runs.error,
+        # the alert carries only the sanitised summary. A Playwright locator timeout's
+        # "Call log:" section routinely quotes DOM content.
         post_alert("failed", stem, key, sanitize_for_alert(exc))
-        # Records this run and attempt's identity -- tells alert_on_flow_failure not to alert a
-        # second time for this same attempt of this same flow run. `flow_run.id` here is
-        # `prefect.runtime.flow_run.id`, a `str`; cast to `UUID` so it compares equal to the
-        # hook's `FlowRun.id`, which Prefect hands the hook as a `uuid.UUID` (same value, a
-        # different type -- verified empirically, not assumed: an uncast `str` never equals the
-        # hook's `UUID` even for the identical run).
+        # Tells alert_on_flow_failure not to alert again for this same attempt of this same
+        # flow run. `flow_run.id` here is a `str`; the hook's `FlowRun.id` is a `uuid.UUID` --
+        # cast so they compare equal (verified empirically, not assumed).
         _ALERTED_IN_FLOW.set((UUID(flow_run.id), flow_run.run_count))
         raise  # Prefect's retry policy applies
-    record_attempt(key, attempt, "completed", None, target.record_sha256)
-    record_run(key, target=stem, spec_version=spec.version, window=day, state="completed")
     return key
