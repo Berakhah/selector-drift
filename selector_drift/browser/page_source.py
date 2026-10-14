@@ -11,8 +11,8 @@ SNAPSHOT_TIMEOUT_S, and a page with more than MAX_SNAPSHOT_NODES elements is ref
 SnapshotTooLarge before anything is stamped or measured -- never silently truncated, because a
 partial snapshot would let a rung resolve against a page it only half saw.
 
-dom()/browser_ax are unredacted; redaction happens at the evidence-storage boundary (Task 33)
-and nothing here may be persisted directly.
+dom()/browser_ax are unredacted. dom() reaches storage only through heallog.evidence.store
+(scrub -> redact -> verify -> guard, Task 33); browser_ax never does (S-M7).
 """
 
 from __future__ import annotations
@@ -80,7 +80,10 @@ class LivePageSource(ParsedPage):
     ) -> None:
         super().__init__(html)
         self._rendered, self._boxed = rendered, boxed
-        self.browser_ax = browser_ax  # Chromium's own tree, for parity checks and evidence
+        # Chromium's own tree, for parity checks ONLY. It is unscrubbed (an aria snapshot can
+        # carry textbox values) and is never evidence: Evidence has no field for it and
+        # tests/heallog/test_evidence_boundary.py keeps it out of every other module (S-M7).
+        self.browser_ax = browser_ax
 
     @classmethod
     async def snapshot(cls, page: PageHandle) -> LivePageSource:

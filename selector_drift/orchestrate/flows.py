@@ -87,7 +87,7 @@ async def load_start_page(target: AuthorisedTarget) -> int:
     # thread while it waits out the target's rate limit; that wait counts against this flow's
     # 600 s timeout (ruling 5), same as any other time spent inside the `async with` below.
     async with driver.open(target) as session:
-        html = await session.page.content()
+        html = (await session.page.content()).value  # only its size and shape are used
     if "<html" not in html.lower():
         raise StartPageError("the start page did not return an HTML document")
     return len(html)
