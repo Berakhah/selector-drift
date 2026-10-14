@@ -31,6 +31,11 @@ class HealContext:
     `winning_rung` is `trace.winner or 5` (Task 26A): a field no rung resolved arrives as 5 and
     gate_run adds an Escalation FAIL for it. `healed` must be exactly `winning_rung != 1` --
     `CascadeTrace.healed` -- so a heal can never ride the lenient cache-hit path.
+
+    `node_id` is the node the run EXTRACTED for this field, in `page`'s node-id space (Task 26A,
+    ledger 551): IndependentRungAgreement FAILs a heal whose re-derivation lands elsewhere.
+    Every product construction passes it (tests/orchestrate/test_pipeline_wiring.py); None is
+    left only for unit tests that judge a check in isolation.
     """
 
     healed: bool
@@ -39,6 +44,7 @@ class HealContext:
     target: FieldTarget
     cache: CacheReader
     human_confirmed: bool = False
+    node_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.healed != (self.winning_rung != 1):

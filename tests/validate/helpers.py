@@ -101,6 +101,7 @@ def ctx(
     page: PageSource | None = PAGE,
     cache: object | None = None,
     confirmed: bool = False,
+    node: str | None = None,
 ) -> HealContext:
     return HealContext(
         healed=healed,
@@ -109,6 +110,7 @@ def ctx(
         target=target,
         cache=cache if cache is not None else EmptyCache(),  # type: ignore[arg-type]
         human_confirmed=confirmed,
+        node_id=node,
     )
 
 
