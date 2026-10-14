@@ -248,6 +248,12 @@ class IndependentRungAgreement:
                 f"rung {healer.rung_id} ({healer.family.value}) healed, and a rung outside the "
                 "DOM families has no cross-family counterpart"
             )
+        try:
+            healed = self._rederive(ctx, healer)
+        except _RungRaised as raised:
+            return self._raised(raised)
+        if isinstance(healed, Verdict):
+            return healed
         confirmers = sorted(
             (
                 r
@@ -265,19 +271,25 @@ class IndependentRungAgreement:
                 f"({healer.family.value}) healed; offered {offered or 'none'}"
             )
         try:
-            return self._compare(ctx.page, ctx.target, healer, confirmers)
+            return self._compare(ctx.page, ctx.target, healer, healed, confirmers)
         except _RungRaised as raised:
-            return self._v(
-                Outcome.FAIL,
-                f"rung {raised.rung.rung_id} raised",
-                f"rung {raised.rung.rung_id} raised {type(raised.exc).__name__} while "
-                "re-resolving on this snapshot, so agreement cannot be established",
-            )
+            return self._raised(raised)
 
-    def _compare(
-        self, page: PageSource, target: FieldTarget, healer: Rung, confirmers: Sequence[Rung]
-    ) -> Verdict | str:
-        healed = _resolve(healer, page, target)
+    def _raised(self, raised: _RungRaised) -> Verdict:
+        return self._v(
+            Outcome.FAIL,
+            f"rung {raised.rung.rung_id} raised",
+            f"rung {raised.rung.rung_id} raised {type(raised.exc).__name__} while "
+            "re-resolving on this snapshot, so agreement cannot be established",
+        )
+
+    def _rederive(self, ctx: HealContext, healer: Rung) -> ResolvedElement | Verdict:
+        """The healing rung, re-run on the same snapshot. It must land again, and on the node the
+        run EXTRACTED (ctx.node_id, Task 26A, ledger 551): confirmers agreeing with a
+        re-derivation say nothing about a different node that was actually read -- a decoy cell
+        extracted by a healer whose re-derivation differs would otherwise PASS."""
+        assert ctx.page is not None
+        healed = _resolve(healer, ctx.page, ctx.target)
         if healed is None:
             return self._v(
                 Outcome.FAIL,
@@ -285,6 +297,23 @@ class IndependentRungAgreement:
                 f"rung {healer.rung_id} healed this field but does not resolve it again on the "
                 "same snapshot: the heal is not reproducible",
             )
+        if ctx.node_id is not None and healed.node_id != ctx.node_id:
+            return self._v(
+                Outcome.FAIL,
+                f"extracted {ctx.node_id}; rung {healer.rung_id} -> {healed.node_id}",
+                f"the run extracted a different node than rung {healer.rung_id} re-derives on "
+                "the same snapshot: what was read is not what the heal resolved",
+            )
+        return healed
+
+    def _compare(
+        self,
+        page: PageSource,
+        target: FieldTarget,
+        healer: Rung,
+        healed: ResolvedElement,
+        confirmers: Sequence[Rung],
+    ) -> Verdict | str:
         resolved = [(c, el) for c in confirmers if (el := _resolve(c, page, target)) is not None]
         against = [(c, el) for c, el in resolved if el.node_id != healed.node_id]
         if against:

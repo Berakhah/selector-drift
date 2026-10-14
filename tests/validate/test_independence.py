@@ -64,6 +64,36 @@ def test_cross_family_agreement_passes() -> None:
 
 
 @pytest.mark.unit
+def test_a_heal_that_extracted_another_node_than_its_rederivation_fails() -> None:
+    """Ledger 551 (Task 26A): the confirmers agree with the healer's RE-DERIVATION, but the run
+    extracted the decoy cell. Comparing the confirmers with each other alone passed this."""
+    rungs = [ax(AMOUNT_CELL), heuristic(AMOUNT_CELL)]
+    v = IndependentRungAgreement(rungs).check(
+        UNCHANGED, previous_history(), healed(2, node=PRIOR_AMOUNT_CELL)
+    )
+    assert v.outcome is Outcome.FAIL and "extracted a different node" in v.reason
+    assert v.observed == f"extracted {PRIOR_AMOUNT_CELL}; rung 2 -> {AMOUNT_CELL}"
+
+
+@pytest.mark.unit
+def test_the_extracted_node_is_compared_even_with_no_cross_family_confirmer() -> None:
+    """Without a confirmer the VALUE family would decide -- and values read from the right cell
+    could vouch for a heal that extracted the wrong one."""
+    v = IndependentRungAgreement([ax(AMOUNT_CELL)]).check(
+        UNCHANGED, previous_history(), healed(2, node=PRIOR_AMOUNT_CELL)
+    )
+    assert v.outcome is Outcome.FAIL and "extracted a different node" in v.reason
+
+
+@pytest.mark.unit
+def test_a_heal_that_extracted_its_rederived_node_is_confirmed_as_before() -> None:
+    v = IndependentRungAgreement([ax(AMOUNT_CELL), heuristic(AMOUNT_CELL)]).check(
+        UNCHANGED, previous_history(), healed(2, node=AMOUNT_CELL)
+    )
+    assert v.outcome is Outcome.PASS
+
+
+@pytest.mark.unit
 def test_a_passing_confirmation_names_its_confirmer_in_structure() -> None:
     v = IndependentRungAgreement([ax(AMOUNT_CELL), heuristic(AMOUNT_CELL)]).check(
         UNCHANGED, previous_history(), healed(2)
