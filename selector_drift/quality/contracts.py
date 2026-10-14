@@ -17,11 +17,11 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
+from bok_core.findings import Finding, Severity
 from bok_core.provenance.claim import Claim, Method
 from bok_core.provenance.source import DomSource
 from sqlalchemy import delete, select
 
-from selector_drift._bok_shim import Finding, Severity
 from selector_drift.db.models import AuditLog, FindingRow
 from selector_drift.db.session import Session
 from selector_drift.land.catalog import query, run_columns

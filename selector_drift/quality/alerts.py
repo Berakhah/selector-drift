@@ -24,11 +24,11 @@ from typing import Final, Literal
 from urllib.parse import urlsplit
 
 import httpx
+from bok_core.findings import Finding, Severity
 from croniter import croniter
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session as OrmSession
 
-from selector_drift._bok_shim import Finding, Severity
 from selector_drift.config import get_settings
 from selector_drift.db.models import AuditLog, HealEvent, Heartbeat, Run
 from selector_drift.db.session import Session
