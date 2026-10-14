@@ -1,8 +1,8 @@
 """One Prefect deployment per (target, spec), served by the worker container (design 9.2).
 
 `python -m selector_drift.orchestrate.deployments` registers them with the Prefect server and
-serves them; it blocks. Tasks 26C and 33 add their deployments to the serve() call; Task 29A
-added the fifteen-minute alert watch.
+serves them; it blocks. Task 26C adds its deployment to the serve() call; Task 29A added the
+fifteen-minute alert watch and Task 33 the daily evidence retention.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from prefect.schedules import Cron
 
 from selector_drift.browser.limits import MEM_LIMIT, PIDS_LIMIT
 from selector_drift.config import get_settings
+from selector_drift.heallog.retention import evidence_retention
 from selector_drift.orchestrate.flows import extraction_flow
 from selector_drift.orchestrate.watch import alert_watch
 from selector_drift.quality.alerts import WEBHOOK_ENV, webhook_url
@@ -28,6 +29,11 @@ JOB_LIMITS: dict[str, str | int] = {"mem_limit": MEM_LIMIT, "pids_limit": PIDS_L
 SCHEDULE_TIMEZONE = "UTC"
 WATCH_CRON = "*/15 * * * *"
 WATCH_JOB_LIMITS: dict[str, str | int] = {"mem_limit": "256m"}  # no browser in this flow
+RETENTION_CRON = "30 3 * * *"  # daily, 03:30 UTC -- clear of the 04:12 extraction slot
+# A declaration, not a limit: under serve() (a process runner in the worker container) Prefect
+# applies no job_variables, and this flow is bounded by the worker service's own limits. Kept so
+# a move to a Docker work pool starts from a stated number.
+RETENTION_JOB_LIMITS: dict[str, str | int] = {"mem_limit": "512m"}
 
 _log = logging.getLogger(__name__)
 
@@ -68,6 +74,21 @@ def watch_deployment() -> RunnerDeployment:
     )
 
 
+def retention_deployment() -> RunnerDeployment:
+    """Closes M30: client heal bundles expire after the scope record's evidence_retention_days
+    (heallog/retention.py); the heal_events rows and every count remain."""
+    return cast(
+        RunnerDeployment,
+        evidence_retention.to_deployment(
+            name="evidence-retention",
+            schedules=[Cron(RETENTION_CRON, timezone=SCHEDULE_TIMEZONE)],
+            job_variables=dict(RETENTION_JOB_LIMITS),
+            tags=["retention"],
+            description="daily: delete client heal bundles past their retention",
+        ),
+    )
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     if webhook_url() is None:
@@ -75,7 +96,7 @@ def main() -> None:
     deployments = extraction_deployments()
     if not deployments:
         raise SystemExit(f"no task specs in {get_settings().spec_dir}")
-    serve(*deployments, watch_deployment())
+    serve(*deployments, watch_deployment(), retention_deployment())
 
 
 if __name__ == "__main__":
