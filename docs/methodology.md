@@ -106,12 +106,25 @@ writes an `audit_log` row (`action = evidence_expired`); the `heal_events` row a
 count remain, and the heal screen reads the bundle as *expired* rather than *corrupted*. A heal
 whose target has no scope record is kept and audited (`retention_skipped`), never deleted on a
 guess. The directory deleted is derived from the heal's integer id under the evidence root, never
-from the stored `evidence_uri`, and a bundle that is a link is skipped and audited.
+from the stored `evidence_uri` (a bundle whose uri was never persisted is retained like any other),
+and a bundle that is a link is skipped and audited. A heal whose run still has an **open
+quarantine** is kept (`retention_skipped`, "quarantine open") until it is promoted or discarded —
+promotion needs the bundle. Every audit row is committed *before* its delete, so a crash leaves a
+bundle audited as expired and retried, never one gone without its `evidence_expired` row.
+
+The same run sweeps client data nothing can reach, each removal audited by store-relative path:
+a `heals/<n>` directory with no heal row (after a one-day grace), crash leftovers (`.tmp-*`,
+`.old-*`, after an hour), and a `last-accepted` directory that no unexpired scope record names —
+so an expired or removed authorisation also takes its last accepted page with it.
 
 On disk the last-accepted directory is not named after the target: it is
 `last-accepted/t-<keyed digest of the target>`, so no listing or error message names a client.
-The digest is keyed with `SD_REDACTION_KEY`; rotating that key orphans every last-accepted page,
-and the next heal of each target then records no *before* half (not a corrupted one).
+The digest is keyed with the store's own path key (`evidence/.path-key`, created once), **not**
+`SD_REDACTION_KEY`: rotating the redaction key renames nothing, and an operator answering a
+deletion request finds a target's directory with `last_accepted_dir(target)`. The path key names
+paths only; it protects no content. A last-accepted page records the sensitivity label it was
+stored under, and it is never reused as the *before* half of a capture with another label
+(`before_unavailable_reason = "label_mismatch"`).
 
 **Disk budget.** One heal bundle is two redacted HTML snapshots and two full-page PNGs at 1280 px
 wide — budget 4 MB. The VM (P-4) reserves 20 GB for `evidence/` and `lake/` together; at the bench's
@@ -135,9 +148,18 @@ that no published claim outruns them.
   CLIENT_CONFIDENTIAL on the CLIENT plane and never published, whatever its redaction block says.
   `test_a_person_name_does_not_survive_into_stored_evidence` is a strict xfail until bok-core
   ships the detector.
-- **Redaction works on the serialised HTML.** An identifier split by markup
-  (`1234<span></span>5678`) is not one run to the redactor. The screenshot masker reads rendered
-  text the way it paints and masks such an element, but the stored HTML keeps the split digits.
+- **Redaction works on values, never on markup** (fix round 1). Every text, tail and attribute
+  value is redacted in the parsed tree and the tree re-serialised, so tags, attribute names and
+  node ids are never touched (redacting the serialised page let one email detector match across
+  `"`, `>` and `<` and swallow whole table rows). Each block element's *rendered* text — inline
+  children joined as painted, entities decoded — is checked too: an identifier split by markup
+  (`<span>4111</span> <span>1111</span>…`, `1234<b>5678</b>90`, `jane.okafor&#64;…`) is redacted
+  as one run (its first text node takes the redacted run, the rest are blanked) and the block is
+  masked in the screenshot. The result is verified twice — detectors re-run over every decoded
+  value and run, and the serialised page must be a fixpoint of `redact()` (a page whose markup
+  itself trips a detector is refused, never stored). Limit: runs are cut at block elements by
+  tag, not by computed CSS, so an identifier split across two block elements styled `inline`
+  is not joined; the masker and the stored HTML then both see two pieces.
 - **Redaction changes identifiers the heal screen shows.** Every 8+ digit run and long upper-case
   code (claim numbers, amounts) becomes a keyed surrogate. Heals replay on the redacted snapshot
   (`test_a_heal_replays_from_its_redacted_bundle`); a value assertion cannot be re-checked from
@@ -158,8 +180,14 @@ that no published claim outruns them.
   exception, and `capture()` wraps whatever a masker raises; a custom masker must keep the same
   rule.
 - **Time budget.** Redaction is never skipped or truncated to meet a deadline: a DOM over the
-  HTML cap is refused and the run records it. bok-core's measured cost is about 1.2 s per MB of
-  DOM, up to ~16 s/MB on adversarial input.
+  HTML cap is refused, and a redaction past `SD_REDACTION_DEADLINE_S` (default 60 s) raises
+  `RedactionFailed` — nothing is stored, and the run quarantines with that reason. The deadline
+  is checked between redaction passes (bok-core's redactor is linear-time but not interruptible),
+  so a single pass can overrun it before the refusal. bok-core's measured cost is about 1.2 s
+  per MB of DOM, up to ~16 s/MB on adversarial input.
+- **CDP cost of text-quad verification.** Measured on the reviewer's probe: ~0.82 ms per text
+  node per pass; at the 20 000-node cap both passes take ~33 s, inside the 60 s per-pass
+  deadline but a real share of the 600 s flow budget on a page masked whole.
 - **Screenshot verification refuses, it does not repair.** Pixel verification checks every masked
   element's box before and after the shot and the boxes of the text inside it; text clipped by
   an `overflow: hidden` ancestor can make a clean capture refuse (a false refusal, never a pass

@@ -3,7 +3,9 @@ Task 33's evidence writer reuses it -- there is deliberately no second credentia
 
 What it removes, by sensitivity:
 
-CLIENT_CONFIDENTIAL -- default-deny on form values, so nothing depends on a heuristic:
+CLIENT_CONFIDENTIAL -- default-deny on form values, so nothing depends on a heuristic
+  (fix round 1: role=textbox/searchbox/combobox/spinbutton count as editable, and every
+  aria-valuetext is blanked):
   every input's and button's `value`; `selected`/`value` on option and select; and the WHOLE
   SUBTREE of every textarea, output, datalist and [contenteditable] element -- descendants
   included (fix round 2, N-M3: a cell inside an editable region is gone, so a heal on it
@@ -186,9 +188,18 @@ def _elements(root: HtmlElement) -> Iterator[HtmlElement]:
             yield el
 
 
+# ARIA roles whose element takes typed input (Task 33 fix round 1): treated like
+# [contenteditable] -- emptied at CLIENT_CONFIDENTIAL and masked whole in the screenshot.
+EDITABLE_ROLES = frozenset({"textbox", "searchbox", "combobox", "spinbutton"})
+# Value-bearing ARIA attributes blanked at CLIENT_CONFIDENTIAL (a slider's spoken value).
+_ARIA_VALUES = ("aria-valuetext",)
+
+
 def _is_editable(el: HtmlElement) -> bool:
     flag = el.get("contenteditable")
-    return flag is not None and flag.strip().lower() != "false"
+    if flag is not None and flag.strip().lower() != "false":
+        return True
+    return (el.get("role") or "").strip().lower() in EDITABLE_ROLES
 
 
 def _unrendered(el: HtmlElement) -> bool:
@@ -420,6 +431,9 @@ class _Scrub:
                 ],
                 credential=False,
             )
+            for el in _elements(self.root):
+                for attr in _ARIA_VALUES:
+                    self._set(el, attr, None)
 
     def _clear(self, targets: list[HtmlElement], *, credential: bool) -> None:
         for el in targets:
@@ -506,8 +520,12 @@ class _Scrub:
                 if _STORAGE_STATE.search(value):
                     setattr(el, slot, _SCRUBBED)
                     self.changes += 1
-                elif _strict_hits(value):
-                    setattr(el, slot, _replace_strict(value))
+                    continue
+                cleaned = _strip_prose_urls(_replace_strict(value), free_text=True)
+                if cleaned != value:
+                    # Credential header values, JWT/bearer tokens, and (fix round 1) the query,
+                    # fragment and token path segments of a URL printed as visible text.
+                    setattr(el, slot, cleaned)
                     self.changes += 1
 
 

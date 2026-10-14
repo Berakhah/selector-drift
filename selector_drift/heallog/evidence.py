@@ -11,7 +11,13 @@ What redact_evidence does, in order, unconditionally (SYNTHETIC evidence too, H7
 2. Re-runs THE one scrubber (heallog.scrub.scrub_dom, Task 19 R5) at the evidence's own label:
    credentials do not look like PII, so redact() would miss every one of them (H6). capture()
    already scrubbed; this pass is idempotent and its count is added to the capture's.
-3. bok-core redact() over the scrubbed DOM; an unverified result raises RedactionFailed.
+3. bok-core redact() over the VALUES of the scrubbed tree -- every text, tail and attribute
+   value (never the minted node ids), batched -- then over each block's rendered run, so an
+   identifier split by markup or entities is redacted whole (fix round 1, C1 + I1). Markup is
+   never handed to the redactor. Verified by re-detecting over the result's values and runs,
+   and by requiring the serialised page to be a redact() fixpoint (that result is the proof
+   the guard re-checks). An unverified pass, or one past Settings.redaction_deadline_s,
+   raises RedactionFailed.
 4. The screenshot is verified STRUCTURALLY (a PNG has no text to re-detect): every element
    whose rendered text (or value/placeholder/alt) the redactor would change, and every
    credential control, must have itself or an ancestor in the capture's mask set -- else
@@ -37,16 +43,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
 import secrets
 import shutil
 import struct
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import NoReturn, SupportsIndex
+from typing import Literal, NoReturn, SupportsIndex
 
+import lxml.html
 from bok_core.boundary.egress import Plane, write_guarded
 from bok_core.boundary.redact import RedactionResult, redact
 from bok_core.boundary.sensitivity import Labelled, Sensitivity
@@ -76,6 +85,7 @@ from selector_drift.heallog.bundle import (
     SideBlock,
     file_digest,
     is_link,
+    read_capped,
     read_heal_manifest,
     read_page_manifest,
     verified_bytes,
@@ -100,6 +110,15 @@ _PNG_KEEP = frozenset({b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS"})
 _SEP = "\n☃\n"
 _SURROGATE = re.compile(r"\[(?:EMAIL|IBAN|PHONE|DIGIT_RUN|CARD|TAX_ID|ROUTING|ACCOUNT):[a-p]{12}\]")
 _UNRENDERED = frozenset({"script", "style", "noscript", "template", "head", "title", "meta"})
+# Elements that start a new rendered box: text is never joined across them (I1 runs).
+_BLOCKS = frozenset(
+    {"address", "article", "aside", "blockquote", "body", "br", "button", "caption", "dd",
+     "details", "dialog", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer",
+     "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "html", "iframe", "img",
+     "input", "label", "legend", "li", "main", "nav", "ol", "option", "p", "pre", "section",
+     "select", "summary", "table", "tbody", "td", "textarea", "tfoot", "th", "thead", "tr",
+     "ul"}
+)  # fmt: skip
 _RENDERED_ATTRS = ("value", "placeholder", "alt")
 # S-M5: the PII mask must leave room for the credential floor under MAX_MASKED_NODES.
 PII_MASK_BUDGET = MAX_MASKED_NODES // 2
@@ -157,56 +176,218 @@ def strip_png_metadata(png: bytes) -> bytes:
     return bytes(out)
 
 
-def _rendered_segments(root: HtmlElement) -> Iterator[tuple[HtmlElement, str]]:
-    """(element, a piece of text it paints). Its own text with its children's tails joined as
-    rendered -- "1234<span></span>5678" paints one run -- and each painted attribute."""
+@dataclass(frozen=True)
+class _Slot:
+    """One value in the tree: an element's text, its tail, or one attribute's value."""
+
+    el: HtmlElement
+    kind: str  # "text" | "tail" | "attr"
+    name: str = ""
+
+    def get(self) -> str:
+        if self.kind == "attr":
+            return str(self.el.get(self.name) or "")
+        return str(getattr(self.el, self.kind) or "")
+
+    def put(self, value: str) -> None:
+        if self.kind == "attr":
+            self.el.set(self.name, value)
+        else:
+            setattr(self.el, self.kind, value or None)
+
+    def owner(self) -> HtmlElement | None:
+        """The element that paints this value (a tail renders in its parent)."""
+        if self.kind == "tail":
+            parent = self.el.getparent()
+            return parent if isinstance(parent, HtmlElement) else None
+        return self.el
+
+
+def _elements_of(root: HtmlElement) -> Iterator[HtmlElement]:
     for el in root.iter():
-        if not isinstance(el, HtmlElement) or not isinstance(el.tag, str):
-            continue
-        if el.tag in _UNRENDERED or any(a.tag in _UNRENDERED for a in el.iterancestors()):
-            continue
-        own = (el.text or "") + "".join(child.tail or "" for child in el)
-        if own.strip():
-            yield el, own
-        for attr in _RENDERED_ATTRS:
-            value = el.get(attr)
-            if value and value.strip():
-                yield el, value
+        if isinstance(el, HtmlElement) and isinstance(el.tag, str):
+            yield el
 
 
-def _changed(texts: list[str], *, key: bytes, sensitivity: Sensitivity) -> list[bool]:
-    """For each text, would redact() change it? One call for the page; per text if a text
-    carries the separator or the split does not line up."""
+def _value_slots(root: HtmlElement) -> list[_Slot]:
+    """Every text, tail and attribute value -- except the minted node ids, which are not page
+    content and which replay and the screenshot mask depend on."""
+    slots: list[_Slot] = []
+    for el in _elements_of(root):
+        if el.text:
+            slots.append(_Slot(el, "text"))
+        if el.tail:
+            slots.append(_Slot(el, "tail"))
+        for name in el.attrib:
+            if name != NODE_ATTR and el.get(name):
+                slots.append(_Slot(el, "attr", str(name)))
+    return slots
+
+
+def _runs(root: HtmlElement) -> list[tuple[HtmlElement, list[_Slot]]]:
+    """Each block element's rendered runs: its own text and its inline descendants' text and
+    tails, in order, cut wherever a nested block starts. This is what the page PAINTS as one
+    string -- "<span>4111</span> <span>1111</span>", "1234<b>5678</b>90" and
+    "jane.okafor<wbr>@example.invalid" are each one run (fix round 1, I1)."""
+    runs: list[tuple[HtmlElement, list[_Slot]]] = []
+
+    def walk_block(block: HtmlElement) -> None:
+        current: list[_Slot] = []
+
+        def flush() -> None:
+            nonlocal current
+            if current:
+                runs.append((block, current))
+                current = []
+
+        def inline(el: HtmlElement) -> None:
+            if el.text:
+                current.append(_Slot(el, "text"))
+            for child in el:
+                if isinstance(child, HtmlElement) and isinstance(child.tag, str):
+                    if child.tag in _UNRENDERED:
+                        pass
+                    elif child.tag in _BLOCKS:
+                        flush()
+                        walk_block(child)
+                    else:
+                        inline(child)
+                if child.tail:
+                    current.append(_Slot(child, "tail"))
+
+        inline(block)
+        flush()
+
+    body = root.find("body")
+    walk_block(body if isinstance(body, HtmlElement) else root)
+    return runs
+
+
+def _redact_texts(
+    texts: list[str], *, key: bytes, sensitivity: Sensitivity
+) -> tuple[list[str], int]:
+    """Each text redacted, and how many identifiers were replaced. One redact() call for the
+    page, joined by a separator no detector matches across; per text when a text carries the
+    separator or the split does not line up. Raises RedactionFailed when unverified."""
     if not texts:
-        return []
-    if not any("☃" in t for t in texts):
-        result = redact(Labelled(_SEP.join(texts), sensitivity), key=key)
+        return [], 0
+    if not any("\u2603" in t for t in texts):
+        # A trailing separator: the joined payload is never valid JSON, so bok-core never
+        # switches to its JSON-number mode (which quotes surrogates) on a lone value.
+        result = redact(Labelled(_SEP.join([*texts, ""]), sensitivity), key=key)
         if not result.verified:
             raise RedactionFailed(f"redaction verification failed: {', '.join(result.failures)}")
         parts = result.text.split(_SEP)
-        if len(parts) == len(texts):
-            return [bool(_SURROGATE.search(p)) for p in parts]
-    out: list[bool] = []
+        if len(parts) == len(texts) + 1 and parts[-1] == "":
+            return parts[:-1], sum(result.surrogate_count.values())
+    out: list[str] = []
+    count = 0
     for text in texts:
         result = redact(Labelled(text, sensitivity), key=key)
         if not result.verified:
             raise RedactionFailed(f"redaction verification failed: {', '.join(result.failures)}")
-        out.append(bool(_SURROGATE.search(result.text)))
-    return out
+        out.append(result.text)
+        count += sum(result.surrogate_count.values())
+    return out, count
+
+
+def _hits(before: list[str], after: list[str]) -> list[bool]:
+    return [
+        len(_SURROGATE.findall(a)) > len(_SURROGATE.findall(b))
+        for b, a in zip(before, after, strict=True)
+    ]
+
+
+@dataclass(frozen=True)
+class _TreeRedaction:
+    flagged: list[HtmlElement]  # elements whose painted text carried an identifier
+    identifiers: int
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise RedactionFailed(
+            "evidence redaction exceeded its deadline; refused, nothing stored (never truncated)"
+        )
+
+
+def _redact_tree(
+    root: HtmlElement,
+    *,
+    key: bytes,
+    sensitivity: Sensitivity,
+    mutate: bool,
+    deadline: float | None = None,
+) -> _TreeRedaction:
+    """Redact VALUES, never markup (fix round 1, C1): every text, tail and attribute value is
+    redacted in place, so tags, attribute names and node ids are untouched. Then every
+    rendered run (I1) that still carries an identifier across slots -- an identifier split by
+    markup -- is redacted as a whole: its first slot takes the redacted run, the others are
+    blanked. With mutate=False nothing is changed; only the flags are computed (PiiMasker)."""
+    slots = _value_slots(root)
+    original = [s.get() for s in slots]
+    index = {(id(s.el), s.kind, s.name): i for i, s in enumerate(slots)}
+    runs = _runs(root)
+    run_slots = [[index[(id(s.el), s.kind, s.name)] for s in members] for _, members in runs]
+    _check_deadline(deadline)
+
+    redacted, identifiers = _redact_texts(original, key=key, sensitivity=sensitivity)
+    slot_hit = _hits(original, redacted)
+    _check_deadline(deadline)
+
+    flagged: dict[int, HtmlElement] = {}
+    for i, hit in enumerate(slot_hit):
+        slot = slots[i]
+        rendered = slot.kind != "attr" or slot.name in _RENDERED_ATTRS
+        owner = slot.owner()
+        if hit and rendered and owner is not None and _is_rendered(owner):
+            flagged[id(owner)] = owner
+
+    # A run is redacted as a whole when redacting it whole differs from redacting its pieces:
+    # an identifier split by markup ("4111</span> <span>1111..."), or one whose pieces each
+    # matched only in part ("jane.okafor" + "@example.invalid" -- the tail alone is an
+    # email with an empty local part, and the local part would survive).
+    pieces = ["".join(redacted[i] for i in members) for members in run_slots]
+    whole, _ = _redact_texts(
+        ["".join(original[i] for i in members) for members in run_slots],
+        key=key,
+        sensitivity=sensitivity,
+    )
+    _check_deadline(deadline)
+    for (block, _), members, piecewise, text in zip(runs, run_slots, pieces, whole, strict=True):
+        if piecewise == text:
+            continue
+        flagged[id(block)] = block
+        first, *rest = members
+        redacted[first] = text
+        for i in rest:
+            redacted[i] = ""
+        identifiers += 1
+
+    if mutate:
+        for slot, value in zip(slots, redacted, strict=True):
+            if value != slot.get():
+                slot.put(value)
+    return _TreeRedaction(flagged=list(flagged.values()), identifiers=identifiers)
+
+
+def _is_rendered(el: HtmlElement) -> bool:
+    return el.tag not in _UNRENDERED and not any(a.tag in _UNRENDERED for a in el.iterancestors())
+
+
+def _detections(root: HtmlElement, *, key: bytes, sensitivity: Sensitivity) -> int:
+    """Verification over the REDACTED tree: detectors re-run over every decoded value and every
+    rendered run. Any identifier found is a failure."""
+    texts = [s.get() for s in _value_slots(root)]
+    texts += ["".join(s.get() for s in members) for _, members in _runs(root)]
+    _, found = _redact_texts(texts, key=key, sensitivity=sensitivity)
+    return found
 
 
 def _flagged_elements(
     root: HtmlElement, *, key: bytes, sensitivity: Sensitivity
 ) -> list[HtmlElement]:
-    segments = list(_rendered_segments(root))
-    hits = _changed([t for _, t in segments], key=key, sensitivity=sensitivity)
-    seen: set[int] = set()
-    flagged: list[HtmlElement] = []
-    for (el, _), hit in zip(segments, hits, strict=True):
-        if hit and id(el) not in seen:
-            seen.add(id(el))
-            flagged.append(el)
-    return flagged
+    return _redact_tree(root, key=key, sensitivity=sensitivity, mutate=False).flagged
 
 
 def _carrier(el: HtmlElement) -> HtmlElement | None:
@@ -306,6 +487,7 @@ class RedactedEvidence:
     sensitivity: Sensitivity  # of the source capture; the label each file is guarded under
     redaction: RedactionResult = field(repr=False)
     scrubbed_credentials: int
+    identifiers: int
     node_ids: Mapping[str, str] = field(default_factory=dict)
     boxes: Mapping[str, BBox] = field(default_factory=dict)
 
@@ -331,7 +513,7 @@ class RedactedEvidence:
     def redaction_block(self) -> RedactionBlock:
         return RedactionBlock(
             scrubbed_credentials=self.scrubbed_credentials,
-            redacted_identifiers=sum(self.redaction.surrogate_count.values()),
+            redacted_identifiers=self.identifiers,
             verified=self.redaction.verified,
         )
 
@@ -350,20 +532,49 @@ def _check_minted_values(evidence: Evidence) -> None:
         raise RedactionFailed("a recorded box is not keyed by a field name")
 
 
-def redact_evidence(evidence: Evidence, *, key: bytes) -> RedactedEvidence:
-    """Unconditional -- SYNTHETIC evidence is redacted too (H7). Writes nothing."""
+def _serialise(root: HtmlElement, doctype: str | None) -> str:
+    return str(lxml.html.tostring(root, encoding="unicode", doctype=doctype))
+
+
+def redact_evidence(
+    evidence: Evidence, *, key: bytes, deadline_s: float | None = None
+) -> RedactedEvidence:
+    """Unconditional -- SYNTHETIC evidence is redacted too (H7). Writes nothing.
+
+    Fix round 1 (C1): values are redacted on the parsed tree and the tree re-serialised, so
+    the stored page has the same element skeleton and node ids as the scrubbed one. Verified
+    twice: detectors re-run over every decoded value and rendered run of the result, and the
+    serialised page must be a fixpoint of redact() -- whose result is the proof the egress
+    guard re-verifies. Past `deadline_s` (Settings.redaction_deadline_s) it raises
+    RedactionFailed: nothing is stored, never a truncated redaction."""
+    deadline = time.monotonic() + (
+        get_settings().redaction_deadline_s if deadline_s is None else deadline_s
+    )
     label = evidence.dom.sensitivity
     raw = evidence.dom.value
     if len(raw.encode("utf-8")) > MAX_HTML_BYTES:
         raise RedactionFailed("the DOM is over its size cap; refused, not truncated")
     _check_minted_values(evidence)
     scrubbed, n_scrubbed = scrub_credentials(raw, sensitivity=label)
-    result = redact(Labelled(scrubbed, label), key=key)
-    if not result.verified:
-        raise RedactionFailed(f"redaction verification failed: {', '.join(result.failures)}")
-    root = parse(scrubbed)
-    required = _flagged_elements(root, key=key, sensitivity=label) + credential_controls(root)
-    missing = _uncovered(root, required, evidence.masked_node_ids)
+    _check_deadline(deadline)
+    try:
+        root = parse(scrubbed)
+    except ValueError:
+        raise RedactionFailed("the DOM could not be parsed") from None
+    doctype = root.getroottree().docinfo.doctype or None
+    required = credential_controls(root)
+    tree = _redact_tree(root, key=key, sensitivity=label, mutate=True, deadline=deadline)
+    if _detections(root, key=key, sensitivity=label):
+        raise RedactionFailed("redaction verification failed: an identifier survived in a value")
+    _check_deadline(deadline)
+    html = _serialise(root, doctype)
+    proof = redact(Labelled(html, label), key=key)
+    if not proof.verified or proof.text != html:
+        raise RedactionFailed(
+            "redaction verification failed: the redacted page is not a redaction fixpoint"
+        )
+    _check_deadline(deadline)
+    missing = _uncovered(root, tree.flagged + required, evidence.masked_node_ids)
     if missing:
         raise RedactionFailed(
             f"{missing} identifier-bearing or credential element(s) were not masked in the "
@@ -374,11 +585,12 @@ def redact_evidence(evidence: Evidence, *, key: bytes) -> RedactedEvidence:
         run_key=evidence.run_key,
         captured_at=evidence.captured_at,
         viewport=evidence.viewport,
-        html=result.text.encode("utf-8"),
+        html=html.encode("utf-8"),
         png=strip_png_metadata(evidence.screenshot.value),
         sensitivity=label,
-        redaction=result,
+        redaction=proof,
         scrubbed_credentials=evidence.scrubbed + n_scrubbed,
+        identifiers=tree.identifiers,
         node_ids=dict(evidence.node_ids),
         boxes=dict(evidence.boxes),
     )
@@ -399,18 +611,70 @@ def _store_root(plane: Plane | None = None) -> Path:
 
 
 def _target_slug(target: str) -> str:
+    """Fix round 1: the error never repeats the value (it may be a client's name)."""
     if not isinstance(target, str) or not _TARGET_RE.fullmatch(target):
-        raise ValueError(f"not a target name: {target!r:.40}")
+        raise ValueError("not a target name")
     return target
 
 
-def last_accepted_dir(target: str) -> Path:
-    """`last-accepted/t-<keyed digest of the target>`: opaque, so a directory listing or an
-    error naming a path never names a client (bok-core pointer 6)."""
-    slug = _target_slug(target)
-    key = get_settings().redaction_key
+PATH_KEY_FILE = ".path-key"
+_PATH_KEY_BYTES = 32
+
+
+def _path_key(*, create: bool) -> bytes | None:
+    """The store's own key for naming last-accepted directories (fix round 1, I3).
+
+    NOT the redaction key: rotating SD_REDACTION_KEY must not orphan a directory, and an
+    operator answering a deletion request must be able to find a target's directory with
+    last_accepted_dir(target). It names paths only (it protects no content); it lives at the
+    store root, created once (O_EXCL, 0600). None when it does not exist and `create` is
+    False -- then no last-accepted directory can exist either."""
+    root = _store_root()
+    path = root / PATH_KEY_FILE
+    if not path.exists() and not is_link(path):
+        if not create:
+            return None
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(
+                path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600
+            )
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(secrets.token_bytes(_PATH_KEY_BYTES))
+    try:
+        key = read_capped(path, _PATH_KEY_BYTES)
+    except (OSError, EvidenceCorrupted):
+        raise UnsafeEvidencePath("the evidence store's path key is unreadable") from None
+    if len(key) != _PATH_KEY_BYTES:
+        raise UnsafeEvidencePath("the evidence store's path key is malformed")
+    return key
+
+
+def _last_accepted_name(slug: str, key: bytes) -> str:
     digest = hmac.new(key, b"sd-last-accepted\x00" + slug.encode(), hashlib.sha256).hexdigest()
-    return _store_root() / LAST_ACCEPTED_DIR / f"t-{digest[:32]}"
+    return f"t-{digest[:32]}"
+
+
+def last_accepted_dir(target: str, *, create_key: bool = True) -> Path:
+    """`last-accepted/t-<digest of the target under the store's path key>`: opaque, so a
+    directory listing or an error naming a path never names a client (bok-core pointer 6),
+    and stable across redaction-key rotation (fix round 1)."""
+    slug = _target_slug(target)
+    key = _path_key(create=create_key)
+    name = _last_accepted_name(slug, key) if key is not None else "t-absent"
+    return _store_root() / LAST_ACCEPTED_DIR / name
+
+
+def last_accepted_names(targets: list[str]) -> dict[str, str]:
+    """{directory name: target} for the given targets -- for retention's orphan sweep. Empty
+    when the store has no path key yet."""
+    key = _path_key(create=False)
+    if key is None:
+        return {}
+    return {_last_accepted_name(_target_slug(t), key): t for t in targets}
 
 
 def heal_bundle_dir(heal_id: int) -> Path:
@@ -508,6 +772,7 @@ def write_last_accepted(redacted: RedactedEvidence, target: str, plane: Plane) -
     ]
     manifest = PageManifest(
         files={f.name: file_digest(f.payload.value) for f in files},
+        label=redacted.sensitivity,
         page=redacted.side(),
         redaction=redacted.redaction_block(),
     )
@@ -525,24 +790,29 @@ def write_heal_bundle(heal_id: int, target: str, after: RedactedEvidence, plane:
         _File(AFTER_PNG, Labelled(after.png, label)),
     ]
     before: SideBlock | None = None
-    before_reason: str | None = None
-    source = last_accepted_dir(target)
+    before_reason: Literal["corrupted", "label_mismatch"] | None = None
+    source = last_accepted_dir(target, create_key=False)
     if source.exists() or is_link(source):
         try:
             page = read_page_manifest(source)
-            html = verified_bytes(source, page.files, PAGE_HTML)
-            png = verified_bytes(source, page.files, PAGE_PNG)
-            files += [
-                _html_file(BEFORE_HTML, html, label, _reproof(html, label)),
-                _File(BEFORE_PNG, Labelled(png, label)),
-            ]
-            before = page.page
+            if page.label is not label:
+                # Fix round 1: never re-attach a different label to stored bytes (a CLIENT
+                # page reused as the before half of a SYNTHETIC bundle would launder it).
+                before_reason = "label_mismatch"
+            else:
+                html = verified_bytes(source, page.files, PAGE_HTML)
+                png = verified_bytes(source, page.files, PAGE_PNG)
+                files += [
+                    _html_file(BEFORE_HTML, html, label, _reproof(html, label)),
+                    _File(BEFORE_PNG, Labelled(png, label)),
+                ]
+                before = page.page
         except EvidenceCorrupted:
             before_reason = "corrupted"
     manifest = HealManifest(
         files={f.name: file_digest(f.payload.value) for f in files},
         before=before,
-        before_unavailable_reason="corrupted" if before_reason else None,
+        before_unavailable_reason=before_reason,
         after=after.side(),
         redaction=after.redaction_block(),
     )
@@ -563,6 +833,7 @@ def promote_heal_bundle_to_last_accepted(heal_id: int, target: str, plane: Plane
     ]
     page = PageManifest(
         files={f.name: file_digest(f.payload.value) for f in files},
+        label=label,
         page=manifest.after,
         redaction=manifest.redaction,
     )

@@ -74,3 +74,42 @@ def test_form_control_ids_are_what_default_deny_masks_by_itself() -> None:
         '<template><input data-sd-node="z"></template></body></html>'
     )
     assert form_control_node_ids(html) == frozenset({"a", "h", "t", "s", "e"})
+
+
+# -- fix round 1 -------------------------------------------------------------------------------
+
+ARIA = (
+    '<html><body><div role="textbox" aria-label="Notes" data-sd-node="n1">{c}-box</div>'
+    '<div role="slider" aria-valuetext="{c}-slider" data-sd-node="n3"></div>'
+    '<span role="combobox" data-sd-node="n5">{c}-combo</span>'
+    '<div role="searchbox" data-sd-node="n6">{c}-search</div></body></html>'
+)
+
+
+@pytest.mark.unit
+def test_client_confidential_default_deny_covers_editable_roles_and_value_text() -> None:
+    out = scrub_dom(ARIA.format(c=CANARY), sensitivity=Sensitivity.CLIENT_CONFIDENTIAL)
+    assert CANARY not in out
+    assert 'data-sd-node="n1"' in out and 'aria-label="Notes"' in out
+
+
+@pytest.mark.unit
+def test_editable_roles_are_masked_by_default_deny_too() -> None:
+    assert form_control_node_ids(ARIA.format(c=CANARY)) >= {"n1", "n5", "n6"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"Download: https://files.example.invalid/r.pdf?token={CANARY}",
+        f"link //cdn.example.invalid/x#{CANARY}",
+        f"/dl?sig={CANARY}",
+    ],
+)
+def test_a_url_printed_as_visible_text_loses_its_query(text: str) -> None:
+    html = f"<html><body><p>{text}</p></body></html>"
+    for label in (Sensitivity.CLIENT_CONFIDENTIAL, Sensitivity.SYNTHETIC):
+        out = scrub_dom(html, sensitivity=label)
+        assert CANARY not in out
+        assert "<p>" in out

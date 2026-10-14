@@ -3,7 +3,8 @@
 The one Settings definition in the product (2026-09-26). Later tasks read fields from here and
 define none: Task 6 (alert webhook), Task 18 (escalation corpus), Task 28 (lake root), Task 31
 (session directory), Task 32 (credential store, KEK; per-target broker via `broker_env`),
-Task 33 (fixture mode, web origin, public base URL, typegen).
+Task 33 (fixture mode, web origin, public base URL, typegen; fix round 1 the redaction
+deadline).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from pydantic import SecretStr
 
 DEFAULT_DATABASE_URL = "postgresql+psycopg://selector_drift@localhost:5432/selector_drift"
 MIN_REDACTION_KEY_BYTES = 32
+DEFAULT_REDACTION_DEADLINE_S = 60.0
 
 
 class ConfigError(RuntimeError):
@@ -48,6 +50,9 @@ class Settings:
     # committed; a SecretStr so no repr, log line or exception can print it.
     credential_kek: SecretStr | None
     _redaction_key_hex: str  # SD_REDACTION_KEY -- hex, >= 32 bytes, never committed
+    # SD_REDACTION_DEADLINE_S -- evidence redaction past this is refused, never truncated
+    # (Task 33 fix round 1; bok-core pointer 2). Default 60 s.
+    redaction_deadline_s: float = DEFAULT_REDACTION_DEADLINE_S
 
     @property
     def redaction_key(self) -> bytes:
@@ -135,7 +140,20 @@ def get_settings() -> Settings:
         # No default (a secret): a set-but-empty SD_REDACTION_KEY already behaves as unset --
         # `redaction_key` raises ConfigError on any falsy `_redaction_key_hex`.
         _redaction_key_hex=e("SD_REDACTION_KEY", ""),
+        redaction_deadline_s=_positive_seconds(
+            _env_or_default("SD_REDACTION_DEADLINE_S", str(DEFAULT_REDACTION_DEADLINE_S))
+        ),
     )
+
+
+def _positive_seconds(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError("SD_REDACTION_DEADLINE_S is not a number") from None
+    if not value > 0:
+        raise ConfigError("SD_REDACTION_DEADLINE_S must be positive")
+    return value
 
 
 # The target-name pattern of scope.record.TARGET_SLUG, repeated rather than imported: config is

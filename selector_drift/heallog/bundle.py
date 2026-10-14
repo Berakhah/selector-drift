@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from bok_core.boundary.sensitivity import Sensitivity
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from selector_drift.heallog.capture import BBox
@@ -102,7 +103,9 @@ class HealManifest(_Frozen):
     before: SideBlock | None = None  # absent on a target's first heal
     # Found 2026-09-26, not in the spec's JSON: present only when last-accepted/ failed its
     # own hash at heal time, so the view can say "corrupted" rather than "not captured".
-    before_unavailable_reason: Literal["corrupted"] | None = None
+    # Fix round 1: "label_mismatch" -- last-accepted was stored under a different sensitivity
+    # label than this capture, so it is not reused (no relabelling of client bytes).
+    before_unavailable_reason: Literal["corrupted", "label_mismatch"] | None = None
     after: SideBlock
     redaction: RedactionBlock
 
@@ -128,6 +131,7 @@ class HealManifest(_Frozen):
 class PageManifest(_Frozen):
     version: Literal[1] = 1
     files: dict[str, str]
+    label: Sensitivity  # the capture's sensitivity label (fix round 1); reuse must match
     page: SideBlock
     redaction: RedactionBlock
 

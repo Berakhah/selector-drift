@@ -632,3 +632,15 @@ def test_a_page_past_the_height_ceiling_refuses() -> None:
     )
     with pytest.raises(CaptureError, match="taller than"):
         _in_thread(lambda: _scenario(html, None))
+
+
+@pytest.mark.e2e
+def test_an_editable_role_is_masked_by_default_deny() -> None:
+    """Fix round 1: role=textbox (no contenteditable attribute) is typed input too."""
+    html = (
+        f'<html><body style="margin:0"><div role="textbox" style="{PAINT}">123456</div>'
+        "</body></html>"
+    )
+    stored, unmasked = _in_thread(lambda: _scenario(html, None))
+    assert _magenta(unmasked) > 5_000
+    assert _magenta(stored) == 0
