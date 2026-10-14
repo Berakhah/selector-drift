@@ -32,6 +32,16 @@ At EVERY sensitivity (credential rules, not PII rules):
     "Basic Coverage" and "Token expiration date" are English).
   - JWTs and bearer tokens inside text, and inside the free-text attributes the rungs read
     (aria-label, title, alt, placeholder), are REPLACED in place -- never the opaque rule there.
+  - Task 33 (R15/H6): HTTP credential header lines inside text or a free-text attribute --
+    "Cookie: name=value", "Set-Cookie: ...", "Authorization: <scheme> <token>", and the
+    X-API-Key / X-Auth-Token / X-CSRF-Token / X-XSRF-Token family -- keep their header name and
+    lose their value. A text node shaped like Playwright storage state ("cookies": [ /
+    "localStorage": [ / "sessionStorage": [) is emptied whole.
+  - Task 33 (N2-M2): a URL-shaped quoted string anywhere in CSS (image-set("/a.png?sig=..")),
+    a URL-shaped word inside a non-free-text attribute value ("open /dl?token=.. now"), and,
+    inside the free-text attributes, a scheme or protocol-relative URL among words or a
+    relative "/path?query" word are stripped like any other URL. "Paid?", "a=b?" and
+    "Amount?" are not URLs and are kept (N2-M1 parity).
 
 Never touched (the cascade reads them): KEPT_ATTRS, and the IDREF attributes (aria-labelledby,
 aria-describedby, aria-controls, aria-owns, aria-activedescendant, aria-details,
@@ -267,6 +277,20 @@ _URLISH = re.compile(r"^\s*(?:[A-Za-z][A-Za-z0-9+.-]*://|//)")
 _USERINFO = re.compile(r"^(\s*(?:[A-Za-z][A-Za-z0-9+.-]*:)?//)[^/?#@\s]*@")
 _CSS_URL = re.compile(r"(?is)(url\(\s*)(['\"]?)(.*?)(\2\s*\))")
 _CSS_IMPORT = re.compile(r"(?i)(@import\s+)(['\"])(.*?)(\2)")
+_CSS_STRING = re.compile(r"(\"|')((?:(?!\1)[^\\\n]|\\.)*)\1")
+# Credential-bearing HTTP header lines (Task 33, R15/H6). The name is kept, the value goes.
+# Authorization needs a scheme word, and Cookie a name=value pair, so the field labels an
+# insurance portal prints ("Prior Authorization: Approved") are left alone.
+_HEADER_LINES = (
+    re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)([^\s=;:]+=[^\r\n<]*)"),
+    re.compile(
+        r"(?i)\b((?:proxy-)?authorization\s*:\s*)"
+        r"((?:bearer|basic|digest|negotiate|token|apikey|hmac|aws4-hmac-sha256)\s+[^\r\n<]+)"
+    ),
+    re.compile(r"(?i)\b((?:x-)?(?:api-key|auth-token|csrf-token|xsrf-token)\s*:\s*)(\S[^\r\n<]*)"),
+)
+# Playwright storage-state / web-storage dumps: the whole text node goes.
+_STORAGE_STATE = re.compile(r'(?i)"(?:cookies|localStorage|sessionStorage)"\s*:\s*\[')
 
 
 def _looks_like_url(value: str, *, free_text: bool = False) -> bool:
@@ -282,15 +306,44 @@ def _looks_like_url(value: str, *, free_text: bool = False) -> bool:
 
 
 def _strip_css(css: str) -> str:
-    """Every url(...) and @import in a stylesheet or a style attribute, stripped."""
+    """Every url(...) and @import in a stylesheet or a style attribute stripped, and (N2-M2)
+    any other quoted string in it that looks like a URL (image-set, custom properties)."""
     css = _CSS_URL.sub(lambda m: m[1] + m[2] + _strip_url(m[3]) + m[4], css)
-    return _CSS_IMPORT.sub(lambda m: m[1] + m[2] + _strip_url(m[3]) + m[4], css)
+    css = _CSS_IMPORT.sub(lambda m: m[1] + m[2] + _strip_url(m[3]) + m[4], css)
+    return _CSS_STRING.sub(
+        lambda m: m[1] + (_strip_url(m[2]) if _looks_like_url(m[2]) else m[2]) + m[1], css
+    )
+
+
+def _strict_hits(text: str) -> bool:
+    return bool(
+        _JWT.search(text) or _BEARER.search(text) or any(h.search(text) for h in _HEADER_LINES)
+    )
 
 
 def _replace_strict(text: str) -> str:
-    """JWTs and bearer tokens replaced in place; everything else left as written."""
+    """JWTs, bearer tokens and credential header values replaced in place; everything else
+    left as written."""
+    for header in _HEADER_LINES:
+        text = header.sub(lambda m: m[1] + _SCRUBBED, text)
     text = _BEARER.sub(lambda m: f"{m[1]} {_SCRUBBED}", text)
     return _JWT.sub(_SCRUBBED, text)
+
+
+def _strip_prose_urls(value: str, *, free_text: bool) -> str:
+    """N2-M2: a URL among words. Each whitespace-separated word that is a URL is stripped.
+    In a free-text attribute only a scheme or protocol-relative URL, or a relative word
+    starting with '/' that carries a query, counts (so "Paid?" and "a=b?" stay)."""
+
+    def word(match: re.Match[str]) -> str:
+        w = match.group(0)
+        if free_text:
+            urlish = bool(_URLISH.match(w)) or (w.startswith("/") and "?" in w)
+        else:
+            urlish = _looks_like_url(w)
+        return _strip_url(w) if urlish else w
+
+    return re.sub(r"\S+", word, value)
 
 
 def _strip_url(url: str) -> str:
@@ -321,24 +374,24 @@ class _Scrub:
     def __init__(self, root: HtmlElement, *, deny_all: bool) -> None:
         self.root = root
         self.deny_all = deny_all
-        self.changed = False
+        self.changes = 0  # every value, subtree, node or text the scrub removed or rewrote
 
     def _set(self, el: HtmlElement, attr: str, value: str | None) -> None:
         current = el.get(attr)
         if value is None:
             if current is not None:
                 del el.attrib[attr]
-                self.changed = True
+                self.changes += 1
         elif current != value:
             el.set(attr, value)
-            self.changed = True
+            self.changes += 1
 
     def _empty(self, el: HtmlElement) -> None:
         if el.text or len(el):
             for child in list(el):
                 el.remove(child)
             el.text = None
-            self.changed = True
+            self.changes += 1
 
     def _drop_preserving_tail(self, node: etree._Element) -> None:
         parent = node.getparent()
@@ -352,7 +405,7 @@ class _Scrub:
             else:
                 parent.text = (parent.text or "") + tail
         parent.remove(node)
-        self.changed = True
+        self.changes += 1
 
     def form_values(self) -> None:
         # The credential floor always runs (it also empties a credential select's option
@@ -396,14 +449,14 @@ class _Scrub:
                 stripped = _strip_css(el.text)
                 if stripped != el.text:
                     el.text = stripped
-                    self.changed = True
+                    self.changes += 1
 
     def comments(self) -> None:
         for node in list(self.root.iter(etree.Comment, etree.ProcessingInstruction)):
             self._drop_preserving_tail(node)
         for sibling in (*self.root.itersiblings(preceding=True), *self.root.itersiblings()):
             if isinstance(sibling, etree._Comment | etree._ProcessingInstruction):
-                self.changed = True  # outside <html>: dropped by re-serialisation
+                self.changes += 1  # outside <html>: dropped by re-serialisation
 
     def attributes(self) -> None:
         for el in _elements(self.root):
@@ -435,27 +488,45 @@ class _Scrub:
                     continue  # read by the cascade
                 elif is_credential_text(bare) and not _NUMERIC_OR_BOOL.fullmatch(value):
                     self._set(el, attr, "")
-                elif _looks_like_url(value, free_text=attr in _FREE_TEXT_ATTRS):
-                    self._set(el, attr, _strip_url(value))
                 elif attr in _FREE_TEXT_ATTRS:
-                    self._set(el, attr, _replace_strict(value))
+                    self._set(el, attr, _replace_strict(_strip_prose_urls(value, free_text=True)))
+                elif _looks_like_url(value):
+                    self._set(el, attr, _strip_url(value))
                 elif _token_shaped(value):
                     self._set(el, attr, "")
+                elif re.search(r"\s", value):
+                    self._set(el, attr, _strip_prose_urls(value, free_text=False))
 
     def text(self) -> None:
         for el in _elements(self.root):
             for slot in ("text", "tail"):
                 value = getattr(el, slot)
-                if value and (_JWT.search(value) or _BEARER.search(value)):
+                if not value:
+                    continue
+                if _STORAGE_STATE.search(value):
+                    setattr(el, slot, _SCRUBBED)
+                    self.changes += 1
+                elif _strict_hits(value):
                     setattr(el, slot, _replace_strict(value))
-                    self.changed = True
+                    self.changes += 1
 
 
-def scrub_dom(html: str, *, sensitivity: Sensitivity) -> str:
-    """The DOM with every credential (and, at CLIENT_CONFIDENTIAL, every form value) removed.
+def form_control_node_ids(dom: str) -> frozenset[str]:
+    """Node ids of every rendered input, textarea, select and [contenteditable] -- exactly what
+    LiveCapture's CLIENT_CONFIDENTIAL default-deny pass masks by itself, whatever their ids
+    (hidden inputs paint nothing). N-M4: capture() need not ask the live page to find these
+    by id at CLIENT_CONFIDENTIAL, so a re-rendered control is masked, not refused."""
+    found: set[str] = set()
+    for el in _elements(parse(dom)):
+        if (el.tag in ("input", "textarea", "select") or _is_editable(el)) and not _unrendered(el):
+            ident = el.get(NODE_ATTR)
+            if ident:
+                found.add(str(ident))
+    return frozenset(found)
 
-    Returned unchanged, byte for byte, when nothing matched. Raises ValueError on a DOM that
-    cannot be parsed."""
+
+def scrub_dom_counted(html: str, *, sensitivity: Sensitivity) -> tuple[str, int]:
+    """scrub_dom, and how many removals or rewrites it made (Task 33's manifest records it)."""
     root = parse(html)
     scrub = _Scrub(root, deny_all=sensitivity is Sensitivity.CLIENT_CONFIDENTIAL)
     # Executable/hidden content first, so a control inside a template is gone, not judged.
@@ -465,17 +536,27 @@ def scrub_dom(html: str, *, sensitivity: Sensitivity) -> str:
     scrub.stylesheets()
     scrub.attributes()
     scrub.text()
-    if not scrub.changed:
-        return html
+    if not scrub.changes:
+        return html, 0
     doctype = root.getroottree().docinfo.doctype or None
-    return str(lxml.html.tostring(root, encoding="unicode", doctype=doctype))
+    return str(lxml.html.tostring(root, encoding="unicode", doctype=doctype)), scrub.changes
+
+
+def scrub_dom(html: str, *, sensitivity: Sensitivity) -> str:
+    """The DOM with every credential (and, at CLIENT_CONFIDENTIAL, every form value) removed.
+
+    Returned unchanged, byte for byte, when nothing matched. Raises ValueError on a DOM that
+    cannot be parsed."""
+    return scrub_dom_counted(html, sensitivity=sensitivity)[0]
 
 
 __all__ = [
     "KEPT_ATTRS",
     "credential_controls",
     "credential_node_ids",
+    "form_control_node_ids",
     "is_credential_text",
     "parse",
     "scrub_dom",
+    "scrub_dom_counted",
 ]

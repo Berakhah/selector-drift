@@ -25,18 +25,25 @@ import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import NoReturn, Protocol, SupportsIndex
 
 from bok_core.boundary.sensitivity import Labelled, Sensitivity
 from pydantic import BaseModel, ConfigDict
 
-from selector_drift.heallog.scrub import credential_node_ids, scrub_dom
+from selector_drift.heallog.scrub import (
+    credential_node_ids,
+    form_control_node_ids,
+    scrub_dom_counted,
+)
 
 # One definition (Task 13). `as NODE_ATTR` is the explicit re-export mypy --strict requires, so
 # `from selector_drift.heallog.capture import NODE_ATTR` (Tasks 33, 34C) keeps working.
 from selector_drift.resolve.page import NODE_ATTR as NODE_ATTR
 
 VIEWPORT: tuple[int, int] = (1280, 900)
+# A bound on how many nodes one screenshot may mask by id; past it the capture is refused.
+# Defined here, not in browser/, so the PII masker (Task 33) can stay under it (S-M5).
+MAX_MASKED_NODES = 2_000
 # Node ids are minted by the PageSource (Task 13): structural paths or short tokens.
 # No quote, backslash, backtick, dollar, space or brace can appear, so an id can never
 # break out of the attribute selector LiveCapture builds from it.
@@ -111,9 +118,22 @@ def credential_input_nodes(dom: str) -> frozenset[str]:
     return _credentials(dom)[0]
 
 
-def _scrubbed(dom: str, sensitivity: Sensitivity) -> str:
+def _scrubbed(dom: str, sensitivity: Sensitivity) -> tuple[str, int]:
     try:
-        return scrub_dom(dom, sensitivity=sensitivity)
+        return scrub_dom_counted(dom, sensitivity=sensitivity)
+    except ValueError as exc:
+        raise CaptureError("the captured DOM could not be parsed") from exc
+
+
+def _live_mask_ids(dom: str, mask: frozenset[str], label: Sensitivity) -> frozenset[str]:
+    """N-M4. At CLIENT_CONFIDENTIAL the live pass masks every form control by itself, so the
+    page is not asked to find those by id -- a control re-rendered since the snapshot (its id
+    stamp gone) is then masked rather than refused. They stay in Evidence.masked_node_ids: the
+    screenshot did mask them."""
+    if label is not Sensitivity.CLIENT_CONFIDENTIAL:
+        return mask
+    try:
+        return mask - form_control_node_ids(dom)
     except ValueError as exc:
         raise CaptureError("the captured DOM could not be parsed") from exc
 
@@ -148,6 +168,14 @@ class Evidence:
     masked_node_ids: frozenset[str]
     node_ids: Mapping[str, str] = field(default_factory=dict)  # field -> node_id
     boxes: Mapping[str, BBox] = field(default_factory=dict)  # field -> recorded box
+    scrubbed: int = 0  # removals the capture-time scrub made (Task 33's manifest records it)
+
+    # S-M2. Evidence is never pickled, copied or persisted as a Prefect parameter or result:
+    # every such path rebuilds it through __reduce_ex__, and a persisted copy would carry the
+    # DOM outside the evidence store's redaction. (dataclasses.asdict still unwraps the label;
+    # tests/heallog/test_evidence_boundary.py keeps Evidence out of every flow and task.)
+    def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
+        raise TypeError("Evidence is never pickled, copied or persisted outside heallog.evidence")
 
     def __post_init__(self) -> None:
         # Never-rule 6: neither half of a capture exists unlabelled, even transiently, and the
@@ -186,7 +214,7 @@ class Evidence:
         credentials, unmaskable = _credentials(html)
         _refuse_unmaskable(unmaskable)
         mask = credentials | (_call_masker(masker, html) if masker else frozenset())
-        dom = _scrubbed(html, sensitivity)
+        dom, scrubbed = _scrubbed(html, sensitivity)
         return cls(
             run_key=run_key,
             dom=Labelled(value=dom, sensitivity=sensitivity),
@@ -195,6 +223,7 @@ class Evidence:
             sha256=dom_sha256(dom),
             viewport=VIEWPORT,
             masked_node_ids=mask,
+            scrubbed=scrubbed,
         )
 
 
@@ -226,12 +255,13 @@ async def capture(
     _refuse_unmaskable(unmaskable)
     # The floor is unioned in, never replaced: a masker can only add.
     mask = _call_masker(masker, raw) | credentials
-    dom = _scrubbed(raw, label)
+    live = _live_mask_ids(raw, mask, label)
+    dom, scrubbed = _scrubbed(raw, label)
     del raw  # S-M1: drop the unscrubbed DOM before anything else can hold it
     bad = sum(1 for n in mask if not NODE_ID_RE.fullmatch(n))
     if bad:
         raise CaptureError(f"{bad} node id(s) to mask are not minted node ids")
-    shot = await page.masked_screenshot(mask_node_ids=mask, sensitivity=label)
+    shot = await page.masked_screenshot(mask_node_ids=live, sensitivity=label)
     return Evidence(
         run_key=run_key,
         dom=Labelled(value=dom, sensitivity=label),
@@ -240,6 +270,7 @@ async def capture(
         sha256=dom_sha256(dom),
         viewport=VIEWPORT,
         masked_node_ids=mask,
+        scrubbed=scrubbed,
     )
 
 

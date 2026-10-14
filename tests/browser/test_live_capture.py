@@ -289,14 +289,25 @@ def test_a_cross_origin_iframe_is_masked_wholesale(bench: Any) -> None:
 
 
 @pytest.mark.e2e
-@pytest.mark.parametrize("sensitivity", [CC, Sensitivity.SYNTHETIC], ids=str)
-def test_a_stale_mask_id_refuses_the_capture(sensitivity: Sensitivity) -> None:
+def test_a_stale_mask_id_refuses_the_capture() -> None:
     """R4.1: a credential the snapshot named, re-rendered since, would be masked by nothing."""
     html = (
         f'<html><body style="margin:0"><div id="w">{_field('type="password"')}</div></body></html>'
     )
     with pytest.raises(CaptureError, match="exactly one"):
-        _in_thread(lambda: _scenario(html, _STRIP_STAMPS, sensitivity))
+        _in_thread(lambda: _scenario(html, _STRIP_STAMPS, Sensitivity.SYNTHETIC))
+
+
+@pytest.mark.e2e
+def test_a_re_rendered_control_at_client_confidential_is_masked_not_refused() -> None:
+    """N-M4 (Task 33): at CLIENT_CONFIDENTIAL the default-deny pass masks every control by
+    itself, so a control whose id stamp was lost is masked, not a reason to refuse."""
+    html = (
+        f'<html><body style="margin:0"><div id="w">{_field('type="password"')}</div></body></html>'
+    )
+    stored, unmasked = _in_thread(lambda: _scenario(html, _STRIP_STAMPS, CC))
+    assert _magenta(unmasked) > 5_000
+    assert _magenta(stored) == 0
 
 
 @pytest.mark.e2e
@@ -511,3 +522,113 @@ def test_pixel_verification_is_not_vacuous(name: str, monkeypatch: pytest.Monkey
     html, after = SCENARIOS[name]
     _in_thread(lambda: _scenario(html, after))
     assert seen and seen[0] >= 1, f"{name}: no box was verified"
+
+
+# -- Task 33 precondition: N3-M1 (boxes re-read after the shot), N3-M2 (text-node quads),
+#    bounded decode, designMode ---------------------------------------------------------------
+
+_ON_GLASS = (
+    "new MutationObserver((ms) => {{ for (const m of ms) for (const n of m.addedNodes)"
+    " if (n.nodeType === 1 && n.localName.startsWith('x-')) {{ {action} }} }})"
+    ".observe(document, {{childList: true, subtree: true}})"
+)
+_DURING_SHOT = {
+    # The field moves when Playwright inserts its overlay: the overlay covers where it WAS.
+    "moved-when-the-overlay-is-inserted": (
+        '<html><body style="margin:0;height:1200px"><div id="w" style="position:absolute;'
+        f'top:0;left:0">{_field()}</div></body></html>',
+        _ON_GLASS.format(action="document.getElementById('w').style.top = '500px';"),
+    ),
+    # A marked form with no layout box before the shot opens in the top layer during it.
+    "popover-opened-during-the-shot": (
+        '<html><body style="margin:0"><div id="p" popover style="margin:0;padding:0;'
+        f'border:0;top:300px;left:0">{_field()}</div></body></html>',
+        _ON_GLASS.format(action="document.getElementById('p').showPopover();"),
+    ),
+}
+
+_OVERFLOW = {
+    "zero-height-contenteditable": (
+        '<html><body style="margin:0"><div contenteditable="true" style="height:0;'
+        'width:400px;font-size:48px;color:#ff00ff">MMMMMM</div></body></html>'
+    ),
+    "overflowing-contenteditable": (
+        '<html><body style="margin:0"><div contenteditable="true" style="height:20px;'
+        'width:400px;font-size:40px;line-height:44px;color:#ff00ff">MMMM<br>MMMM<br>MMMM'
+        "</div></body></html>"
+    ),
+}
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("name", list(_DURING_SHOT))
+def test_a_field_that_moves_or_appears_during_the_shot_refuses(name: str) -> None:
+    """N3-M1: verified where the field is after the shot, not only where it was before."""
+    html, during = _DURING_SHOT[name]
+    try:
+        stored, _unmasked = _in_thread(lambda: _scenario(html, during))
+    except CaptureError as refused:
+        print(f"{name}: refused ({refused})")
+        return
+    print(f"{name}: magenta stored={_magenta(stored)}")
+    assert _magenta(stored) == 0, f"{name}: {_magenta(stored)} magenta pixels leaked silently"
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("name", list(_OVERFLOW))
+def test_text_overflowing_a_marked_box_refuses(name: str) -> None:
+    """N3-M2: the quads of the text inside a marked element are verified too."""
+    html = _OVERFLOW[name]
+    try:
+        stored, _ = _in_thread(lambda: _scenario(html, None))
+    except CaptureError as refused:
+        assert "did not cover" in str(refused)
+        return
+    assert _magenta(stored) == 0, f"{name}: {_magenta(stored)} magenta pixels leaked silently"
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("name", list(_OVERFLOW))
+def test_the_overflow_scenarios_are_not_vacuous(name: str) -> None:
+    """Without the text-node quads the same pages leak: the verification above is what
+    refuses them."""
+    from selector_drift.browser import live_capture
+
+    real = live_capture._text_nodes
+    try:
+        live_capture._text_nodes = lambda marks: []  # type: ignore[assignment]
+        stored, _ = _in_thread(lambda: _scenario(_OVERFLOW[name], None))
+    finally:
+        live_capture._text_nodes = real
+    assert _magenta(stored) > 0, f"{name}: the text never overflowed -- vacuous"
+
+
+@pytest.mark.e2e
+def test_a_frame_in_design_mode_is_masked_whole() -> None:
+    body = '<body style="margin:0"><p style="' + PAINT + '">editable notes</p></body>'
+    html = (
+        '<html><body style="margin:0"><iframe style="width:400px;height:120px;border:0" '
+        f'srcdoc="{body.replace('"', "&quot;")}"></iframe></body></html>'
+    )
+    stored, unmasked = _in_thread(
+        lambda: _scenario(html, "document.querySelector('iframe').contentDocument.designMode='on'")
+    )
+    assert _magenta(unmasked) > 5_000
+    assert _magenta(stored) == 0
+
+
+@pytest.mark.e2e
+def test_a_top_document_in_design_mode_refuses() -> None:
+    html = f'<html><body style="margin:0"><p style="{PAINT}">notes</p></body></html>'
+    with pytest.raises(CaptureError, match="design mode"):
+        _in_thread(lambda: _scenario(html, "document.designMode = 'on'"))
+
+
+@pytest.mark.e2e
+def test_a_page_past_the_height_ceiling_refuses() -> None:
+    html = (
+        '<html><body style="margin:0;height:40000px"><div style="position:absolute;'
+        f'top:39000px">{_field()}</div></body></html>'
+    )
+    with pytest.raises(CaptureError, match="taller than"):
+        _in_thread(lambda: _scenario(html, None))
