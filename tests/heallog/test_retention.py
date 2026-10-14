@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,8 +10,10 @@ import pytest
 from sqlalchemy import text
 
 from selector_drift.config import get_settings
-from selector_drift.db.models import AuditLog, HealEvent, Run, ScopeRecordRow
+from selector_drift.db.models import AuditLog, HealEvent, Quarantine, Run, ScopeRecordRow
 from selector_drift.db.session import Session, engine
+from selector_drift.heallog import retention as retention_mod
+from selector_drift.heallog.evidence import last_accepted_dir
 from selector_drift.heallog.retention import evidence_retention
 from selector_drift.orchestrate.deployments import retention_deployment
 
@@ -25,7 +28,10 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     get_settings.cache_clear()
     with engine.begin() as c:
         c.execute(
-            text("TRUNCATE runs, heal_events, scope_records, audit_log RESTART IDENTITY CASCADE")
+            text(
+                "TRUNCATE runs, heal_events, scope_records, audit_log, quarantine "
+                "RESTART IDENTITY CASCADE"
+            )
         )
     yield tmp_path / "evidence"
     get_settings.cache_clear()
@@ -156,3 +162,120 @@ def test_methodology_states_the_retention_policy() -> None:
     text_ = Path("docs/methodology.md").read_text(encoding="utf-8").lower()
     assert "## retention" in text_ and "disk budget" in text_
     assert "evidence_retention_days" in text_
+
+
+# -- fix round 1 -------------------------------------------------------------------------------
+
+
+def _age_out(path: Path, days: int = 3) -> None:
+    then = (datetime.now(UTC) - dt.timedelta(days=days)).timestamp()
+    os.utime(path, (then, then))
+
+
+def _client(days: int = 90, expires: dt.date = dt.date(2027, 1, 1)) -> None:
+    with Session() as s:
+        row = _scope("client-portal", "client-authorised", days)
+        row.expires_on = expires
+        s.add(row)
+        s.commit()
+
+
+@pytest.mark.integration
+def test_a_heal_with_an_open_quarantine_is_kept(db: Path) -> None:
+    """I2: promotion needs the bundle; retention waits until the quarantine is resolved."""
+    _client()
+    heal_id = _heal(db, "client-portal", TODAY - dt.timedelta(days=200))
+    with Session() as s:
+        heal = s.get(HealEvent, heal_id)
+        assert heal is not None
+        s.add(Quarantine(run_key=heal.run_key, reason="first heal", verdicts=[], data_uri="x"))
+        s.commit()
+    assert evidence_retention.fn(today=TODAY) == 0
+    assert (db / "heals" / str(heal_id)).exists()
+    with Session() as s:
+        row = s.query(AuditLog).filter_by(action="retention_skipped").one()
+        assert row.detail["why"] == "quarantine open"
+        q = s.query(Quarantine).one()
+        q.resolved_as = "discarded"
+        s.commit()
+    assert evidence_retention.fn(today=TODAY) == 1
+    assert not (db / "heals" / str(heal_id)).exists()
+
+
+@pytest.mark.integration
+def test_every_audit_row_is_committed_before_its_delete(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I4: a crash during the delete leaves the evidence_expired row, never a silent gap."""
+    _client()
+    heal_id = _heal(db, "client-portal", TODAY - dt.timedelta(days=91))
+
+    def crash(path: object) -> None:
+        raise RuntimeError("host died mid-delete")
+
+    monkeypatch.setattr(retention_mod.shutil, "rmtree", crash)
+    with pytest.raises(RuntimeError):
+        evidence_retention.fn(today=TODAY)
+    with Session() as s:
+        row = s.query(AuditLog).filter_by(action="evidence_expired").one()
+        assert row.subject == f"heal:{heal_id}"
+
+
+@pytest.mark.integration
+def test_a_bundle_whose_uri_was_never_persisted_is_still_retained(db: Path) -> None:
+    _client()
+    heal_id = _heal(db, "client-portal", TODAY - dt.timedelta(days=91))
+    with Session() as s:
+        heal = s.get(HealEvent, heal_id)
+        assert heal is not None
+        heal.evidence_uri = None
+        s.commit()
+    assert evidence_retention.fn(today=TODAY) == 1
+    assert not (db / "heals" / str(heal_id)).exists()
+
+
+@pytest.mark.integration
+def test_unreachable_directories_are_swept_and_audited(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I3: a heals/<n> with no heal row, crash leftovers, and a last-accepted directory no
+    live scope record names."""
+    monkeypatch.setenv("SD_REDACTION_KEY", ("k" * 32).encode().hex())
+    get_settings.cache_clear()
+    _client(expires=dt.date(2026, 6, 30))  # expired before TODAY
+    orphan = db / "heals" / "999"
+    orphan.mkdir(parents=True)
+    (orphan / "after.html").write_text("<html></html>")
+    leftover = db / "heals" / ".tmp-0123abcd"
+    leftover.mkdir()
+    young = db / "heals" / ".tmp-fresh"
+    young.mkdir()
+    accepted = last_accepted_dir("client-portal")
+    accepted.mkdir(parents=True)
+    (accepted / "page.html").write_text("<html></html>")
+    for path in (orphan, leftover, accepted):
+        _age_out(path)
+    assert evidence_retention.fn(today=TODAY) == 3
+    assert not orphan.exists() and not leftover.exists() and not accepted.exists()
+    assert young.exists()  # a write in progress is never swept
+    with Session() as s:
+        actions = sorted(r.action for r in s.query(AuditLog).all())
+        subjects = " ".join(r.subject for r in s.query(AuditLog).all())
+    assert actions == [
+        "evidence_leftover_removed",
+        "evidence_orphan_removed",
+        "last_accepted_removed",
+    ]
+    assert "client-portal" not in subjects
+
+
+@pytest.mark.integration
+def test_a_live_targets_last_accepted_is_kept(db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SD_REDACTION_KEY", ("k" * 32).encode().hex())
+    get_settings.cache_clear()
+    _client()
+    accepted = last_accepted_dir("client-portal")
+    accepted.mkdir(parents=True)
+    _age_out(accepted)
+    assert evidence_retention.fn(today=TODAY) == 0
+    assert accepted.exists()
