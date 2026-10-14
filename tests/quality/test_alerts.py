@@ -1,8 +1,8 @@
 """Task 29A: the deduplicated alert channel (M2, B7, brief rule 6).
 
-Adapted from the brief: `Finding`/`Severity` come from `selector_drift._bok_shim` (bok_core.findings
-does not ship yet, INTERFACE-CONTRACT 8); `Claim`/`DomSource`/`Method` from the installed
-bok_core.provenance submodules. The database is touched only by integration tests (M26)."""
+Adapted from the brief: `Finding`/`Severity`/`to_sarif` come from `bok_core.findings`;
+`Claim`/`DomSource`/`Method` from the installed bok_core.provenance submodules. The database
+is touched only by integration tests (M26)."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from bok_core.findings import Finding, Severity, to_sarif
 from bok_core.provenance.claim import Claim, Method
 from bok_core.provenance.source import DomSource
 from sqlalchemy import text
 
-from selector_drift._bok_shim import Finding, Severity, to_sarif
 from selector_drift.config import get_settings
 from selector_drift.db.models import AuditLog, Heartbeat, Run
 from selector_drift.db.session import Session, engine
@@ -490,3 +490,16 @@ def test_the_internal_rules_titles_carry_no_free_text(httpx_mock) -> None:
     )
     assert CELL not in json.dumps(bodies)
     assert bodies["quarantine"]["title"] == f"{KEY} quarantined: data held, nothing written"
+
+
+@pytest.mark.unit
+def test_paging_never_relies_on_severity_ordering() -> None:
+    # Severity is a StrEnum with no ordering: the explicit PAGE set and rank dict carry the
+    # policy, so every ladder member must be ranked and PAGE must be drawn from the ladder.
+    from selector_drift.quality.alerts import _RANK, PAGE
+
+    assert set(_RANK) == set(Severity)
+    assert len(set(_RANK.values())) == len(Severity)
+    assert PAGE.issubset(Severity)
+    assert frozenset({Severity.CRITICAL, Severity.HIGH}) == PAGE
+    assert all(_RANK[p] < _RANK[o] for p in PAGE for o in set(Severity) - PAGE)
