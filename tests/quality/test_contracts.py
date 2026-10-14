@@ -2,10 +2,10 @@ import datetime as dt
 import json
 
 import pytest
+from bok_core.findings import Finding, Severity, to_sarif
 from bok_core.provenance.claim import Method
 from bok_core.provenance.source import DomSource
 
-from selector_drift._bok_shim import Finding, Severity, to_sarif
 from selector_drift.db.models import AuditLog, FindingRow
 from selector_drift.db.session import Session
 from selector_drift.quality.contracts import (
@@ -291,6 +291,12 @@ def test_findings_export_through_the_shared_sarif_emitter(land):
     results = sarif["runs"][0]["results"]
     assert [r["properties"]["bok_severity"] for r in results] == [f.severity.value for f in fs]
     assert all("bok_provenance" in r["properties"] for r in results)
+    # The real emitter's rail shape: a RailPayload (root / depth / inherited_caveats).
+    assert all(
+        set(r["properties"]["bok_provenance"]) == {"root", "depth", "inherited_caveats"}
+        for r in results
+    )
+    assert all(r["properties"]["bok_provenance"]["root"]["parents"] is not None for r in results)
 
 
 @pytest.mark.integration
