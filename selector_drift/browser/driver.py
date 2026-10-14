@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Mapping
+import re
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
 from bok_core.boundary.sensitivity import Labelled
@@ -30,11 +32,18 @@ from playwright.async_api import Page, async_playwright
 # bind the original at import time and make every one of those patches vacuous.
 from selector_drift.browser import allowlist, ratelimit, registry
 from selector_drift.browser.allowlist import OffScopeNavigation, RequestLedger
+from selector_drift.credentials.provider import Credentials
 from selector_drift.heallog.capture import VIEWPORT
 from selector_drift.scope.errors import ScopeRefusal
 from selector_drift.scope.record import AuthorisedTarget
 
+if TYPE_CHECKING:
+    # Playwright exports this TypedDict only from its private module; types only.
+    from playwright._impl._api_structures import SetCookieParam as _Cookie
+
 _NO_SANDBOX_ENV = "SD_CHROMIUM_NO_SANDBOX"
+_FIELD = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # a form field name, never a selector
+_ROLE = re.compile(r"^[a-z]{2,20}$")  # an ARIA role name (spec.schema.NavStep)
 
 
 def _agent_version() -> str:
@@ -129,6 +138,32 @@ class PageHandle:
             raise
         self._ledger.raise_if_off_scope()
 
+    async def click_role(self, role: str, name: str) -> None:
+        """A spec's `click` step: the element with this ARIA role and exact accessible name.
+        It owns the rate-limit token, like `click()` (ruling, Important 5): a click may
+        navigate, and navigate.run_steps takes no token of its own."""
+        if not _ROLE.fullmatch(role):
+            raise ValueError(f"{role!r} is not an ARIA role name")
+        self._ledger.raise_if_off_scope()
+        await asyncio.to_thread(ratelimit.acquire, self._target)
+        try:
+            await self._page.get_by_role(role, name=name, exact=True).click()  # type: ignore[arg-type]
+            await self._page.wait_for_load_state("load")
+        except PlaywrightError as exc:
+            error = self._ledger.off_scope_error()
+            if error is not None:
+                raise error from exc
+            raise
+        self._ledger.raise_if_off_scope()
+
+    async def fill_field(self, field: str, value: str) -> None:
+        """A spec's `fill` step: the form control named `field`. Never navigates, so it takes
+        no rate-limit token. The value may be a credential: it is never logged or raised."""
+        if not _FIELD.fullmatch(field):
+            raise ValueError("fill takes a plain form field name, never a selector")
+        self._ledger.raise_if_off_scope()
+        await self._page.locator(f"[name='{field}']").fill(value)
+
     async def goto_step(self, step: Mapping[str, object]) -> None:
         """`{"step": "goto", "path": "/results"}` -- a path, resolved against the registry URL."""
         self._ledger.raise_if_off_scope()
@@ -162,11 +197,29 @@ class Session:
         return list(self._ledger.blocked_urls)
 
 
+def _playwright_cookies(cookies: Sequence[Mapping[str, Any]]) -> list[_Cookie]:
+    """The provider has already narrowed every cookie to a host-only clone for an authorised
+    host (credentials.provider.select_cookies, H2): `domain` with no leading dot, which Chromium
+    stores host-only. A `__Host-` cookie passes through as it is -- host-only, Secure, Path=/ is
+    exactly what its prefix demands, and Chromium refuses the `url=` form for it on an http
+    origin. Both properties are pinned on the wire by tests/browser/test_session_cookies.py
+    (Task 26A carried item). A parent-domain cookie that somehow reached here is refused."""
+    out: list[_Cookie] = []
+    for raw in cookies:
+        if str(raw.get("domain", "")).startswith("."):
+            raise ValueError("a cookie reached the driver scoped to a parent domain (H2)")
+        out.append(dict(raw))  # type: ignore[arg-type]
+    return out
+
+
 @asynccontextmanager
-async def open(target: AuthorisedTarget) -> AsyncIterator[Session]:
+async def open(
+    target: AuthorisedTarget, credentials: Credentials | None = None
+) -> AsyncIterator[Session]:
     """One run: one browser, one context, the target's registry URL loaded, torn down on exit.
 
-    No credentials parameter yet -- `Credentials` arrives with Task 31."""
+    `credentials.cookies` (session injection, Task 31) are added to the context before the
+    first request; a username and password are used only by navigate.run_steps' fill steps."""
     if not isinstance(target, AuthorisedTarget):
         raise TypeError("open() takes an AuthorisedTarget minted by scope.gate.authorise()")
     # Authorised yesterday is not authorised today: a long-lived orchestrator may hold a
@@ -194,6 +247,8 @@ async def open(target: AuthorisedTarget) -> AsyncIterator[Session]:
             )
             try:
                 await allowlist.install(context, target, ledger)
+                if credentials is not None and credentials.cookies:
+                    await context.add_cookies(_playwright_cookies(credentials.cookies))
                 page = await context.new_page()
                 handle = PageHandle(page, target, base, ledger)
                 await asyncio.to_thread(ratelimit.acquire, target)
