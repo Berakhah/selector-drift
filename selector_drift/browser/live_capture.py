@@ -42,6 +42,24 @@ the snapshot string (fix round 1, R4 / S-I1), and it fails closed:
    Verification is the control; Playwright's mask is not replaced by self-painting.
 7. Marking and clearing are one CDP call per node, so each pass also has an overall deadline
    (PASS_DEADLINE_S); clearing reuses the mark list rather than re-reading the tree.
+8. Task 33 precondition (N3-M1, N3-M2), before the first CLIENT_CONFIDENTIAL write:
+   - the boxes are read BEFORE and AGAIN AFTER the shot, and the union must be black -- a field
+     that moved while the overlay was inserted, or a marked form that only got a layout box
+     during the shot (a top-layer dialog or popover), shows colour in its post-shot box;
+   - besides each marked node's own quads, the quads of every non-blank TEXT node inside it
+     (light DOM and shadow roots) must be black -- ink overflowing a marked element's box (a
+     zero-height or overflowing contenteditable) is otherwise neither masked nor verified.
+     Clipped text whose quads extend past a clipping box can cause a false refusal, never a
+     pass with colour in it. At most MAX_TEXT_QUADS text nodes; past it the capture refuses;
+   - the PNG is decoded off the event loop (asyncio.to_thread) under VERIFY_DEADLINE_S, a page
+     past png.MAX_HEIGHT_PX is refused, and only the rows down to the lowest box are inflated.
+9. document.designMode (CLIENT_CONFIDENTIAL only): read per frame in an isolated world (page
+   script cannot patch it there). A frame in design mode is masked whole by its owner element;
+   the top document in design mode -- or a frame whose mode cannot be read -- refuses or masks
+   whole, failing closed.
+
+MAX_MASKED_NODES is defined in heallog.capture (heallog may not import browser/), so the PII
+masker (Task 33) can stay under the same bound by masking containers rather than every cell.
 
 PUBLIC and SYNTHETIC captures keep the heuristic floor (step 1 and the step-3 count), per the
 R4 ruling, plus step 6 whenever they mask anything. Chromium only: without CDP a capture that
@@ -66,11 +84,18 @@ from playwright.async_api import Error as PlaywrightError
 from selector_drift.browser import png
 from selector_drift.browser.driver import PageHandle, _playwright_page
 from selector_drift.browser.page_source import MAX_SNAPSHOT_NODES
-from selector_drift.heallog.capture import NODE_ATTR, NODE_ID_RE, BBox, CaptureError, raised
+from selector_drift.heallog.capture import (
+    MAX_MASKED_NODES,
+    NODE_ATTR,
+    NODE_ID_RE,
+    BBox,
+    CaptureError,
+    raised,
+)
 
 CALL_TIMEOUT_S = 30
-# A bound on how many nodes one screenshot may mask by id; past it the capture is refused.
-MAX_MASKED_NODES = 2_000
+# A bound on how many nodes one screenshot may mask by id is heallog.capture.MAX_MASKED_NODES.
+__all__ = ["MAX_MASKED_NODES", "LiveCapture"]
 # Light-DOM elements the live pass accepts before transferring the pierced tree.
 LIVE_MAX_NODES = MAX_SNAPSHOT_NODES
 # Elements one capture may mark (form controls + whole-masked containers + ids).
@@ -80,6 +105,12 @@ MASK_ATTR = "data-sd-mask"
 PASS_DEADLINE_S = 60
 # Pixels trimmed from each side of a box before it must be black (anti-aliased edges).
 VERIFY_INSET_PX = 2
+# Text nodes inside marked elements whose quads are verified (N3-M2); past it, refuse.
+MAX_TEXT_QUADS = 20_000
+# The PNG decode and pixel check run off the event loop under this deadline.
+VERIFY_DEADLINE_S = 60
+_DESIGN_WORLD = "sd-design-mode"
+_UNRENDERED_TEXT_PARENTS = frozenset({"script", "style", "noscript", "template", "title"})
 
 Box = tuple[float, float, float, float]  # x0, y0, x1, y1 in full-page CSS px
 
@@ -202,6 +233,40 @@ def _classify(
     return marks, id_hits, seen
 
 
+def _text_nodes(marks: list[dict[str, Any]]) -> list[int]:
+    """Backend ids of every non-blank text node inside the marked elements (their light DOM
+    and every non-user-agent shadow root; never a frame's document, which its owner clips),
+    skipping text that is never rendered (script, style, ...)."""
+    found: list[int] = []
+    seen: set[int] = set()
+    stack: list[tuple[dict[str, Any], str]] = []
+
+    def push(node: dict[str, Any], tag: str) -> None:
+        stack.extend((child, tag) for child in node.get("children") or [])
+        stack.extend(
+            (root, tag)
+            for root in node.get("shadowRoots") or []
+            if root.get("shadowRootType") in ("open", "closed")
+        )
+
+    for mark in marks:
+        push(mark, str(mark.get("localName") or mark.get("nodeName", "")).lower())
+    try:
+        while stack:
+            node, parent = stack.pop()
+            if node.get("nodeType") == 3:
+                text = str(node.get("nodeValue") or "")
+                backend = int(node["backendNodeId"])
+                if text.strip() and parent not in _UNRENDERED_TEXT_PARENTS and backend not in seen:
+                    seen.add(backend)
+                    found.append(backend)
+                continue
+            push(node, str(node.get("localName") or "").lower() or parent)
+    except (KeyError, TypeError, ValueError):
+        raise CaptureError("CDP returned a malformed text node; refusing") from None
+    return found
+
+
 class _Cdp:
     """One CDP session; every failure, timeout and malformed reply is a CaptureError."""
 
@@ -299,17 +364,79 @@ class LiveCapture:
             if id_hits[node_id] != 1:
                 raise _stale(id_hits[node_id])
 
-    async def _mark_cc(self, cdp: _Cdp, ids: frozenset[str], nonce: str) -> list[int]:
+    async def _design_mode_owners(self, cdp: _Cdp) -> list[int]:
+        """Backend ids of the owner elements of every frame in design mode (fix 9).
+
+        Read per frame in an isolated world, where page script cannot patch `document`. A
+        child frame whose mode cannot be read is masked whole too; the top document in design
+        mode -- or unreadable -- refuses (there is no owner to mask)."""
+        tree = await cdp.send("Page.getFrameTree", {})
+        frames: list[tuple[str, bool]] = []
+        try:
+            stack: list[tuple[dict[str, Any], bool]] = [(tree["frameTree"], True)]
+            while stack:
+                node, top = stack.pop()
+                frames.append((str(node["frame"]["id"]), top))
+                stack.extend((child, False) for child in node.get("childFrames") or [])
+        except (KeyError, TypeError):
+            raise CaptureError("CDP returned a malformed frame tree; refusing") from None
+        owners: list[int] = []
+        for frame_id, top in frames:
+            mode: object = None
+            world = await cdp.optional(
+                "Page.createIsolatedWorld", {"frameId": frame_id, "worldName": _DESIGN_WORLD}
+            )
+            if world is not None and "executionContextId" in world:
+                reply = await cdp.optional(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "document.designMode",
+                        "contextId": world["executionContextId"],
+                        "returnByValue": True,
+                    },
+                )
+                result = (reply or {}).get("result")
+                mode = result.get("value") if isinstance(result, dict) else None
+            if mode == "off":
+                continue
+            if top:
+                raise CaptureError(
+                    "the page is in design mode (or its mode cannot be read): its whole text is "
+                    "editable and cannot be masked; refusing"
+                )
+            owner = await cdp.send("DOM.getFrameOwner", {"frameId": frame_id})
+            try:
+                owners.append(int(owner["backendNodeId"]))
+            except (KeyError, TypeError, ValueError):
+                raise CaptureError("CDP returned a malformed frame owner; refusing") from None
+        return owners
+
+    async def _mark_cc(
+        self, cdp: _Cdp, ids: frozenset[str], nonce: str
+    ) -> tuple[list[int], list[int]]:
         """Classify and mark; returns the marked nodes' backend ids (stable across the later
-        DOM.getDocument calls, which invalidate frontend node ids)."""
+        DOM.getDocument calls, which invalidate frontend node ids), and the backend ids of the
+        text nodes inside them (N3-M2)."""
+        design = await self._design_mode_owners(cdp)
         marks, id_hits, _ = _classify(await cdp.tree(), ids)
         self._check_ids(ids, id_hits)
-        if len(marks) > MAX_LIVE_MARKS:
-            raise CaptureError(f"{len(marks)} elements to mask exceeds {MAX_LIVE_MARKS}; refusing")
         try:
             pairs = [(int(n["nodeId"]), int(n["backendNodeId"])) for n in marks]
         except (KeyError, TypeError, ValueError):
             raise CaptureError("CDP returned a malformed node; refusing") from None
+        texts = _text_nodes(marks)
+        seen = {backend for _node, backend in pairs}
+        extra = [b for b in design if b not in seen]
+        if extra:
+            pushed = await cdp.send(
+                "DOM.pushNodesByBackendIdsToFrontend", {"backendNodeIds": extra}
+            )
+            node_ids = pushed.get("nodeIds") or []
+            if len(node_ids) != len(extra) or not all(node_ids):
+                raise CaptureError("a design-mode frame owner could not be resolved; refusing")
+            pairs += [(int(n), b) for n, b in zip(node_ids, extra, strict=True)]
+        if len(pairs) > MAX_LIVE_MARKS:
+            raise CaptureError(f"{len(pairs)} elements to mask exceeds {MAX_LIVE_MARKS}; refusing")
 
         async def mark_all() -> None:
             for node_id, _backend in pairs:
@@ -319,7 +446,7 @@ class LiveCapture:
                 )
 
         await _deadline(mark_all(), "the mark pass")
-        return [backend for _node, backend in pairs]
+        return [backend for _node, backend in pairs], texts
 
     async def _unmarked_cc(self, cdp: _Cdp, ids: frozenset[str], nonce: str) -> int:
         marks, id_hits, _ = _classify(await cdp.tree(), ids)
@@ -341,8 +468,9 @@ class LiveCapture:
 
         await _deadline(clear_all(), "the clear pass")
 
-    async def _marked_by_selector(self, cdp: _Cdp, nonce: str) -> list[dict[str, int]]:
-        """PUBLIC/SYNTHETIC: the id pass marked in page script; find those nodes over CDP."""
+    async def _marked_by_selector(self, cdp: _Cdp, nonce: str) -> tuple[list[int], list[int]]:
+        """PUBLIC/SYNTHETIC: the id pass marked in page script; find those nodes over CDP, as
+        backend ids, with the text nodes inside them (N3-M2)."""
         try:
             shallow = await cdp.send("DOM.getDocument", {"depth": 0})
             root_id = int(shallow["root"]["nodeId"])
@@ -350,14 +478,21 @@ class LiveCapture:
                 "DOM.querySelectorAll",
                 {"nodeId": root_id, "selector": f'[{MASK_ATTR}="{nonce}"]'},
             )
-            return [{"nodeId": int(n)} for n in found["nodeIds"]]
+            nodes: list[dict[str, Any]] = []
+            for node_id in found["nodeIds"]:
+                described = await cdp.send(
+                    "DOM.describeNode", {"nodeId": int(node_id), "depth": -1, "pierce": True}
+                )
+                nodes.append(described["node"])
+            backend = [int(n["backendNodeId"]) for n in nodes]
         except (KeyError, TypeError, ValueError):
             raise CaptureError("CDP returned a malformed document; refusing") from None
+        return backend, _text_nodes(nodes)
 
-    # -- pixel verification (fix round 3) ------------------------------------------------------
+    # -- pixel verification (fix round 3; Task 33 N3-M1/N3-M2) -------------------------------
     @staticmethod
-    async def _boxes(cdp: _Cdp, targets: list[dict[str, int]]) -> tuple[list[Box], float]:
-        """Every marked node's quads as full-page boxes, and the page's CSS width."""
+    async def _boxes(cdp: _Cdp, backend: list[int]) -> tuple[list[Box], float]:
+        """Every target node's quads as full-page boxes, and the page's CSS width."""
         try:
             metrics = await cdp.send("Page.getLayoutMetrics", {})
             viewport = metrics["cssLayoutViewport"]
@@ -366,17 +501,21 @@ class LiveCapture:
         except (KeyError, TypeError, ValueError):
             raise CaptureError("CDP returned malformed layout metrics; refusing") from None
         boxes: list[Box] = []
-        for target in targets:
-            reply = await cdp.optional("DOM.getContentQuads", dict(target))
-            if reply is None:
-                continue  # no layout box: it painted nothing
-            try:
-                for quad in reply.get("quads") or []:
-                    xs = [float(v) for v in quad[0::2]]
-                    ys = [float(v) for v in quad[1::2]]
-                    boxes.append((min(xs) + ox, min(ys) + oy, max(xs) + ox, max(ys) + oy))
-            except (TypeError, ValueError):
-                raise CaptureError("CDP returned a malformed quad; refusing") from None
+
+        async def read_all() -> None:
+            for target in backend:
+                reply = await cdp.optional("DOM.getContentQuads", {"backendNodeId": target})
+                if reply is None:
+                    continue  # no layout box: it painted nothing
+                try:
+                    for quad in reply.get("quads") or []:
+                        xs = [float(v) for v in quad[0::2]]
+                        ys = [float(v) for v in quad[1::2]]
+                        boxes.append((min(xs) + ox, min(ys) + oy, max(xs) + ox, max(ys) + oy))
+                except (TypeError, ValueError):
+                    raise CaptureError("CDP returned a malformed quad; refusing") from None
+
+        await _deadline(read_all(), "reading the mask boxes")
         return boxes, width
 
     @staticmethod
@@ -384,10 +523,15 @@ class LiveCapture:
         if not boxes:
             return
         try:
-            header = png.decode(shot, rows_needed=0)
+            header = png.header(shot)
             scale = header.width / css_width if css_width > 0 else 1.0
             bottom = max(math.ceil(y1 * scale) for _, _, _, y1 in boxes)
             image = png.decode(shot, rows_needed=min(header.height, bottom + 1))
+        except png.TooLarge:
+            raise CaptureError(
+                f"the page is taller than {png.MAX_HEIGHT_PX} px (or wider than "
+                f"{png.MAX_WIDTH_PX} px), too large to verify its mask; refusing"
+            ) from None
         except ValueError:
             raise CaptureError("the masked screenshot could not be decoded; refusing") from None
         uncovered = 0
@@ -403,8 +547,20 @@ class LiveCapture:
         if uncovered:
             raise CaptureError(
                 f"the mask did not cover {uncovered} marked box(es) in the screenshot "
-                "(overlay removed or hidden?); refusing"
+                "(overlay removed or hidden, or the content moved or overflowed?); refusing"
             )
+
+    async def _verify(self, shot: bytes, boxes: list[Box], css_width: float) -> None:
+        """Off the event loop, under a deadline (Task 33 precondition)."""
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self._verify_pixels, shot, boxes, css_width),
+                VERIFY_DEADLINE_S,
+            )
+        except TimeoutError:
+            raise CaptureError(
+                f"verifying the mask took over {VERIFY_DEADLINE_S}s; refusing"
+            ) from None
 
     # -- the screenshot ----------------------------------------------------------------------
     def _masks(self, nonce: str) -> list[Locator]:
@@ -439,22 +595,29 @@ class LiveCapture:
         cdp = await self._cdp() if deny_all or ids else None
         backend: list[int] = []
         try:
-            targets: list[dict[str, int]] = []
+            targets: list[int] = []  # marked nodes, by backend id
+            texts: list[int] = []  # text nodes inside them (N3-M2)
             if deny_all and cdp is not None:
-                backend = await self._mark_cc(cdp, mask_node_ids, nonce)
+                backend, texts = await self._mark_cc(cdp, mask_node_ids, nonce)
                 marked = len(backend)
-                targets = [{"backendNodeId": b} for b in backend]
+                targets = backend
             else:
                 await self._id_pass("mark", ids, nonce)
                 marked = len(ids)
                 if cdp is not None:
-                    targets = await self._marked_by_selector(cdp, nonce)
+                    targets, texts = await self._marked_by_selector(cdp, nonce)
+            if len(texts) > MAX_TEXT_QUADS:
+                raise CaptureError(
+                    f"{len(texts)} text nodes inside masked elements exceeds {MAX_TEXT_QUADS}; "
+                    "refusing"
+                )
             visible = await self._visible_marks(nonce)
             if visible != marked:
                 raise CaptureError(
                     f"{marked} elements were marked but the mask can see {visible}; refusing"
                 )
-            boxes, css_width = await self._boxes(cdp, targets) if cdp is not None else ([], 0.0)
+            verify = targets + texts
+            before, css_width = await self._boxes(cdp, verify) if cdp is not None else ([], 0.0)
             try:
                 shot = await self._page.screenshot(
                     full_page=True,
@@ -467,6 +630,9 @@ class LiveCapture:
                 )
             except PlaywrightError:
                 raise CaptureError("the masked screenshot failed; refusing") from None
+            # N3-M1: the boxes again, AFTER the shot -- a field that moved, or only got a box,
+            # while the shot was taken is checked where it is now as well as where it was.
+            after, _ = await self._boxes(cdp, verify) if cdp is not None else ([], 0.0)
             if deny_all and cdp is not None:
                 late = await self._unmarked_cc(cdp, mask_node_ids, nonce)
             else:
@@ -475,7 +641,7 @@ class LiveCapture:
                 raise CaptureError(
                     f"{late} element(s) needing a mask appeared during the screenshot; refusing"
                 )
-            self._verify_pixels(shot, boxes, css_width)
+            await self._verify(shot, before + after, css_width)
             return shot
         finally:
             # Removing our marks is housekeeping; the outcome is already decided.
