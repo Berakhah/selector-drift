@@ -92,6 +92,7 @@ from selector_drift.heallog.capture import (
     CaptureError,
     raised,
 )
+from selector_drift.heallog.scrub import EDITABLE_ROLES
 
 CALL_TIMEOUT_S = 30
 # A bound on how many nodes one screenshot may mask by id is heallog.capture.MAX_MASKED_NODES.
@@ -185,7 +186,9 @@ def _needs_mask(node: dict[str, Any], ids: frozenset[str], id_hits: Counter[str]
     by_id = hit is not None and hit in ids
     if by_id and hit is not None:
         id_hits[hit] += 1
-    editable = "contenteditable" in attrs and attrs["contenteditable"].lower() != "false"
+    editable = (
+        "contenteditable" in attrs and attrs["contenteditable"].lower() != "false"
+    ) or attrs.get("role", "").strip().lower() in EDITABLE_ROLES
     control = (tag == "input" and attrs.get("type", "text").lower() != "hidden") or (
         tag in _CONTROL_TAGS
     )
