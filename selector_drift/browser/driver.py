@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from urllib.parse import urljoin
 
+from bok_core.boundary.sensitivity import Labelled
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page, async_playwright
 
@@ -107,9 +108,11 @@ class PageHandle:
     def url(self) -> str:
         return self._page.url
 
-    async def content(self) -> str:
+    async def content(self) -> Labelled[str]:
+        """The raw DOM, labelled with the target's sensitivity where it is read (S-M6). It is
+        unscrubbed: nothing may persist it -- evidence goes through heallog.evidence.store."""
         self._ledger.raise_if_off_scope()
-        return await self._page.content()
+        return Labelled(await self._page.content(), self._target.sensitivity)
 
     async def click(self, selector: str) -> None:
         """A click may navigate, so it takes a rate-limit token first; if it tried to leave the

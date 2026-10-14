@@ -39,7 +39,7 @@ def test_the_registry_knows_exactly_the_three_day_one_targets():
 @pytest.mark.asyncio
 async def test_open_loads_a_page(authorised_testbench):
     async with browser.driver.open(authorised_testbench) as session:
-        assert "<html" in (await session.page.content()).lower()
+        assert "<html" in (await session.page.content()).value.lower()
 
 
 @pytest.mark.integration
@@ -82,7 +82,7 @@ async def test_an_off_origin_iframe_is_aborted_but_is_not_a_scope_violation(
     widget = f"{bench.off_origin}/widget"
     async with browser.driver.open(authorised_testbench) as session:
         await session.page.goto_step({"step": "goto", "path": "/framed"})
-        assert "host page" in await session.page.content()
+        assert "host page" in (await session.page.content()).value
         assert widget in session.blocked_urls, session.blocked_urls
     assert (f"127.0.0.1:{bench.port}", "/framed") in bench.seen
     assert not [s for s in bench.seen if s[0].startswith("localhost")], bench.seen
@@ -97,7 +97,7 @@ async def test_a_landing_page_with_an_off_origin_iframe_opens(
         "selector_drift.browser.registry.url_for", lambda _target: f"{bench.base_url}framed"
     )
     async with browser.driver.open(authorised_testbench) as session:
-        assert "host page" in await session.page.content()
+        assert "host page" in (await session.page.content()).value
         assert f"{bench.off_origin}/widget" in session.blocked_urls, session.blocked_urls
     assert not [s for s in bench.seen if s[0].startswith("localhost")], bench.seen
 
