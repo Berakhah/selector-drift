@@ -93,3 +93,80 @@ The selector cache holds one selector per field, so a portal that flips between 
 ## Value attacks on correct nodes: a known limit
 
 A value attack on the right nodes (the bench's `ValueSwap`) is refused only once a target has history: on its first run there is no accepted run for `RowKeyContinuity` to compare against, so it is written (pinned by `tests/suite/test_adversarial_refused.py`).
+
+## Retention
+
+| Store | self-owned target | client-authorised target |
+|---|---|---|
+| `evidence/last-accepted/<target>/` | overwritten on every accepted run; one copy | same |
+| `evidence/heals/<heal_id>/` | kept for the life of the log | deleted after the scope record's `evidence_retention_days` (required for this basis; 90 offered by default) |
+
+Deletion is done by the daily `evidence-retention` Prefect deployment (03:30 UTC). Each deletion
+writes an `audit_log` row (`action = evidence_expired`); the `heal_events` row and every published
+count remain, and the heal screen reads the bundle as *expired* rather than *corrupted*. A heal
+whose target has no scope record is kept and audited (`retention_skipped`), never deleted on a
+guess. The directory deleted is derived from the heal's integer id under the evidence root, never
+from the stored `evidence_uri`, and a bundle that is a link is skipped and audited.
+
+On disk the last-accepted directory is not named after the target: it is
+`last-accepted/t-<keyed digest of the target>`, so no listing or error message names a client.
+The digest is keyed with `SD_REDACTION_KEY`; rotating that key orphans every last-accepted page,
+and the next heal of each target then records no *before* half (not a corrupted one).
+
+**Disk budget.** One heal bundle is two redacted HTML snapshots and two full-page PNGs at 1280 px
+wide — budget 4 MB. The VM (P-4) reserves 20 GB for `evidence/` and `lake/` together; at the bench's
+observed heal rate the ninety-day log needs well under 2 GB. `du -sh evidence lake` is checked at
+each weekly publish and the figure is recorded in the published log's changelog. Per-file caps
+bound any single read: manifest 2 MiB, HTML 20 MiB, PNG 50 MiB; a capture over a cap is refused,
+never truncated.
+
+## Evidence redaction: what it does not catch
+
+Evidence goes through one path (`heallog/evidence.py`): the shared scrubber, bok-core `redact()`,
+a structural check that the screenshot masked every identifier and credential node, then
+`egress.write_guarded` for every file. These are the gaps that path does **not** close, stated so
+that no published claim outruns them.
+
+- **Person names and addresses are not detected.** bok-core's detectors cover emails, IBANs,
+  phones, digit runs, cards, tax ids, routing and account numbers (`redact.COVERED`); person
+  names and addresses are `redact.NOT_COVERED`. At CLIENT_CONFIDENTIAL every form value is
+  removed structurally (default-deny), but a name or address printed as page text survives in
+  the stored HTML and is not masked in the screenshot. This is why a client bundle is stored as
+  CLIENT_CONFIDENTIAL on the CLIENT plane and never published, whatever its redaction block says.
+  `test_a_person_name_does_not_survive_into_stored_evidence` is a strict xfail until bok-core
+  ships the detector.
+- **Redaction works on the serialised HTML.** An identifier split by markup
+  (`1234<span></span>5678`) is not one run to the redactor. The screenshot masker reads rendered
+  text the way it paints and masks such an element, but the stored HTML keeps the split digits.
+- **Redaction changes identifiers the heal screen shows.** Every 8+ digit run and long upper-case
+  code (claim numbers, amounts) becomes a keyed surrogate. Heals replay on the redacted snapshot
+  (`test_a_heal_replays_from_its_redacted_bundle`); a value assertion cannot be re-checked from
+  evidence.
+- **The manifest digest is a plain sha256** (the API spec 7.2 shape). It detects corruption, not
+  tampering: anyone who can write the CLIENT-plane store can rewrite a file and its manifest
+  together. That person already holds every piece of evidence, so a keyed digest would protect
+  nothing they could not read; it would matter only if bundles were shipped elsewhere.
+- **The manifest is not redacted.** It holds only system-minted values — run keys, minted node
+  ids, field names, boxes, counts — each validated before it is written.
+- **A long opaque token inside `title` / `aria-label` / `alt` / `placeholder` is kept** (Task 19
+  N-I1 ruling): the rungs read those attributes, so only JWTs, bearer tokens, credential header
+  values and URLs are removed from them.
+- **Over-masked credential-like inputs.** The credential predicate is deliberately wide; a value
+  it blanks is gone from the stored DOM, so a heal that extracted such an input's value would
+  replay differently from the live run. No current target extracts one.
+- **The masker sees the raw DOM.** `PiiMasker` never logs and never puts DOM text in an
+  exception, and `capture()` wraps whatever a masker raises; a custom masker must keep the same
+  rule.
+- **Time budget.** Redaction is never skipped or truncated to meet a deadline: a DOM over the
+  HTML cap is refused and the run records it. bok-core's measured cost is about 1.2 s per MB of
+  DOM, up to ~16 s/MB on adversarial input.
+- **Screenshot verification refuses, it does not repair.** Pixel verification checks every masked
+  element's box before and after the shot and the boxes of the text inside it; text clipped by
+  an `overflow: hidden` ancestor can make a clean capture refuse (a false refusal, never a pass
+  with colour in a box). Pages taller than 32 768 px are refused. A frame in `designMode` is
+  masked whole and a top document in `designMode` refuses — at CLIENT_CONFIDENTIAL only;
+  SYNTHETIC and PUBLIC pages keep the heuristic floor.
+- **getBoundingClientRect.** Recorded boxes come from the page's own `getBoundingClientRect`
+  (a source-text assertion pins that, per the Task 19 brief); page script could misreport them.
+  They are display hints for the heal screen, not part of the mask, which is classified and
+  verified over CDP.

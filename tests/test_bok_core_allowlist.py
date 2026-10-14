@@ -5,8 +5,14 @@ from pathlib import Path
 import pytest
 
 # One line per submodule a task legitimately needs.
-# Task 33 adds "bok_core.boundary.redact" and "bok_core.boundary.egress".
-ALLOWED = {"bok_core.boundary.sensitivity", "bok_core.findings", "bok_core.provenance"}
+# Task 33 added "bok_core.boundary.redact" and "bok_core.boundary.egress" (evidence storage).
+ALLOWED = {
+    "bok_core.boundary.egress",
+    "bok_core.boundary.redact",
+    "bok_core.boundary.sensitivity",
+    "bok_core.findings",
+    "bok_core.provenance",
+}
 
 # From this file, never the cwd: run from anywhere else, a cwd-relative glob finds nothing and
 # the test passes vacuously.
