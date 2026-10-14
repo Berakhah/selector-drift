@@ -134,3 +134,46 @@ def test_the_hook_never_raises_even_if_post_alert_itself_fails(monkeypatch) -> N
     monkeypatch.setattr("selector_drift.orchestrate.flows.post_alert", boom)
     flow_run = _FakeFlowRun(parameters={"spec_path": "specs/testbench.yaml"})
     alert_on_flow_failure(None, flow_run, _FakeState(RuntimeError("boom")))  # type: ignore[arg-type]  # must not raise
+
+
+@pytest.mark.integration
+def test_the_hook_records_an_attempt_the_body_never_settled(db, monkeypatch) -> None:
+    """Task 26A: a crash or timeout the flow body's `except` never saw leaves the attempt
+    `started`. The on_failure hook records it failed, with the state's message, and still
+    alerts once."""
+    import datetime as dt
+    from pathlib import Path
+
+    from selector_drift.config import get_settings
+    from selector_drift.db.models import Run, RunAttempt
+    from selector_drift.db.session import Session
+    from selector_drift.orchestrate.run_record import record_attempt
+
+    monkeypatch.setenv("SD_SPEC_DIR", str(Path(__file__).resolve().parents[2] / "specs"))
+    get_settings.cache_clear()
+    calls: list[tuple[str, str, str | None, str]] = []
+    monkeypatch.setattr(
+        "selector_drift.orchestrate.flows.post_alert",
+        lambda kind, target, run_key, summary: calls.append((kind, target, run_key, summary)),
+    )
+    slot = dt.datetime(2026, 9, 7, 4, 12, tzinfo=dt.UTC)
+    key = "testbench:2:2026-09-07"
+    record_attempt(key, 1, "started", None, "0" * 64)
+
+    @dataclass
+    class _Timed(_FakeFlowRun):
+        expected_start_time: dt.datetime | None = None
+
+    @dataclass
+    class _TimedOut(_FakeState):
+        message: str = "Flow run exceeded timeout of 600.0 second(s)"
+
+    flow_run = _Timed(parameters={"spec_path": "specs/testbench.yaml"}, expected_start_time=slot)
+    alert_on_flow_failure(None, flow_run, _TimedOut(TimeoutError("timed out")))  # type: ignore[arg-type]
+    with Session() as s:
+        attempt = s.query(RunAttempt).filter_by(run_key=key, attempt=1).one()
+        run = s.get(Run, key)
+    assert (attempt.state, attempt.error) == ("failed", _TimedOut.message)
+    assert attempt.finished_at is not None and run is not None and run.state == "failed"
+    assert [c[0] for c in calls] == ["failed"]
+    get_settings.cache_clear()
