@@ -209,9 +209,12 @@ def settle(
         )
 
     if isinstance(result, ValidatedExtraction):
+        # Only a heal changes what a field's selector is. A rung-1 hit already IS its cache
+        # entry; re-writing it would only move set_by_run_key off the run that set it.
+        healed = {name: el for name, el in elements.items() if el.rung_id != 1}
         accept(
             result,
-            elements,
+            healed,
             cache=cache,
             attempt=attempt,
             commit_last_accepted=lambda: write_last_accepted(redacted, target.target, Plane.CLIENT),

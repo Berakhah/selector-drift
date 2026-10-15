@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import datetime as dt
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ from selector_drift.land.catalog import query
 from selector_drift.orchestrate.flows import extraction_flow
 from selector_drift.orchestrate.history import history_for
 from selector_drift.orchestrate.pipeline import default_confirmers, run_once
+from selector_drift.resolve.trace import Rung
 from selector_drift.spec.loader import load_spec
 from tests.orchestrate.conftest import Bench, _DemoAccount
 
@@ -41,14 +43,14 @@ SPEC = load_spec(REPO / "specs" / "testbench.yaml")  # version 2 (Task 12 Step 0
 ONCE = extraction_flow.with_options(retries=0)  # no 300 s retry sleeps in a test
 
 
-def run(window: dt.date) -> str:
+def run(window: dt.date, confirmers: Sequence[Rung] | None = None) -> str:
     """One run of the product for an explicit window -- run_once, without the scheduler."""
     return asyncio.run(
         run_once(
             "testbench.yaml",
             window=window,
             credentials_for=lambda target: _DemoAccount(),
-            confirmers=default_confirmers(),
+            confirmers=default_confirmers() if confirmers is None else confirmers,
         )
     )
 
@@ -222,7 +224,7 @@ def test_every_heal_context_the_product_builds_carries_the_extracted_node() -> N
                 assert "node_id" in kws, (
                     f"{path}:{node.lineno} builds a HealContext without node_id"
                 )
-    assert built >= 1  # the pipeline (the promotion rebuild joins it with quarantine_actions)
+    assert built >= 2  # the pipeline and the promotion rebuild
 
 
 @pytest.mark.unit
