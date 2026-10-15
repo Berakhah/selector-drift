@@ -186,7 +186,11 @@ def _evaluate(key: str, target: str) -> tuple[list[Finding], str | None]:
         return evaluate(key), None
     except Exception as exc:  # nothing after the lake write may fail the run
         # The TYPE only: the message of a quality/DuckDB error can embed page values (PII, client
-        # data), and this note is persisted on the Run and posted in an alert.
+        # data), and this note is persisted on the Run and posted in an alert. This differs from
+        # flows._record_failure on purpose: there a FAILED run keeps the raw str(exc) in
+        # runs.error inside the client boundary and only the alert is sanitised, because the two
+        # are different strings. Here one string is both, so it can only be the type; an operator
+        # who needs the cause reads the frames in the log.
         note = f"quality not evaluated: {type(exc).__name__}"
         # Fix round 2: the note and the alert say THAT it failed; the log says WHERE. Frames and
         # the exception type only -- the message may carry page text, so it is never logged

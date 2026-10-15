@@ -292,8 +292,10 @@ def promote_and_land(
             # so while `landed.rollback()` runs it is still held and a racing discard cannot
             # commit over the landed rows; only then does `s.rollback()` free it. The `finally`
             # means a failing compensation still releases the lock, and a failing session
-            # rollback no longer skips the compensation. Either failure surfaces (the original
-            # exception stays as its __context__).
+            # rollback no longer skips the compensation. Either failure surfaces INSTEAD of the
+            # original, which stays readable as its __context__ (a failing compensation
+            # replaces it; a failing rollback replaces both). Only when both steps succeed does
+            # the bare `raise` re-raise the original.
             try:
                 landed.rollback()
             finally:
