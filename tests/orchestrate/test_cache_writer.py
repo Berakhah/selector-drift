@@ -118,3 +118,29 @@ def test_a_writer_refuses_a_validated_extraction_for_another_run_target() -> Non
         other.put(validated, HEALED, field="claim_number")
     with pytest.raises(ValueError, match="spec version"):
         CacheWriter(target=PORTAL, spec_version=3).put(validated, HEALED, field="claim_number")
+
+
+@pytest.mark.integration
+def test_a_put_can_be_reverted_to_what_was_there(writer: CacheWriter) -> None:
+    """Fix round 2: put() hands back its own compensation (a promotion that fails later takes
+    its cache writes back). First write: the row goes away. Overwrite: the old row comes back."""
+    validated = judge(Outcome.PASS)
+    assert isinstance(validated, ValidatedExtraction)
+    revert_first = writer.put(validated, BEFORE, field="claim_number")
+    first = SelectorCache().get(PORTAL, "claim_number", spec_version=2)
+    revert_second = writer.put(validated, HEALED, field="claim_number")
+    revert_second()
+    assert SelectorCache().get(PORTAL, "claim_number", spec_version=2) == first
+    revert_first()
+    assert SelectorCache().get(PORTAL, "claim_number", spec_version=2) is None
+
+
+@pytest.mark.integration
+def test_a_stale_revert_never_clobbers_a_later_write(writer: CacheWriter) -> None:
+    validated = judge(Outcome.PASS)
+    assert isinstance(validated, ValidatedExtraction)
+    stale = writer.put(validated, BEFORE, field="claim_number")
+    writer.put(validated, HEALED, field="claim_number")  # a later heal owns the row now
+    stale()
+    got = SelectorCache().get(PORTAL, "claim_number", spec_version=2)
+    assert got is not None and got.selector == HEALED.selector

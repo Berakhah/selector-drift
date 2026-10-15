@@ -12,8 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 from selector_drift.orchestrate import quarantine_actions as qa
+from selector_drift.orchestrate.accept import Accepted
 
 RUN_KEY = "testbench:2:2026-10-01"
+ACCEPTED = Accepted(Path("/lake/x.parquet"), lambda: None, lambda: None)
 
 
 def fake_promote_and_land(
@@ -38,9 +40,7 @@ def fake_promote_and_land(
 def calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     log: list[str] = []
     monkeypatch.setattr(qa.quarantine, "promote_and_land", fake_promote_and_land(log))
-    monkeypatch.setattr(
-        qa, "accept_promoted", lambda *a, **k: (log.append("land"), Path("/lake/x.parquet"))[1]
-    )
+    monkeypatch.setattr(qa, "accept_promoted", lambda *a, **k: (log.append("land"), ACCEPTED)[1])
     monkeypatch.setattr(qa, "_mark_heals_promoted", lambda *a, **k: log.append("heals"))
     monkeypatch.setattr(qa, "record_intervention", lambda *a, **k: log.append("intervention"))
     monkeypatch.setattr(qa.CacheWriter, "for_run_key", classmethod(lambda cls, key: None))
@@ -70,9 +70,7 @@ def test_a_manual_promote_is_recorded_as_an_intervention(monkeypatch: pytest.Mon
     """Task 29A's dropped test, landed with quarantine_actions.py."""
     recorded: list[tuple[object, ...]] = []
     monkeypatch.setattr(qa.quarantine, "promote_and_land", fake_promote_and_land())
-    monkeypatch.setattr(
-        qa, "accept_promoted", lambda run_key, validated, *, cache: Path("/lake/x.parquet")
-    )
+    monkeypatch.setattr(qa, "accept_promoted", lambda run_key, validated, *, cache: ACCEPTED)
     monkeypatch.setattr(qa, "_mark_heals_promoted", lambda *a, **k: None)
     monkeypatch.setattr(qa.CacheWriter, "for_run_key", classmethod(lambda cls, run_key: object()))
     monkeypatch.setattr(qa, "record_intervention", lambda *a, **k: recorded.append(a) or 1)
