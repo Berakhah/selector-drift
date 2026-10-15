@@ -164,3 +164,27 @@ def test_a_quality_failure_after_landing_never_marks_the_run_failed(
     assert run_ is not None and (run_.error or "").startswith("quality not evaluated")
     history = history_for(session, "testbench", SPEC, before=W1 + dt.timedelta(days=1))
     assert history is not None and key in [r.run_key for r in history.runs]
+
+
+@pytest.mark.unit
+def test_a_quality_failure_is_logged_with_its_traceback_but_not_its_message(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Fix round 2: the run note and the alert are not enough to debug from; the traceback is
+    logged too -- frames and the exception TYPE only, never its message (it may carry page text)."""
+    from selector_drift.orchestrate import pipeline
+
+    secret = "claim AB12345678 for Jane Doe"
+
+    def broken(key: str) -> None:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(pipeline, "evaluate", broken)
+    monkeypatch.setattr(pipeline, "post_alert", lambda *a, **k: None)
+    with caplog.at_level("ERROR", logger=pipeline.__name__):
+        findings, note = pipeline._evaluate("testbench:2:2026-09-01", "testbench")
+    assert findings == [] and note is not None and note.startswith("quality not evaluated")
+    (record,) = [r for r in caplog.records if r.name == pipeline.__name__]
+    text = record.getMessage()
+    assert "RuntimeError" in text and "broken" in text  # the type and the failing frame
+    assert secret not in text and record.exc_info is None

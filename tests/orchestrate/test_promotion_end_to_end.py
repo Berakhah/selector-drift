@@ -26,7 +26,10 @@ from selector_drift.db.session import Session
 from selector_drift.heallog.bundle import AFTER_HTML, PAGE_HTML
 from selector_drift.heallog.evidence import heal_bundle_dir, last_accepted_dir
 from selector_drift.orchestrate.history import history_for
-from selector_drift.orchestrate.quarantine_actions import build_quarantine_actions
+from selector_drift.orchestrate.quarantine_actions import (
+    NothingToPromote,
+    build_quarantine_actions,
+)
 from selector_drift.resolve import cascade
 from selector_drift.resolve.grid import column_header
 from selector_drift.resolve.page import PageSource
@@ -260,7 +263,9 @@ def test_an_escalated_run_has_nothing_to_promote(
 
     monkeypatch.setattr("selector_drift.orchestrate.pipeline.resolve_cascade", refuse)
     key = run(W0)
-    with pytest.raises(ValueError, match="nothing to promote"):
+    # A named, narrow error: the campaign script (and any caller) can tell "nothing to promote"
+    # from a ValueError that is a real bug (a run-key mismatch, a spec-version mismatch in land).
+    with pytest.raises(NothingToPromote, match="nothing to promote"):
         promote(key)
     with Session() as s:
         q = s.get(Quarantine, key)
