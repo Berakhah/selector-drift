@@ -55,6 +55,12 @@ from selector_drift.validate.gate import HealContext, ValidatedExtraction
 from selector_drift.validate.quarantine import GateInputs, Landed
 
 
+class NothingToPromote(ValueError):
+    """The held run cannot be promoted by anyone: it was judged under another spec version, or it
+    held no rows (escalated or misaligned). Discard it. Narrower than ValueError on purpose --
+    a run-key mismatch or a spec-version mismatch inside land() is a bug, not "unpromotable"."""
+
+
 @dataclass(frozen=True)
 class QuarantineActions:
     promote: Callable[[str, str, str], None]  # (run_key, actor, reason)
@@ -144,7 +150,7 @@ def rebuild_gate_inputs(run_key: str) -> GateInputs:
     target, version, window = parse_run_key(run_key)
     spec = load_spec(spec_file(f"{target}.yaml"))
     if spec.version != version:
-        raise ValueError(
+        raise NothingToPromote(
             f"{run_key} was judged under spec v{version}; the spec is now v{spec.version} -- "
             "discard it and let the next run judge afresh"
         )
@@ -167,7 +173,7 @@ def rebuild_gate_inputs(run_key: str) -> GateInputs:
     }
     candidate = _candidate(run_key, data_uri, spec.version, candidate_winners)
     if unresolved or not candidate.rows:
-        raise ValueError(
+        raise NothingToPromote(
             f"{run_key} held no rows (escalated or misaligned): nothing to promote -- discard it"
         )
     page, cache = _page_of(heals), SelectorCache()

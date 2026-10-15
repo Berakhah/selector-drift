@@ -122,7 +122,10 @@ def main(days: int) -> None:
     from selector_drift.db.models import Run
     from selector_drift.db.session import Session, engine
     from selector_drift.orchestrate.pipeline import default_confirmers, run_once
-    from selector_drift.orchestrate.quarantine_actions import build_quarantine_actions
+    from selector_drift.orchestrate.quarantine_actions import (
+        NothingToPromote,
+        build_quarantine_actions,
+    )
     from selector_drift.orchestrate.rung_stats import format_stats, rung_stats
     from selector_drift.validate.quarantine import StillInvalid
     from testbench.portal.app import create_app
@@ -174,9 +177,10 @@ def main(days: int) -> None:
                 except StillInvalid:
                     actions.discard(key, "campaign", "operator policy: the gate still refuses it")
                     decision = "discarded"
-                except ValueError as exc:  # rebuild_gate_inputs: nothing to promote (held empty)
-                    # Classified apart from a gate refusal and printed, so a real bug that raises
-                    # ValueError is seen in the campaign output instead of counted as a refusal.
+                except NothingToPromote as exc:  # rebuild_gate_inputs: held empty / old spec
+                    # Only this named error is "unpromotable". Any other ValueError (land()'s
+                    # run-key guard, the writer's spec-version check) is a bug and propagates, so
+                    # it stops the campaign instead of being counted as a hold.
                     actions.discard(key, "campaign", f"unpromotable: {exc}"[:500])
                     decision = "unpromotable"
                     print(f"  {key}: unpromotable ({exc})")

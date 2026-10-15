@@ -23,6 +23,8 @@ ValidatedExtraction -- never at heal time, never from a quarantined run (C2, led
 from __future__ import annotations
 
 import datetime as dt
+import logging
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 
 from bok_core.findings import Finding
@@ -67,6 +69,7 @@ from selector_drift.validate.checks import checks_for
 from selector_drift.validate.gate import HealContext, ValidatedExtraction, gate_run
 from selector_drift.validate.verdict import Confirmation, Outcome, Verdict
 
+_log = logging.getLogger(__name__)
 ESCALATED = "escalated"
 MISALIGNED = "fields do not share a row"
 CredentialsFor = Callable[[str], CredentialProvider]
@@ -183,6 +186,15 @@ def _evaluate(key: str, target: str) -> tuple[list[Finding], str | None]:
         return evaluate(key), None
     except Exception as exc:  # nothing after the lake write may fail the run
         note = f"quality not evaluated: {type(exc).__name__}: {exc}"
+        # Fix round 2: the note and the alert say THAT it failed; the log says WHERE. Frames and
+        # the exception type only -- the message may carry page text, so it is never logged
+        # (logger.exception would print it).
+        _log.error(
+            "quality evaluation failed for %s: %s\n%s",
+            key,
+            type(exc).__name__,
+            "".join(traceback.format_tb(exc.__traceback__)),
+        )
         post_alert("finding", target, key, note)
         return [], note
 
