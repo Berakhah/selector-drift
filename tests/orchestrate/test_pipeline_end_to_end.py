@@ -35,6 +35,7 @@ from selector_drift.orchestrate.flows import extraction_flow
 from selector_drift.orchestrate.history import history_for
 from selector_drift.orchestrate.pipeline import default_confirmers, run_once
 from selector_drift.resolve.trace import Rung
+from selector_drift.scope.errors import ScopeRefusal
 from selector_drift.spec.loader import load_spec
 from tests.orchestrate.conftest import Bench, _DemoAccount
 
@@ -234,3 +235,103 @@ def test_capture_happens_before_any_resolution() -> None:
     for c in _run_once_calls():
         lines.setdefault(ast.unparse(c.func), c.lineno)
     assert lines["capture"] < lines["resolve_cascade"] < lines["record_boxes"]
+
+
+@pytest.mark.integration
+def test_a_corrupt_cache_row_fails_the_run_closed(
+    prefect_api: None, bench: Bench, session: OrmSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ledger 395, decided fail-closed: an unreadable cache row fails the attempt (alerted,
+    retried) before any browser opens -- it is never silently treated as a miss."""
+    opened: list[int] = []
+    monkeypatch.setattr("selector_drift.browser.driver.open", lambda *a, **k: opened.append(1))
+    session.add(
+        SelectorCacheEntry(
+            target="testbench",
+            field="amount",
+            spec_version=SPEC.version,
+            selector="td.amount",
+            anchor={"not_an_anchor_field": "x"},  # AnchorEvidence forbids extra keys
+            node_id=None,
+            set_by_rung=2,
+            set_at=dt.datetime.now(dt.UTC),
+            set_by_run_key="testbench:2:2026-01-01",
+        )
+    )
+    session.commit()
+    with pytest.raises(Exception, match="not_an_anchor_field"):
+        ONCE("testbench.yaml")
+    attempt = session.query(RunAttempt).one()
+    assert attempt.state == "failed" and opened == []
+
+
+@pytest.mark.integration
+def test_fields_in_different_row_lists_quarantine_and_a_missing_node_fails(
+    prefect_api: None, bench: Bench, session: OrmSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ledger 534: RowMisaligned is a RowAlignment FAIL kept in quarantine; a LookupError (a
+    node gone or ambiguous) fails the run. Neither is ever an empty extraction."""
+    from selector_drift.extract.reader import RowMisaligned
+
+    def misaligned(*a: object, **k: object) -> None:
+        raise RowMisaligned("claim_number and amount sit in different row lists")
+
+    monkeypatch.setattr("selector_drift.orchestrate.pipeline.read", misaligned)
+    key = run(dt.date(2026, 9, 1))
+    q = session.get(Quarantine, key)
+    assert state_of(key) == "quarantined" and q is not None
+    assert q.reason == "fields do not share a row" and q.verdicts[0]["check"] == "RowAlignment"
+    assert rows_in_lake(key) == 0
+
+    def gone(*a: object, **k: object) -> None:
+        raise LookupError("node 'n31' is not exactly one element (0 hits)")
+
+    monkeypatch.setattr("selector_drift.orchestrate.pipeline.read", gone)
+    with pytest.raises(LookupError):
+        run(dt.date(2026, 9, 2))
+    with Session() as s:
+        attempt = s.query(RunAttempt).filter_by(run_key="testbench:2:2026-09-02").one()
+    assert attempt.state == "started"  # run_once raised; the flow body records it failed
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "refusal",
+    [LookupError("run has no landed files"), ScopeRefusal("scope record changed mid-run")],
+    ids=["nothing-landed", "scope-refused"],
+)
+def test_a_quality_refusal_is_mapped_never_swallowed(
+    refusal: Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ledger 588: evaluate()'s two refusals are recorded on the run and alerted; the run's
+    rows are already landed, so its accepted state stands."""
+    from selector_drift.orchestrate import pipeline
+
+    alerts: list[tuple[str, str, str | None, str]] = []
+
+    def refuse(key: str) -> None:
+        raise refusal
+
+    monkeypatch.setattr(pipeline, "evaluate", refuse)
+    monkeypatch.setattr(pipeline, "post_alert", lambda *a: alerts.append(a))
+    findings, note = pipeline._evaluate("testbench:2:2026-09-01", "testbench")
+    assert findings == [] and note is not None and note.startswith("quality not evaluated")
+    assert [(a[0], a[1], a[2]) for a in alerts] == [
+        ("finding", "testbench", "testbench:2:2026-09-01")
+    ]
+
+
+@pytest.mark.integration
+def test_a_failed_run_is_notified_too(
+    prefect_api: None, db: None, dead_site: str, demo_account: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    """Task 29A: notify() on every settled run -- the failure path in flows.py included."""
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "selector_drift.orchestrate.flows.notify",
+        lambda findings, run_: seen.append((run_.run_key, run_.state)),
+    )
+    with pytest.raises(Exception, match=r"\S"):
+        ONCE("specs/testbench.yaml")
+    assert [state for _key, state in seen] == ["failed"]
