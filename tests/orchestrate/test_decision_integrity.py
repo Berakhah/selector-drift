@@ -188,3 +188,24 @@ def test_a_quality_failure_is_logged_with_its_traceback_but_not_its_message(
     text = record.getMessage()
     assert "RuntimeError" in text and "broken" in text  # the type and the failing frame
     assert secret not in text and record.exc_info is None
+
+
+@pytest.mark.integration
+def test_a_decision_waiting_on_the_row_lock_gives_up_after_the_bound(
+    bench: Bench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 2: the promotion holds the row across file I/O (and maybe compaction), so a
+    waiting decision must not wait forever -- it fails with a lock timeout and leaves the
+    quarantine untouched, still open."""
+    from sqlalchemy.exc import OperationalError
+
+    key = run(W0)
+    monkeypatch.setattr(quarantine, "LOCK_TIMEOUT_MS", 300)
+    with Session() as holder:
+        q = holder.get(Quarantine, key, with_for_update=True)
+        assert q is not None
+        started = time.monotonic()
+        with pytest.raises(OperationalError, match="lock timeout"):
+            quarantine.discard(key, actor="op2", reason="waited too long")
+        assert time.monotonic() - started < 10
+    assert decision(key) == (None, None)
