@@ -166,6 +166,39 @@ def test_a_quality_failure_after_landing_never_marks_the_run_failed(
     assert history is not None and key in [r.run_key for r in history.runs]
 
 
+@pytest.mark.integration
+def test_a_quality_failure_message_reaches_neither_the_run_the_alert_nor_the_log(
+    bench: Bench,
+    session: OrmSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fix round 3: quality/DuckDB errors can embed page values, so the run's error note and the
+    alert carry the exception TYPE only -- never str(exc) -- and the run keeps its state."""
+    key0 = run(W0)
+    qa.build_quarantine_actions().promote(key0, "op1", "checked")
+    secret = "claim AB12345678 for Jane Doe"
+
+    def broken(key: str) -> None:
+        raise RuntimeError(secret)
+
+    alerts: list[tuple[object, ...]] = []
+    monkeypatch.setattr("selector_drift.orchestrate.pipeline.evaluate", broken)
+    monkeypatch.setattr(
+        "selector_drift.orchestrate.pipeline.post_alert", lambda *a, **k: alerts.append(a)
+    )
+    with caplog.at_level("DEBUG"):
+        key = run(W1)
+    assert state_of(key) == "completed" and rows_in_lake(key) > 0  # state unchanged
+    run_ = session.get(Run, key)
+    assert run_ is not None and run_.error is not None
+    assert "RuntimeError" in run_.error and secret not in run_.error
+    (alert,) = alerts
+    assert key in alert and any("RuntimeError" in str(part) for part in alert)
+    assert secret not in " ".join(str(part) for part in alert)
+    assert secret not in caplog.text
+
+
 @pytest.mark.unit
 def test_a_quality_failure_is_logged_with_its_traceback_but_not_its_message(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
