@@ -316,6 +316,9 @@ Each of these is a choice the assembled pipeline makes; each is stated so review
   Finding's `extra="forbid"`) are test and comment work in `quality/`, not pipeline wiring. M2 --
   a newly added field's null rate silently disabled, a fail-open -- is fixed. M5 (two history
   builders) is closed by `history_for`.
+- **Task 29's concerns**: the `to_rail` payload keys (contract 2.4 leaves them unpinned) are
+  unchanged; "two runs sharing a window merge into one history entry" no longer arises -- under
+  one spec version a window has exactly one run key, and `history_for` filters to the version.
 - **Task 28's minor findings M3, M6, M7** (a stray parquet breaking later writes; orphaned staging
   directories; provenance dropping only top-level values) are land-internal. M2's run-state
   mapping is decided above.
