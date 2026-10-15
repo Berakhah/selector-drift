@@ -185,7 +185,9 @@ def _evaluate(key: str, target: str) -> tuple[list[Finding], str | None]:
     try:
         return evaluate(key), None
     except Exception as exc:  # nothing after the lake write may fail the run
-        note = f"quality not evaluated: {type(exc).__name__}: {exc}"
+        # The TYPE only: the message of a quality/DuckDB error can embed page values (PII, client
+        # data), and this note is persisted on the Run and posted in an alert.
+        note = f"quality not evaluated: {type(exc).__name__}"
         # Fix round 2: the note and the alert say THAT it failed; the log says WHERE. Frames and
         # the exception type only -- the message may carry page text, so it is never logged
         # (logger.exception would print it).
