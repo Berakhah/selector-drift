@@ -95,6 +95,8 @@ def _storage_state_cookies(expires: float) -> list[dict[str, object]]:
          "expires": expires, "httpOnly": True, "secure": False, "sameSite": "Lax"},
         {"name": "__Host-csrf", "value": "test-only-csrf", "domain": "localhost", "path": "/",
          "expires": expires, "httpOnly": True, "secure": True, "sameSite": "Lax"},
+        {"name": "__Secure-ctx", "value": "test-only-secure", "domain": ".localhost", "path": "/",
+         "expires": expires, "httpOnly": True, "secure": True, "sameSite": "Lax"},
     ]  # fmt: skip
 
 
@@ -103,7 +105,7 @@ def _selected(origin: str) -> list[dict[str, object]]:
     picked = select_cookies(
         _storage_state_cookies((now + timedelta(days=1)).timestamp()), [origin], now
     )
-    assert picked.off_origin == 0 and len(picked.live) == 2
+    assert picked.off_origin == 0 and len(picked.live) == 3
     return picked.live
 
 
@@ -153,6 +155,25 @@ async def test_open_sends_a_host_prefixed_cookie_to_the_authorised_origin(
         assert "ok" in (await session.page.content()).value
     sent = echo.cookie_headers[0]
     assert "sid=test-only-session" in sent and "__Host-csrf=test-only-csrf" in sent
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_open_sends_a_secure_prefixed_cookie_after_the_domain_rewrite(
+    echo: _Echo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, M2. A `__Secure-` cookie is exported with a parent domain (`.localhost`),
+    so the host-only rewrite touches it -- and Chromium must still accept the rewritten cookie
+    (the prefix demands only `Secure`; unlike `__Host-` it may carry a Domain) and send it."""
+    origin = f"http://localhost:{echo.port}"
+    selected = _selected(origin)
+    handed = driver._playwright_cookies(selected)
+    secure = next(c for c in handed if c["name"] == "__Secure-ctx")
+    assert secure.get("domain") == "localhost" and secure.get("secure") is True
+    monkeypatch.setattr("selector_drift.browser.registry.url_for", lambda _t: f"{origin}/")
+    async with driver.open(_target(origin), Credentials(cookies=selected)) as session:
+        assert "ok" in (await session.page.content()).value
+    assert "__Secure-ctx=test-only-secure" in echo.cookie_headers[0]
 
 
 @pytest.mark.unit
