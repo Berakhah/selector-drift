@@ -303,3 +303,90 @@ def test_mark_promoted_after_discard_is_refused(quarantined):
     with pytest.raises(AlreadyResolved):
         mark_promoted(quarantined, actor=ACTOR, reason="late", verdicts=[])
     assert len(_audits()) == 1
+
+
+# ---- Task 26A fix round 3: compensation runs UNDER the row lock ------------------------------
+
+
+def _fail_the_final_mark(monkeypatch):
+    real = quarantine_mod._resolve_promoted
+
+    def staged_then_boom(*a, **k):
+        real(*a, **k)
+        raise OSError("connection lost at commit")
+
+    monkeypatch.setattr(quarantine_mod, "_resolve_promoted", staged_then_boom)
+
+
+def _row_is_locked_by_someone_else(run_key: str) -> bool:
+    """Probe from a second connection: can it take the row FOR UPDATE right now?"""
+    from sqlalchemy.exc import OperationalError
+
+    with Session() as probe:
+        try:
+            probe.execute(
+                text("SELECT 1 FROM quarantine WHERE run_key = :k FOR UPDATE NOWAIT"),
+                {"k": run_key},
+            )
+        except OperationalError:
+            return True
+        finally:
+            probe.rollback()
+    return False
+
+
+@pytest.mark.integration
+def test_the_compensation_runs_while_the_row_lock_is_still_held(quarantined, monkeypatch):
+    """A failed final mark: the landed rows are taken back BEFORE the lock is released, so a
+    racing discard cannot commit over them in between. The probe runs inside the compensation."""
+    _fail_the_final_mark(monkeypatch)
+    seen: dict[str, bool] = {}
+
+    def compensate() -> None:
+        seen["locked_during_compensation"] = _row_is_locked_by_someone_else(quarantined)
+
+    with pytest.raises(OSError, match="connection lost"):
+        quarantine_mod.promote_and_land(
+            quarantined,
+            actor=ACTOR,
+            reason="checked",
+            rebuild=lambda k: first_heal_inputs(),
+            land=lambda v: quarantine_mod.Landed(rollback=compensate, finish=lambda: None),
+        )
+    assert seen == {"locked_during_compensation": True}
+    assert not _row_is_locked_by_someone_else(quarantined)  # released afterwards
+    row = _row(quarantined)
+    assert row is not None and row.resolved_as is None  # still open and retryable
+    assert _audits() == []
+
+
+@pytest.mark.integration
+def test_a_failing_session_rollback_does_not_skip_the_compensation(quarantined, monkeypatch):
+    """If the session's own rollback raises, the landed rows are still taken back (compensation
+    first), and the rollback failure surfaces loudly rather than being swallowed."""
+    _fail_the_final_mark(monkeypatch)
+    compensated: list[bool] = []
+
+    def factory():
+        s = Session()
+
+        def broken_rollback() -> None:
+            raise RuntimeError("rollback itself failed")
+
+        s.rollback = broken_rollback
+        return s
+
+    with pytest.raises(RuntimeError, match="rollback itself failed"):
+        quarantine_mod.promote_and_land(
+            quarantined,
+            actor=ACTOR,
+            reason="checked",
+            rebuild=lambda k: first_heal_inputs(),
+            land=lambda v: quarantine_mod.Landed(
+                rollback=lambda: compensated.append(True), finish=lambda: None
+            ),
+            session_factory=factory,
+        )
+    assert compensated == [True]
+    row = _row(quarantined)
+    assert row is not None and row.resolved_as is None
