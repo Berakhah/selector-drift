@@ -52,9 +52,12 @@ def _is_built_string(node: ast.AST) -> bool:
 
 
 def _text_of(node: ast.AST) -> str:
-    return " ".join(
-        n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)
-    ).lower()
+    """The constants of a built string, both spaced (word boundaries kept) and run together (a
+    name split across parts, 'selector_' + 'cache', reads whole), so either spelling is seen."""
+    consts = [n for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    consts.sort(key=lambda n: (n.lineno, n.col_offset))  # source order, not BFS order
+    parts = [n.value for n in consts]
+    return (" ".join(parts) + "\n" + "".join(parts)).lower()
 
 
 def write_site_offences(path: Path, tree: ast.AST) -> list[str]:
@@ -121,6 +124,55 @@ PLANTED = {
     "format": "def f(s):\n    s.execute('update {} set x=1'.format('selector_cache'))\n",
     "join": "def f(s):\n    s.execute(' '.join(['truncate', 'selector_cache']))\n",
 }
+
+# The rule each by-string case must be flagged by (the whole-constant rules; the first two
+# cases hold no verb, so the SQL-text and built-string rules cannot be what fires).
+BY_STRING_RULE = "names the cache model/table by string"
+BY_STRING = ("table by string", "model by string")
+
+# The table name itself is split, so no constant -- and no whole-constant rule -- ever sees it.
+BUILT_ONLY = {
+    "split name by +": "def f(s):\n    s.execute('insert into ' + 'selector_' + 'cache')\n",
+    "split name by f-string": (
+        "def f(s):\n    s.execute(f'insert into selector_{\"cache\"} values (1)')\n"
+    ),
+    "split name by %": "def f(s):\n    s.execute('delete from %s%s' % ('selector_', 'cache'))\n",
+    "split name by format": (
+        "def f(s):\n    s.execute('update {}{} set x=1'.format('selector_', 'cache'))\n"
+    ),
+    "split name by join": "def f(s):\n    s.execute(''.join(['truncate selector_', 'cache']))\n",
+    "variable between the parts": (
+        "def f(s, name):\n    s.execute('insert into ' + name + 'selector_' + 'cache')\n"
+    ),
+}
+BUILT_RULE = "builds SQL that writes the cache table"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", BUILT_ONLY.values(), ids=BUILT_ONLY.keys())
+def test_only_the_built_string_rule_can_flag_a_name_assembled_from_parts(source: str) -> None:
+    """No constant here holds the table name, so the whole-constant rules are blind to it;
+    only `_is_built_string` can fire, and the offence must say so."""
+    tree = ast.parse(source)
+    assert not any(
+        isinstance(n, ast.Constant) and isinstance(n.value, str) and TABLE in n.value.lower()
+        for n in ast.walk(tree)
+    ), "a whole-constant rule could fire: the case is not isolated"
+    offences = write_site_offences(Path("selector_drift/orchestrate/planted.py"), tree)
+    assert offences != []
+    assert all(BUILT_RULE in o for o in offences), offences
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("case", BY_STRING)
+def test_by_string_rule_is_isolated_and_named(case: str) -> None:
+    """The model/table-by-string cases carry no verb and no assembly, so the SQL-text and
+    built-string rules cannot be what flags them: exactly this rule is."""
+    offences = write_site_offences(
+        Path("selector_drift/orchestrate/planted.py"), ast.parse(PLANTED[case])
+    )
+    assert len(offences) == 1
+    assert BY_STRING_RULE in offences[0]
 
 
 @pytest.mark.unit
