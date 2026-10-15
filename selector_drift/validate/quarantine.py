@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -24,6 +25,7 @@ from selector_drift.validate.verdict import Outcome, Verdict
 __all__ = [
     "AlreadyResolved",
     "GateInputs",
+    "Landed",
     "NotInQuarantine",
     "QuarantinedRun",
     "Rebuild",
@@ -35,6 +37,7 @@ __all__ = [
     "reconfirm",
 ]
 
+_log = logging.getLogger(__name__)
 REASON_MAX: Final = 500  # API spec 4.1: DecisionRequest.reason is 1-500
 
 
@@ -53,6 +56,16 @@ class NotInQuarantine(LookupError):
 
 class AlreadyResolved(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class Landed:
+    """What `land` hands back so promote_and_land can take a landing back if the mark fails.
+    `rollback` undoes the landing; `finish` is the maintenance deferred until the mark commits
+    (lake compaction cannot be undone, so it must not run before)."""
+
+    rollback: Callable[[], None]
+    finish: Callable[[], None]
 
 
 @dataclass(frozen=True)
@@ -174,7 +187,7 @@ def promote_and_land(
     actor: str,
     reason: str,
     rebuild: Rebuild,
-    land: Callable[[ValidatedExtraction], object],
+    land: Callable[[ValidatedExtraction], Landed],
     session_factory: SessionFactory = Session,
 ) -> ValidatedExtraction:
     """The whole promotion under ONE row lock (Task 26A fix round 1): re-gate, land, mark.
@@ -183,6 +196,12 @@ def promote_and_land(
     with AlreadyResolved, so the audit trail can never read "discarded" over rows that landed.
     If the re-gate fails or `land` raises, the transaction rolls back: nothing is marked and
     the quarantine stays open and retryable. A refused re-gate is audited before the lock goes.
+
+    Fix round 2: the cache and the lake are written through their own sessions, so the rollback
+    does not reach them. `land` therefore returns its own compensation (`Landed.rollback`), and
+    it is run if anything after it fails -- the mark included -- so a failed promotion leaves no
+    file and no cache row, the quarantine open, and a re-promotion clean (re-promotion is
+    idempotent: nothing from the failed attempt remains to collide with).
     """
     actor, reason = _decision(actor, reason)
     with session_factory() as s:
@@ -201,9 +220,18 @@ def promote_and_land(
             )
             s.commit()
             raise
-        land(validated)  # an exception here rolls back: the quarantine is still open
-        _resolve_promoted(s, q, run_key, actor, reason, validated.verdicts)
-        s.commit()
+        landed = land(validated)  # raises -> `land` has compensated itself; still open
+        try:
+            _resolve_promoted(s, q, run_key, actor, reason, validated.verdicts)
+            s.commit()
+        except BaseException:
+            s.rollback()
+            landed.rollback()  # under the row lock: a discard cannot slip in over landed rows
+            raise
+    try:
+        landed.finish()  # the decision is final; maintenance failing must not undo it
+    except Exception as exc:
+        _log.error("post-promotion maintenance failed: %s", type(exc).__name__)
     return validated
 
 

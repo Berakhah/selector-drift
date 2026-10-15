@@ -109,7 +109,17 @@ def _next_attempt(part: Path, run_key: str) -> int:
     return 1 + max(attempts, default=0)
 
 
-def write(validated: ValidatedExtraction, *, attempt: int | None = None) -> Path:
+def compact_if_needed(written: Path) -> None:
+    """Compaction folds files together, so it can no longer be undone by deleting the file that
+    was written. A caller that may have to take its write back defers this to after it commits."""
+    part = written.parent
+    if sum(1 for _ in part.glob("*.parquet")) > COMPACT_AFTER_FILES:
+        _compact.compact(part.parent.name.removeprefix("target="))
+
+
+def write(
+    validated: ValidatedExtraction, *, attempt: int | None = None, compact: bool = True
+) -> Path:
     if not isinstance(validated, ValidatedExtraction):
         raise TypeError(
             "land.write accepts only a ValidatedExtraction, got "
@@ -130,6 +140,6 @@ def write(validated: ValidatedExtraction, *, attempt: int | None = None) -> Path
         os.replace(tmp, final)  # a reader sees all of it or none of it
     finally:
         tmp.unlink(missing_ok=True)
-    if sum(1 for _ in part.glob("*.parquet")) > COMPACT_AFTER_FILES:
-        _compact.compact(target)
+    if compact:
+        compact_if_needed(final)
     return final

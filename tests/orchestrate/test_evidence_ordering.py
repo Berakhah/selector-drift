@@ -115,7 +115,7 @@ def evidence_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
 def lands(monkeypatch: pytest.MonkeyPatch) -> list[object]:
     written: list[object] = []
 
-    def write(v: object, attempt: int | None = None) -> Path:
+    def write(v: object, attempt: int | None = None, compact: bool = True) -> Path:
         written.append(v)
         return Path("/lake/x.parquet")
 
@@ -314,7 +314,7 @@ def test_last_accepted_moves_only_after_land_write_returns(
     old = _seed_last_accepted(OLD_PAGE)
     cache = FakeCache()
 
-    def refuse(v: object, attempt: int | None = None) -> Path:
+    def refuse(v: object, attempt: int | None = None, compact: bool = True) -> Path:
         raise OSError("lake unavailable")
 
     monkeypatch.setattr(accept_mod.land_writer, "write", refuse)
@@ -345,7 +345,7 @@ def test_an_accepted_run_lands_then_writes_the_cache_with_its_attempt(
     order: list[str] = []
     cache = FakeCache()
 
-    def write(v: object, attempt: int | None = None) -> Path:
+    def write(v: object, attempt: int | None = None, compact: bool = True) -> Path:
         order.append(f"land:{attempt}")
         return Path("/lake/x.parquet")
 
