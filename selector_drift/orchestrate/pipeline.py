@@ -322,8 +322,9 @@ async def run_once(
         redaction_key=settings.redaction_key,
         attempt=attempt,
     )
-    if state == "quarantined":
-        return settled(state, 0, _quarantine_reason(key), [])
-    assert isinstance(result, ValidatedExtraction)  # settle() accepts nothing else
+    if state == "quarantined" or not isinstance(result, ValidatedExtraction):
+        # settle() accepts nothing but a ValidatedExtraction; the isinstance is for the reader
+        # and the type checker, never an `assert` that `python -O` would strip.
+        return settled("quarantined", 0, _quarantine_reason(key), [])
     findings, note = _evaluate(key, target.target)  # after the lake write: it reads landed rows
     return settled(state, len(result.rows), note, findings)
