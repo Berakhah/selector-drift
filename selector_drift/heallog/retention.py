@@ -12,8 +12,13 @@ Fix round 1:
 - Fix round 2 (T26A): a replay of an already-decided window is held in
   quarantine/*.replay-*.parquet (audited `quarantine_replayed`) and never re-opens the decision.
   While that file exists its run's heal bundles are kept too (`retention_skipped`,
-  "replay held"), so evidence a human may still need is not silently purged. Retention never
-  touches the replay files themselves.
+  "replay held"), so evidence a human may still need is not silently purged.
+- T26A follow-up: a replay file holds extracted client data, so it is not held forever. It expires
+  after the target's evidence_retention_days counted from its `quarantine_replayed` audit row
+  (audited `replay_expired`; the replayed row stays as the record; a null policy keeps it), which
+  also releases the heal bundles it pinned. A replay file no audit row names (hold() crashed or
+  its commit failed between the write and the audit) is swept past ORPHAN_GRACE
+  (`replay_orphan_removed`). A quarantine's own `<key>.parquet` is never a replay and never swept.
 - I4: every audit row is COMMITTED before its delete, so a crash mid-sweep can leave a bundle
   that is audited as expired but still present (retried next day), never one that is gone
   without its `evidence_expired` row.
@@ -40,7 +45,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
 from selector_drift.config import get_settings
-from selector_drift.db.models import AuditLog, HealEvent, Quarantine, ScopeRecordRow
+from selector_drift.db.models import AuditLog, HealEvent, Quarantine, Run, ScopeRecordRow
 from selector_drift.db.session import Session
 from selector_drift.heallog.bundle import HEALS_DIR, LAST_ACCEPTED_DIR, is_link
 from selector_drift.heallog.evidence import heal_bundle_dir, last_accepted_names
@@ -49,6 +54,8 @@ ACTOR = "system:evidence_retention"
 LEFTOVER_GRACE = timedelta(hours=1)  # a write in progress is never swept
 ORPHAN_GRACE = timedelta(days=1)  # a heal row may be committed just after its bundle
 _LEFTOVER_PREFIXES = (".tmp-", ".old-")
+_QUARANTINE_DIR = "quarantine"  # == orchestrate.accept.QUARANTINE_DIR; a test pins the two
+_REPLAY_GLOB = "*.replay-*.parquet"
 
 
 def _audit(s: OrmSession, action: str, subject: str, detail: dict[str, Any]) -> None:
@@ -106,16 +113,67 @@ def _sweep_dir(
     return removed
 
 
-def _replay_held(s: OrmSession) -> set[str]:
-    """Run keys with a replay still held on disk beside a decision already taken."""
-    held: set[str] = set()
-    for subject, detail in s.execute(
-        select(AuditLog.subject, AuditLog.detail).where(AuditLog.action == "quarantine_replayed")
+def _replays(s: OrmSession) -> list[tuple[str, datetime, Path]]:
+    """(run key, replayed at, file) of every audited replay, oldest first."""
+    found: list[tuple[str, datetime, Path]] = []
+    for subject, at, detail in s.execute(
+        select(AuditLog.subject, AuditLog.at, AuditLog.detail)
+        .where(AuditLog.action == "quarantine_replayed")
+        .order_by(AuditLog.at, AuditLog.id)
     ):
         uri = detail.get("data_uri") if isinstance(detail, dict) else None
-        if isinstance(uri, str) and Path(uri).is_file():
-            held.add(subject)
-    return held
+        if isinstance(uri, str):
+            found.append((subject, at, Path(uri)))
+    return found
+
+
+def _expire_replays(s: OrmSession, policy: dict[str, int | None], today: date) -> int:
+    """A replay holds extracted client data, so it lives as long as the target's own
+    evidence_retention_days from the day it was replayed, never longer. No stated policy, or a
+    self-owned target (None), keeps it. Expiring it also releases the heal bundles it pinned."""
+    deleted = 0
+    targets = dict(s.execute(select(Run.run_key, Run.target)).tuples().all())
+    for run_key, at, path in _replays(s):
+        if not (path.exists() or is_link(path)):
+            continue
+        days = policy.get(targets.get(run_key, ""))
+        if days is None or (today - at.date()).days < days:
+            continue
+        detail = {"data_uri": str(path), "retention_days": days, "replayed_at": at.isoformat()}
+        if _remove(s, path, "replay_expired", run_key, detail):
+            deleted += 1
+    return deleted
+
+
+def _sweep_replay_orphans(s: OrmSession, now: datetime) -> int:
+    """hold() writes a replay file and then commits its audit row. A crash or a failed commit
+    between the two leaves client data that retention cannot see: swept past ORPHAN_GRACE."""
+    directory = get_settings().lake_root / _QUARANTINE_DIR
+    if not directory.is_dir() or is_link(directory):
+        return 0
+    audited = {path for _, _, path in _replays(s)}
+    removed = 0
+    for entry in sorted(directory.glob(_REPLAY_GLOB)):
+        if (
+            entry in audited
+            or entry.name.startswith(".")
+            or _age(entry, now) <= ORPHAN_GRACE
+            or not _remove(
+                s,
+                entry,
+                "replay_orphan_removed",
+                f"path:{_QUARANTINE_DIR}/{entry.name}",
+                {"why": "no audit row names it"},
+            )
+        ):
+            continue
+        removed += 1
+    return removed
+
+
+def _replay_held(s: OrmSession) -> set[str]:
+    """Run keys with a replay still held on disk beside a decision already taken."""
+    return {run_key for run_key, _, path in _replays(s) if path.is_file()}
 
 
 @flow(name="evidence_retention")
@@ -134,6 +192,7 @@ def evidence_retention(today: date | None = None) -> int:
         open_quarantine = set(
             s.scalars(select(Quarantine.run_key).where(Quarantine.resolved_as.is_(None)))
         )
+        deleted += _expire_replays(s, policy, today)  # before the heals they pin are judged
         replay_held = _replay_held(s)
         heals = list(s.scalars(select(HealEvent).order_by(HealEvent.id)))
         heal_ids = {heal.id for heal in heals}
@@ -195,4 +254,5 @@ def evidence_retention(today: date | None = None) -> int:
             lambda name: name in reachable,
             "last_accepted_removed",
         )
+        deleted += _sweep_replay_orphans(s, now)
     return deleted

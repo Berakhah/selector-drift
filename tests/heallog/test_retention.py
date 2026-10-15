@@ -327,3 +327,109 @@ def test_a_live_targets_last_accepted_is_kept(db: Path, monkeypatch: pytest.Monk
     _age_out(accepted)
     assert evidence_retention.fn(today=TODAY) == 0
     assert accepted.exists()
+
+
+# --- T26A follow-up: replay files are retained by the target's own evidence policy ---------
+
+
+@pytest.fixture
+def lake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("SD_LAKE_ROOT", str(tmp_path / "lake"))
+    get_settings.cache_clear()
+    root = tmp_path / "lake" / "quarantine"
+    root.mkdir(parents=True)
+    return root
+
+
+def _replay(lake: Path, run_key: str, replayed_on: dt.date, name: str = "x.replay-abc123") -> Path:
+    """A held replay beside a decision already taken, audited as hold() does."""
+    path = lake / f"{name}.parquet"
+    path.write_bytes(b"held rows")
+    with Session() as s:
+        s.add(
+            AuditLog(
+                at=datetime.combine(replayed_on, dt.time(4, 12), UTC),
+                actor="scheduler",
+                action="quarantine_replayed",
+                subject=run_key,
+                detail={"resolved_as": "discarded", "reason": "r", "data_uri": str(path)},
+            )
+        )
+        s.commit()
+    return path
+
+
+def _run_key_of(heal_id: int) -> str:
+    with Session() as s:
+        heal = s.get(HealEvent, heal_id)
+        assert heal is not None
+        return heal.run_key
+
+
+@pytest.mark.integration
+def test_an_expired_replay_is_deleted_audited_and_releases_its_evidence(
+    db: Path, lake: Path
+) -> None:
+    """A replay holds extracted client data and pins its run's heal bundles. It lives as long
+    as the target's evidence_retention_days from the day it was replayed, then both go."""
+    _client(days=90)
+    heal_id = _heal(db, "client-portal", TODAY - dt.timedelta(days=200))
+    replay = _replay(lake, _run_key_of(heal_id), TODAY - dt.timedelta(days=100))
+    assert evidence_retention.fn(today=TODAY) == 2  # the replay, then the bundle it pinned
+    assert not replay.exists() and not (db / "heals" / str(heal_id)).exists()
+    with Session() as s:
+        row = s.query(AuditLog).filter_by(action="replay_expired").one()
+        assert row.subject == _run_key_of(heal_id) and row.actor == "system:evidence_retention"
+        assert row.detail["data_uri"] == str(replay) and row.detail["retention_days"] == 90
+        assert s.query(AuditLog).filter_by(action="quarantine_replayed").count() == 1  # kept
+        assert s.query(AuditLog).filter_by(action="retention_skipped").count() == 0
+
+
+@pytest.mark.integration
+def test_a_replay_inside_its_retention_window_is_kept(db: Path, lake: Path) -> None:
+    _client(days=90)
+    heal_id = _heal(db, "client-portal", TODAY - dt.timedelta(days=200))
+    replay = _replay(lake, _run_key_of(heal_id), TODAY - dt.timedelta(days=10))
+    assert evidence_retention.fn(today=TODAY) == 0
+    assert replay.exists() and (db / "heals" / str(heal_id)).exists()
+
+
+@pytest.mark.integration
+def test_a_replay_of_a_self_owned_target_is_kept_for_the_life_of_the_log(
+    db: Path, lake: Path
+) -> None:
+    with Session() as s:
+        s.add(_scope("client-portal", "client-authorised", None))
+        s.commit()
+    heal_id = _heal(db, "client-portal", TODAY - dt.timedelta(days=2000))
+    replay = _replay(lake, _run_key_of(heal_id), TODAY - dt.timedelta(days=1000))
+    assert evidence_retention.fn(today=TODAY) == 0
+    assert replay.exists()
+
+
+@pytest.mark.integration
+def test_a_replay_file_nothing_audited_is_swept_but_never_a_candidate_or_a_young_file(
+    db: Path, lake: Path
+) -> None:
+    """hold() writes the file, then commits its audit row. A crash or failed commit between the
+    two leaves a client-data file retention cannot see; it is swept past ORPHAN_GRACE."""
+    _client(days=90)
+    orphan = lake / "y.replay-dead00.parquet"
+    young_orphan = lake / "z.replay-beef01.parquet"
+    candidate = lake / "x.parquet"  # a live quarantine's own file: never a replay
+    for p in (orphan, young_orphan, candidate):
+        p.write_bytes(b"rows")
+    _age_out(orphan, days=3)
+    _age_out(candidate, days=3)
+    assert evidence_retention.fn(today=TODAY) == 1
+    assert not orphan.exists() and young_orphan.exists() and candidate.exists()
+    with Session() as s:
+        row = s.query(AuditLog).filter_by(action="replay_orphan_removed").one()
+        assert row.subject == "path:quarantine/y.replay-dead00.parquet"
+
+
+@pytest.mark.unit
+def test_the_quarantine_directory_name_matches_the_one_hold_writes_to() -> None:
+    from selector_drift.orchestrate.accept import QUARANTINE_DIR
+
+    assert retention_mod._QUARANTINE_DIR == QUARANTINE_DIR
