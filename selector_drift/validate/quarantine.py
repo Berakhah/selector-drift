@@ -260,6 +260,11 @@ def promote_and_land(
     it is run if anything after it fails -- the mark included -- so a failed promotion leaves no
     file and no cache row, the quarantine open, and a re-promotion clean (re-promotion is
     idempotent: nothing from the failed attempt remains to collide with).
+
+    Fix round 3: the compensation runs BEFORE the session rollback releases the row lock, so a
+    racing discard cannot commit over landed rows between the two; the session rollback is in a
+    `finally`, so a failing compensation still frees the lock and a failing rollback never skips
+    the compensation.
     """
     actor, reason = _decision(actor, reason)
     with session_factory() as s:
@@ -283,8 +288,16 @@ def promote_and_land(
             _resolve_promoted(s, q, run_key, actor, reason, validated.verdicts)
             s.commit()
         except BaseException:
-            s.rollback()
-            landed.rollback()  # under the row lock: a discard cannot slip in over landed rows
+            # Compensate FIRST, release SECOND. The row lock lives until the transaction ends,
+            # so while `landed.rollback()` runs it is still held and a racing discard cannot
+            # commit over the landed rows; only then does `s.rollback()` free it. The `finally`
+            # means a failing compensation still releases the lock, and a failing session
+            # rollback no longer skips the compensation. Either failure surfaces (the original
+            # exception stays as its __context__).
+            try:
+                landed.rollback()
+            finally:
+                s.rollback()
             raise
     try:
         landed.finish()  # the decision is final; maintenance failing must not undo it
