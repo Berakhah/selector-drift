@@ -11,6 +11,13 @@ the selector cache, and to evidence (API spec 7.2).
 
 `accept()` is the ONLY call site of the three acceptance writes (pinned by
 tests/orchestrate/test_evidence_ordering.py); each runs only after the previous one returned.
+
+A decision already taken is final (fix round 2). `hold()` of a window whose quarantine was
+promoted or discarded never overwrites the promoted rows and never re-opens the decision: the
+replay is held on its own `quarantine/<key>.replay-<uuid>.parquet`, audited `quarantine_replayed`,
+listed by `validate.quarantine.replays_of`, and protected from evidence retention while it
+exists. The intended path for a human who discarded a run and then FIXED THE CAUSE is a re-run
+under a new run key / an explicit operator action -- out of scope for 26A, a Task 26B follow-up.
 """
 
 from __future__ import annotations

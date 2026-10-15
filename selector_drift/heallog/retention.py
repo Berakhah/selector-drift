@@ -9,6 +9,11 @@ a link is skipped and audited, never followed.
 Fix round 1:
 - I2: a heal whose run has an unresolved quarantine is kept (audited `retention_skipped`,
   "quarantine open") -- promoting it later needs its bundle.
+- Fix round 2 (T26A): a replay of an already-decided window is held in
+  quarantine/*.replay-*.parquet (audited `quarantine_replayed`) and never re-opens the decision.
+  While that file exists its run's heal bundles are kept too (`retention_skipped`,
+  "replay held"), so evidence a human may still need is not silently purged. Retention never
+  touches the replay files themselves.
 - I4: every audit row is COMMITTED before its delete, so a crash mid-sweep can leave a bundle
   that is audited as expired but still present (retried next day), never one that is gone
   without its `evidence_expired` row.
@@ -101,6 +106,18 @@ def _sweep_dir(
     return removed
 
 
+def _replay_held(s: OrmSession) -> set[str]:
+    """Run keys with a replay still held on disk beside a decision already taken."""
+    held: set[str] = set()
+    for subject, detail in s.execute(
+        select(AuditLog.subject, AuditLog.detail).where(AuditLog.action == "quarantine_replayed")
+    ):
+        uri = detail.get("data_uri") if isinstance(detail, dict) else None
+        if isinstance(uri, str) and Path(uri).is_file():
+            held.add(subject)
+    return held
+
+
 @flow(name="evidence_retention")
 def evidence_retention(today: date | None = None) -> int:
     today = today or datetime.now(UTC).date()
@@ -117,6 +134,7 @@ def evidence_retention(today: date | None = None) -> int:
         open_quarantine = set(
             s.scalars(select(Quarantine.run_key).where(Quarantine.resolved_as.is_(None)))
         )
+        replay_held = _replay_held(s)
         heals = list(s.scalars(select(HealEvent).order_by(HealEvent.id)))
         heal_ids = {heal.id for heal in heals}
         for heal in heals:
@@ -132,6 +150,14 @@ def evidence_retention(today: date | None = None) -> int:
                     "retention_skipped",
                     subject,
                     {"target": heal.target, "why": "quarantine open"},
+                )
+                continue
+            if heal.run_key in replay_held:
+                _audit(
+                    s,
+                    "retention_skipped",
+                    subject,
+                    {"target": heal.target, "why": "replay held"},
                 )
                 continue
             if heal.target not in policy:
