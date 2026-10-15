@@ -390,3 +390,71 @@ def test_a_failing_session_rollback_does_not_skip_the_compensation(quarantined, 
     assert compensated == [True]
     row = _row(quarantined)
     assert row is not None and row.resolved_as is None
+
+
+# ---- Task 26A follow-up: a compensation that itself fails ------------------------------------
+
+
+def _chain(exc: BaseException) -> list[BaseException]:
+    seen: list[BaseException] = []
+    while exc is not None and exc not in seen:
+        seen.append(exc)
+        exc = exc.__context__
+    return seen
+
+
+@pytest.mark.integration
+def test_a_failing_compensation_still_frees_the_lock_and_keeps_the_original_in_the_chain(
+    quarantined, monkeypatch
+):
+    """A stranded landing is surfaced, not swallowed -- but it must not strand the row lock, and
+    the failed mark that caused it stays readable as the exception's context."""
+    _fail_the_final_mark(monkeypatch)
+
+    def compensate() -> None:
+        raise ValueError("undo failed")
+
+    with pytest.raises(ValueError, match="undo failed") as caught:
+        quarantine_mod.promote_and_land(
+            quarantined,
+            actor=ACTOR,
+            reason="checked",
+            rebuild=lambda k: first_heal_inputs(),
+            land=lambda v: quarantine_mod.Landed(rollback=compensate, finish=lambda: None),
+        )
+    assert any(isinstance(e, OSError) for e in _chain(caught.value))
+    assert not _row_is_locked_by_someone_else(quarantined)
+    row = _row(quarantined)
+    assert row is not None and row.resolved_as is None  # still open: nothing was marked
+    assert _audits() == []
+
+
+@pytest.mark.integration
+def test_a_failing_compensation_and_a_failing_rollback_keep_both_causes_in_the_chain(
+    quarantined, monkeypatch
+):
+    _fail_the_final_mark(monkeypatch)
+
+    def factory():
+        s = Session()
+
+        def broken_rollback() -> None:
+            raise RuntimeError("rollback itself failed")
+
+        s.rollback = broken_rollback
+        return s
+
+    def compensate() -> None:
+        raise ValueError("undo failed")
+
+    with pytest.raises(RuntimeError, match="rollback itself failed") as caught:
+        quarantine_mod.promote_and_land(
+            quarantined,
+            actor=ACTOR,
+            reason="checked",
+            rebuild=lambda k: first_heal_inputs(),
+            land=lambda v: quarantine_mod.Landed(rollback=compensate, finish=lambda: None),
+            session_factory=factory,
+        )
+    kinds = {type(e) for e in _chain(caught.value)}
+    assert {RuntimeError, ValueError, OSError} <= kinds
