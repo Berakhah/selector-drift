@@ -64,7 +64,7 @@ from selector_drift.resolve.trace import ResolvedElement
 from selector_drift.scope.record import AuthorisedTarget
 from selector_drift.spec.schema import FieldTarget, TaskSpec
 from selector_drift.validate.gate import ValidatedExtraction
-from selector_drift.validate.quarantine import QuarantinedRun
+from selector_drift.validate.quarantine import QuarantinedRun, bound_lock_wait
 from selector_drift.validate.verdict import Outcome, Verdict
 
 RunState = Literal["completed", "healed", "quarantined"]
@@ -164,7 +164,9 @@ def hold(
     )
     stem = fs_key(run_key)  # ':' is illegal in a Windows file name
     with Session() as s:
-        # The row lock serialises a replay with a human's decision (fix round 1).
+        # The row lock serialises a replay with a human's decision (fix round 1). A promotion
+        # holds it across file I/O and possible compaction, so the wait is bounded.
+        bound_lock_wait(s)
         existing = s.get(Quarantine, run_key, with_for_update=True)
         resolved_as = existing.resolved_as if existing is not None else None
         # A decision already taken is never re-opened, and the rows it promoted are never
