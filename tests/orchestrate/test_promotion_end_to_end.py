@@ -28,12 +28,16 @@ from selector_drift.heallog.evidence import heal_bundle_dir, last_accepted_dir
 from selector_drift.orchestrate.history import history_for
 from selector_drift.orchestrate.quarantine_actions import build_quarantine_actions
 from selector_drift.resolve import cascade
+from selector_drift.resolve.grid import column_header
+from selector_drift.resolve.page import PageSource
+from selector_drift.resolve.rungs.base import css_path
 from selector_drift.resolve.rungs.r1_cache import CacheRung
 from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
 from selector_drift.resolve.rungs.r3_anchors import AnchorRung
 from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
 from selector_drift.resolve.rungs.r5_visual import VisualRung
-from selector_drift.resolve.trace import Rung
+from selector_drift.resolve.trace import AnchorEvidence, ResolvedElement, Rung
+from selector_drift.spec.schema import FieldTarget
 from selector_drift.validate.quarantine import StillInvalid
 from tests.orchestrate.conftest import Bench
 from tests.orchestrate.test_pipeline_end_to_end import SPEC, rows_in_lake, run, state_of
@@ -140,14 +144,34 @@ def test_a_healed_run_writes_rows_a_heal_event_and_the_cache(
     assert {f: after[f] for f in unhealed} == {f: before[f] for f in unhealed}
 
 
+class _RealisticOffByOne(_OffByOneColumnRung):
+    """Task 26's off-by-one rung 4, made realistic: it records a real CSS path to the decoy cell
+    and the decoy column's own header as its anchor -- exactly what a real structural heal
+    would store. A poisoned cache entry built from it WOULD verify at rung 1 tomorrow, which is
+    what makes the next-day test below able to see a cache written from a quarantined run."""
+
+    def resolve(self, page: PageSource, target: FieldTarget) -> ResolvedElement | None:
+        found = super().resolve(page, target)
+        node = page.node(found.node_id) if found is not None else None
+        if found is None or node is None:
+            return None
+        header = column_header(page, node)
+        return ResolvedElement(
+            selector=css_path(node),
+            node_id=found.node_id,
+            anchor=AnchorEvidence(header_text=page.name(header) if header is not None else None),
+            rung_id=4,
+        )
+
+
 def fool_the_cascade(monkeypatch: pytest.MonkeyPatch) -> list[Rung]:
     """The plausible-but-wrong heal, made reachable in the live pipeline. The real cascade is
-    not fooled by DecoyColumn (rung 2 heals to the true Amount column and rung 4 agrees), so
-    Task 26's off-by-one rung 4 -- which trusts Amount's old column position and lands on the
-    decoy "Prior Amount" cell -- is placed in the cascade where it wins for `amount`, and the
-    SAME instance is injected as the gate's rung-4 healer, as in production. Returns the
-    confirmers the run must use."""
-    fooled = _OffByOneColumnRung()
+    not fooled by DecoyColumn (rung 2 heals to the true Amount column and rung 4 agrees), so an
+    off-by-one rung 4 -- which trusts Amount's old column position and lands on the decoy
+    "Prior Amount" cell -- is placed in the cascade where it wins for `amount`, and the SAME
+    instance is injected as the gate's rung-4 healer, as in production. Returns the confirmers
+    the run must use."""
+    fooled = _RealisticOffByOne()
     monkeypatch.setattr(
         cascade,
         "REGISTERED_RUNGS",
