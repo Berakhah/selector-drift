@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session as OrmSession
 
 from selector_drift.db.models import AuditLog, Quarantine
@@ -32,6 +32,7 @@ from selector_drift.validate.history import History
 from selector_drift.validate.verdict import Outcome, Verdict
 
 __all__ = [
+    "LOCK_TIMEOUT_MS",
     "AlreadyResolved",
     "GateInputs",
     "Landed",
@@ -40,6 +41,7 @@ __all__ = [
     "Rebuild",
     "Replay",
     "StillInvalid",
+    "bound_lock_wait",
     "discard",
     "mark_promoted",
     "promote",
@@ -143,8 +145,22 @@ def _decision(actor: str, reason: str) -> tuple[str, str]:
     return actor, reason
 
 
+LOCK_TIMEOUT_MS = 60_000  # how long a decision waits for another one's row lock; module global
+
+
+def bound_lock_wait(s: OrmSession) -> None:
+    """SET LOCAL lock_timeout for this transaction: a waiter fails (OperationalError, nothing
+    changed, the quarantine still open) instead of hanging. It bounds the WAIT, not the holder:
+    a promotion holds the row across file I/O and possibly lake compaction, and a statement
+    timeout would not cut that short (the slow part is not a statement)."""
+    s.execute(text(f"SET LOCAL lock_timeout = {int(LOCK_TIMEOUT_MS)}"))
+
+
 def _open(s: OrmSession, run_key: str) -> Quarantine:
-    q = s.get(Quarantine, run_key, with_for_update=True)  # row lock: two decisions can't both pass
+    # Row lock: two decisions can't both pass. NOTE the lock is held across file I/O and possible
+    # compaction when this is a promotion (promote_and_land); waiters are bounded above.
+    bound_lock_wait(s)
+    q = s.get(Quarantine, run_key, with_for_update=True)
     if q is None:
         raise NotInQuarantine(f"{run_key} is not in quarantine")
     if q.resolved_as is not None:
