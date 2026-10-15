@@ -39,7 +39,7 @@ from selector_drift.extract.models import CandidateExtraction, Row
 from selector_drift.heallog.bundle import AFTER_HTML, read_heal_manifest, verified_bytes
 from selector_drift.heallog.evidence import promote_heal_bundle_to_last_accepted
 from selector_drift.land.layout import PROVENANCE_COL
-from selector_drift.orchestrate.accept import accept
+from selector_drift.orchestrate.accept import Accepted, accept
 from selector_drift.orchestrate.cache_writer import CacheWriter
 from selector_drift.orchestrate.history import history_for
 from selector_drift.orchestrate.interventions import record_intervention
@@ -52,7 +52,7 @@ from selector_drift.spec.loader import load_scope, load_spec, scope_file, spec_f
 from selector_drift.validate import quarantine
 from selector_drift.validate.checks import checks_for
 from selector_drift.validate.gate import HealContext, ValidatedExtraction
-from selector_drift.validate.quarantine import GateInputs
+from selector_drift.validate.quarantine import GateInputs, Landed
 
 
 @dataclass(frozen=True)
@@ -195,7 +195,9 @@ def rebuild_gate_inputs(run_key: str) -> GateInputs:
     return GateInputs(candidate=candidate, history=history, contexts=contexts, checks=checks)
 
 
-def accept_promoted(run_key: str, validated: ValidatedExtraction, *, cache: CacheWriter) -> Path:
+def accept_promoted(
+    run_key: str, validated: ValidatedExtraction, *, cache: CacheWriter
+) -> Accepted:
     """A promoted run reaches the same single call site as a gate-accepted one, accept(). Its
     healed fields' elements come from its heal rows; a rung-1 field's entry is the one it hit.
     Its accepted page is its newest heal bundle's 'after' half; a quarantine with no stored
@@ -212,7 +214,9 @@ def accept_promoted(run_key: str, validated: ValidatedExtraction, *, cache: Cach
         if latest is not None:
             promote_heal_bundle_to_last_accepted(latest.id, target, Plane.CLIENT)
 
-    return accept(validated, elements, cache=cache, commit_last_accepted=commit)
+    return accept(
+        validated, elements, cache=cache, commit_last_accepted=commit, defer_compaction=True
+    )
 
 
 def _mark_heals_promoted(run_key: str, actor: str) -> None:
@@ -225,12 +229,13 @@ def _mark_heals_promoted(run_key: str, actor: str) -> None:
 
 def build_quarantine_actions() -> QuarantineActions:
     def _promote(run_key: str, actor: str, reason: str) -> None:
-        def land(validated: ValidatedExtraction) -> None:
+        def land(validated: ValidatedExtraction) -> Landed:
             if validated.run_key != run_key:  # Task 25 minor: the mark trusts any verdicts
                 raise ValueError(
                     f"promotion of {run_key} re-gated another run ({validated.run_key})"
                 )
-            accept_promoted(run_key, validated, cache=CacheWriter.for_run_key(run_key))
+            accepted = accept_promoted(run_key, validated, cache=CacheWriter.for_run_key(run_key))
+            return Landed(rollback=accepted.rollback, finish=accepted.finish)
 
         # One row lock from the re-gate to the mark (fix round 1): a racing discard waits, then
         # is refused, so the audit trail never disagrees with what landed.

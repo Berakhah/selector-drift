@@ -15,11 +15,14 @@ tests/orchestrate/test_evidence_ordering.py); each runs only after the previous 
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
+import logging
 import os
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -61,6 +64,34 @@ RunState = Literal["completed", "healed", "quarantined"]
 REDACTION_FAILED = "evidence redaction failed"
 QUARANTINE_DIR = "quarantine"  # under lake_root; never matched by land.layout.DATA_GLOB
 _VERDICTS = TypeAdapter(list[Verdict])
+_log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Accepted:
+    """What accept() wrote, and the means to take it back (fix round 2).
+
+    `rollback` removes the lake file and restores the cache rows this call wrote; a caller that
+    still has a step to take after accept() (a promotion's mark) runs it if that step fails.
+    `finish` is the compaction accept() deferred so that the file stays removable until then."""
+
+    path: Path
+    rollback: Callable[[], None]
+    finish: Callable[[], None]
+
+
+def _undo(steps: Sequence[Callable[[], None]]) -> None:
+    """Run every compensation, newest first; one failing never stops the others. A failed
+    compensation is logged loudly (type only: never page text) and re-raised after the rest."""
+    failed: list[BaseException] = []
+    for step in reversed(steps):
+        try:
+            step()
+        except Exception as exc:  # keep compensating; report all of them
+            failed.append(exc)
+            _log.error("compensation step failed: %s", type(exc).__name__)
+    if failed:
+        raise RuntimeError(f"{len(failed)} compensation step(s) failed") from failed[0]
 
 
 def accept(
@@ -70,14 +101,32 @@ def accept(
     cache: CacheWriter,
     commit_last_accepted: Callable[[], object],
     attempt: int | None = None,
-) -> Path:
+    defer_compaction: bool = False,
+) -> Accepted:
     """The ONLY call site of the three acceptance writes, in this order. Each runs only after
-    the previous one returned; an exception stops the rest (C2, API spec 7.2)."""
-    path = land_writer.write(validated, attempt=attempt)  # Task 28: the attempt is in the name
-    for field_name, element in elements.items():
-        cache.put(validated, element, field=field_name)
-    commit_last_accepted()
-    return path
+    the previous one returned; an exception stops the rest (C2, API spec 7.2).
+
+    All-or-nothing for what it controls: if the cache write or the last-accepted move fails,
+    the lake file is removed and the cache rows this call wrote are restored before the
+    exception propagates -- nothing is left that a later discard would contradict. (The
+    last-accepted page itself is idempotent to re-promote and is not reverted.)"""
+    path = land_writer.write(validated, attempt=attempt, compact=False)  # Task 28: attempt
+    steps: list[Callable[[], None]] = [lambda: path.unlink(missing_ok=True)]
+    try:
+        for field_name, element in elements.items():
+            steps.append(cache.put(validated, element, field=field_name))
+        commit_last_accepted()
+    except BaseException:
+        with contextlib.suppress(RuntimeError):  # logged by _undo; the caller must see the original
+            _undo(steps)
+        raise
+
+    def finish() -> None:
+        land_writer.compact_if_needed(path)
+
+    if not defer_compaction:
+        finish()
+    return Accepted(path, lambda: _undo(steps), finish)
 
 
 def hold(
