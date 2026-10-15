@@ -92,7 +92,17 @@ The selector cache holds one selector per field, so a portal that flips between 
 
 ## Value attacks on correct nodes: a known limit
 
-A value attack on the right nodes (the bench's `ValueSwap`) is refused only once a target has history: on its first run there is no accepted run for `RowKeyContinuity` to compare against, so it is written (pinned by `tests/suite/test_adversarial_refused.py`).
+A value attack on the right nodes (the bench's `ValueSwap`) is refused from the first run after a
+human-confirmed run with history: `RowKeyContinuity` compares a run with the last accepted run, and
+its collapse floor refuses a column whose values moved while every key stayed, even on a cache hit.
+Before that there is nothing to compare against, and **a human confirming run one is the only
+check**. A target's run one cannot write unconfirmed: with an empty cache every field is a heal,
+and on a heal the VALUE family's missing basis is a refusal, so a cold-start target's first run is
+always held for a human, whatever its page (pinned end to end by
+`tests/orchestrate/test_pipeline_end_to_end.py` and `test_promotion_end_to_end.py`; the cache and
+the history are populated only by that promotion). The Task 26 suite's "written on run one" case
+(`tests/suite/test_adversarial_refused.py`) judges a pre-warmed cache with no history -- a state
+the assembled pipeline cannot reach, because the cache is written only from an accepted run.
 
 ## Retention
 
@@ -198,3 +208,119 @@ that no published claim outruns them.
   (a source-text assertion pins that, per the Task 19 brief); page script could misreport them.
   They are display hints for the heal screen, not part of the mask, which is classified and
   verified over CDP.
+
+## The rung distribution (B11)
+
+`python -m selector_drift.orchestrate.rung_stats`, run after the bench campaign below -- the
+command's output, verbatim, not an estimate:
+
+```
+rung1 16.9% · rung2 69.7% · rung3 0.0% · rung4 13.1% · rung5 0.0%
+```
+
+**The campaign** (`scripts/bench_rung_campaign.py 60`, Task 26A, 2026-10-15). The assembled
+product ran once a day for 60 days (2026-01-01 .. 2026-03-01) against the bench portal served
+with its production mutation schedule: one or two benign classes every day, an adversarial class
+about one day in seven. The denominator is every field resolution (`resolutions`, 6 fields x 60
+runs), won or not. The operator policy is mechanical: every hold is offered for promotion the same
+day -- promoted if the gate lets a human confirm it, discarded if it still FAILs.
+
+| Outcome | Runs |
+|---|---|
+| completed (every field a rung-1 hit) | 7 |
+| healed and written | 33 |
+| held, then promoted (missing evidence only: run one, distributional warm-up, a virtualised table) | 5 |
+| held, then discarded (a FAIL) | 15 |
+
+Read the shares with the bench in mind. **Rung 1 is low because the bench mutates every day**: a
+production portal changes rarely, so most of its days are rung-1 hits; the bench's are not by
+design. Rung 5 is 0.0%: one field escalated to a human on a `DuplicateLabel` day (counted in
+rung-5's denominator as a resolution no rung won, and held). Rung 3 won nothing: it looks
+for the same expected label text as rung 2 (`resolve.labels.expected_label`), and rung 2 runs
+first, so on this bench whatever rung 3 could anchor on, rung 2 had already resolved. Rungs 2 and 4 carried
+every heal; with all model providers disabled (rung 5 is a refusal in v1), rungs 1-4 resolved
+every field on every benign day.
+
+**False refusals measured by the same campaign.** Of the 15 discards, 6 were adversarial days
+refused correctly (`ValueSwap` x2, `LocaleFlip` x3, a `DuplicateLabel` escalation) and **9 were
+benign days**, every one refused by `RowKeyContinuity` -- directly, or through
+`IndependentRungAgreement`'s VALUE-family fallback -- on a heal of `status` (twice also
+`amount`): continuity 0.84-0.94 against the 0.95 heal threshold. Claim statuses genuinely move day to day,
+and the comparison is with the last *accepted* run, so after a refusal the baseline ages and the
+next heal of a churning field is judged against more churn -- refusals cluster (five in a row at
+the end of the campaign). The gate errs toward refusing, as designed; the cost is a human review
+of a correct heal. This is reported, not tuned away: the 0.95 threshold is Task 22's published
+number. Whether a non-key field that churns by nature should be judged against a per-field
+churn baseline is an open question for review, not a change made here.
+
+Adversarial days the gate accepted (`DecoyColumn`, `HiddenDecoy` x3, `ImageHeader`) and the
+promoted `VirtualisedRows` day are not scored here: whether each write came from the true column
+is answered from the answer key by Task 26C's scorer, which the product cannot see.
+
+## Pipeline decisions (Task 26A)
+
+Each of these is a choice the assembled pipeline makes; each is stated so review can reject it.
+
+- **The cache is written only from an accepted run** -- a `ValidatedExtraction` minted by the
+  gate, or a human promotion that re-ran the gate -- and only for the fields that healed: a rung-1
+  hit already is its cache entry, so re-writing it would only move `set_by_run_key` off the run
+  that set it. `accept()` is the single call site of `land.write`, `cache.put` and the
+  last-accepted move, in that order.
+- **A cache read error fails the run** (fail-closed; ledger 395). One unreadable cache row stops
+  every run of that target with an alert until the row is fixed with `record_cache_edit()`; it is
+  never silently treated as a miss.
+- **`RedactionFailed` quarantines the run**, even one the gate passed, with reason
+  `evidence redaction failed`, the redaction verdict first and the gate's verdicts kept. No heal
+  bundle, no last-accepted move, no lake write, no cache write.
+- **A lake write that raises** (including post-write compaction, Task 28 M2) fails the attempt
+  before the cache or last-accepted move; Prefect's retry lands the run again under the next
+  attempt number, and the lake view deduplicates.
+- **Quality evaluation runs only on accepted runs**, after the lake write. Its two refusals --
+  `LookupError` (nothing landed) and `ScopeRefusal` (the scope record changed mid-run) -- leave the
+  run's state as accepted (the rows are already landed), record `quality not evaluated: ...` on
+  the run and the attempt, and post a `finding` alert.
+- **A navigation the portal answers with a 5xx fails the attempt** (`PortalUnavailable`), rather
+  than resolving against an error page.
+- **An escalated field quarantines the run** with reason `escalated` and no rows; a retry would
+  write a second resolutions row and corpus case. The heals of the other fields in such a run are
+  not recorded as heal events: the run holds nothing to promote.
+- **The history** (`orchestrate.history.history_for`, the one builder the gate and the quality
+  screen share) is the accepted and promoted runs of the current spec version, in windows before
+  the one being judged, with rows read back through the lake view.
+- **A discard is not an intervention.** It writes nothing but the audited decision
+  (`audit_log action=discard`); interventions count changes to what is extracted. The sanctioned
+  manual cache edit is `orchestrate.interventions.record_cache_edit()`; nothing in v1 edits the
+  cache by hand, so nothing calls it yet.
+- **Promotion re-gates from stored evidence**: the held rows with their provenance, the heal
+  bundle's `after` page (redacted), each field's last-attempt resolution with its extracted node
+  translated into the stored page's node ids, and the target's own warm-up and first-heal policy.
+  It supplies the human confirmation and never overrides a FAIL (`StillInvalid`: nothing written,
+  the quarantine left open, `promote_refused` audited).
+- **Injected session cookies** are handed to Chromium host-only (`domain` without a leading dot),
+  and a `__Host-` cookie keeps that form: Chromium refuses the `url=` form for a Secure cookie on
+  an http origin. Both are pinned on the wire by `tests/browser/test_session_cookies.py`.
+
+## Declared, not done in Task 26A
+
+- **Chromium's proxy-bypass rule for `https://host:443` vs `https://host/`** (Task 4, ledger 176)
+  is still unverified: no real https host on port 443 is reachable from the test environment. If
+  the rule does not match, every request to such a target is blocked by the dead proxy, so the run
+  fails closed; it is to be confirmed on the first https target before its first scheduled run.
+- **The API's use of `build_quarantine_actions()`** (`__main__ serve-api` handing the two
+  callables to `create_app()`) is Task 34's: the API does not exist yet.
+- **Task 23's statistical concerns** (null-sample PSI breaching on small samples; one unparseable
+  reference value flipping a numeric field to categorical) are unchanged here; only the third --
+  the reference window ignoring the spec version -- is closed, by `history_for`.
+- **Task 29's minor findings M1, M3, M4** (the zero-row CRITICAL path and the `unavailable`
+  DomSource fallback untested; `suppressed` unasserted on a marked-expected test; the shim
+  Finding's `extra="forbid"`) are test and comment work in `quality/`, not pipeline wiring. M2 --
+  a newly added field's null rate silently disabled, a fail-open -- is fixed. M5 (two history
+  builders) is closed by `history_for`.
+- **Task 28's minor findings M3, M6, M7** (a stray parquet breaking later writes; orphaned staging
+  directories; provenance dropping only top-level values) are land-internal. M2's run-state
+  mapping is decided above.
+- **Task 25's minor findings** other than the promoted run's key check (which `_promote` now
+  makes before anything lands): the `FOR UPDATE` pre-check, actor/reason validation tested only
+  via promote, and the fixed one-second race sleep.
+- **Task 29A's deployment concerns** (the worker's `deploys.jsonl` mount, the GitHub feed re-read
+  each check, the webhook title as free text) belong to the deploy work, not the pipeline.
