@@ -5,6 +5,7 @@ the intervention -- a lake failure in between leaves the quarantine open and ret
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,17 +16,31 @@ from selector_drift.orchestrate import quarantine_actions as qa
 RUN_KEY = "testbench:2:2026-10-01"
 
 
+def fake_promote_and_land(
+    log: list[str] | None = None, *, regated_run: str = RUN_KEY
+) -> Callable[..., object]:
+    """quarantine.promote_and_land without a database: re-gate, `land`, then mark -- the order
+    the real one holds under a single row lock (tests/orchestrate/test_decision_integrity.py)."""
+
+    def fake(run_key: str, *, land: Callable[[object], object], **_: object) -> object:
+        validated = SimpleNamespace(run_key=regated_run, verdicts=())
+        if log is not None:
+            log.append("promote")
+        land(validated)  # raises -> nothing is marked
+        if log is not None:
+            log.append("mark")
+        return validated
+
+    return fake
+
+
 @pytest.fixture
 def calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     log: list[str] = []
-    validated = SimpleNamespace(run_key=RUN_KEY, verdicts=())
-    monkeypatch.setattr(
-        qa.quarantine, "promote", lambda *a, **k: (log.append("promote"), validated)[1]
-    )
+    monkeypatch.setattr(qa.quarantine, "promote_and_land", fake_promote_and_land(log))
     monkeypatch.setattr(
         qa, "accept_promoted", lambda *a, **k: (log.append("land"), Path("/lake/x.parquet"))[1]
     )
-    monkeypatch.setattr(qa.quarantine, "mark_promoted", lambda *a, **k: log.append("mark"))
     monkeypatch.setattr(qa, "_mark_heals_promoted", lambda *a, **k: log.append("heals"))
     monkeypatch.setattr(qa, "record_intervention", lambda *a, **k: log.append("intervention"))
     monkeypatch.setattr(qa.CacheWriter, "for_run_key", classmethod(lambda cls, key: None))
@@ -54,15 +69,10 @@ def test_promotion_is_recorded_only_after_the_data_lands(
 def test_a_manual_promote_is_recorded_as_an_intervention(monkeypatch: pytest.MonkeyPatch) -> None:
     """Task 29A's dropped test, landed with quarantine_actions.py."""
     recorded: list[tuple[object, ...]] = []
-    monkeypatch.setattr(
-        qa.quarantine,
-        "promote",
-        lambda run_key, **k: SimpleNamespace(run_key=run_key, verdicts=()),
-    )
+    monkeypatch.setattr(qa.quarantine, "promote_and_land", fake_promote_and_land())
     monkeypatch.setattr(
         qa, "accept_promoted", lambda run_key, validated, *, cache: Path("/lake/x.parquet")
     )
-    monkeypatch.setattr(qa.quarantine, "mark_promoted", lambda *a, **k: None)
     monkeypatch.setattr(qa, "_mark_heals_promoted", lambda *a, **k: None)
     monkeypatch.setattr(qa.CacheWriter, "for_run_key", classmethod(lambda cls, run_key: object()))
     monkeypatch.setattr(qa, "record_intervention", lambda *a, **k: recorded.append(a) or 1)
@@ -75,12 +85,12 @@ def test_a_manual_promote_is_recorded_as_an_intervention(monkeypatch: pytest.Mon
 def test_a_promotion_regated_for_another_run_is_refused_before_anything_lands(
     calls: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Task 25 minor, taken in 26A: mark_promoted trusts any verdict list, so the validated
+    """Task 25 minor, taken in 26A: the mark trusts any verdict list, so the validated
     extraction must be checked to be THIS run's before anything is written."""
     monkeypatch.setattr(
         qa.quarantine,
-        "promote",
-        lambda *a, **k: (calls.append("promote"), SimpleNamespace(run_key="other:2:2026-10-01"))[1],
+        "promote_and_land",
+        fake_promote_and_land(calls, regated_run="other:2:2026-10-01"),
     )
     with pytest.raises(ValueError, match="another run"):
         qa.build_quarantine_actions().promote(RUN_KEY, "op1", "checked")

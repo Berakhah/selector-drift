@@ -15,8 +15,10 @@ tests/orchestrate/test_evidence_ordering.py); each runs only after the previous 
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal
@@ -27,7 +29,7 @@ from bok_core.boundary.egress import Plane
 from pydantic import TypeAdapter
 
 from selector_drift.config import get_settings
-from selector_drift.db.models import HealEvent, Quarantine
+from selector_drift.db.models import AuditLog, HealEvent, Quarantine
 from selector_drift.db.session import Session
 from selector_drift.extract.models import CandidateExtraction
 from selector_drift.heallog.capture import Evidence
@@ -86,8 +88,6 @@ def hold(
     Claims the gate judged instead of re-judging bare strings."""
     root = get_settings().lake_root / QUARANTINE_DIR
     root.mkdir(parents=True, exist_ok=True)
-    final = root / f"{fs_key(run_key)}.parquet"  # ':' is illegal in a Windows file name
-    tmp = final.with_name(f".{final.name}.tmp")
     records = [
         {name: str(claim.value) for name, claim in row.items()}
         | {
@@ -106,23 +106,46 @@ def hold(
         if records
         else pa.table({PROVENANCE_COL: pa.array([], pa.string())})
     )
-    try:
-        pq.write_table(table, tmp)
-        os.replace(tmp, final)
-    finally:
-        tmp.unlink(missing_ok=True)
+    stem = fs_key(run_key)  # ':' is illegal in a Windows file name
     with Session() as s:
-        s.merge(
-            Quarantine(
-                run_key=run_key,
-                reason=reason,
-                verdicts=_VERDICTS.dump_python(list(verdicts), mode="json"),
-                data_uri=str(final),
-                resolved_as=None,
-                actor=None,
-                resolved_at=None,
-            )
+        # The row lock serialises a replay with a human's decision (fix round 1).
+        existing = s.get(Quarantine, run_key, with_for_update=True)
+        resolved_as = existing.resolved_as if existing is not None else None
+        # A decision already taken is never re-opened, and the rows it promoted are never
+        # overwritten: a replay of a resolved window is held on its own file and only audited.
+        final = root / (
+            f"{stem}.replay-{uuid.uuid4().hex[:12]}.parquet"
+            if resolved_as is not None
+            else f"{stem}.parquet"
         )
+        tmp = final.with_name(f".{final.name}.tmp")
+        try:
+            pq.write_table(table, tmp)
+            os.replace(tmp, final)
+        finally:
+            tmp.unlink(missing_ok=True)
+        if resolved_as is not None:
+            s.add(
+                AuditLog(
+                    at=dt.datetime.now(dt.UTC),
+                    actor="scheduler",
+                    action="quarantine_replayed",
+                    subject=run_key,
+                    detail={"resolved_as": resolved_as, "reason": reason, "data_uri": str(final)},
+                )
+            )
+        else:
+            s.merge(
+                Quarantine(
+                    run_key=run_key,
+                    reason=reason,
+                    verdicts=_VERDICTS.dump_python(list(verdicts), mode="json"),
+                    data_uri=str(final),
+                    resolved_as=None,
+                    actor=None,
+                    resolved_at=None,
+                )
+            )
         s.commit()
     return str(final)
 

@@ -221,9 +221,15 @@ def test_every_heal_context_the_product_builds_carries_the_extracted_node() -> N
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Call) and ast.unparse(node.func) == "HealContext":
                 built += 1
-                kws = {k.arg for k in node.keywords}
-                assert "node_id" in kws, (
-                    f"{path}:{node.lineno} builds a HealContext without node_id"
+                where = f"{path}:{node.lineno}"
+                assert all(k.arg is not None for k in node.keywords), (
+                    f"{where} builds a HealContext with **kwargs: node_id cannot be checked"
+                )
+                given = {k.arg: k.value for k in node.keywords}
+                assert "node_id" in given, f"{where} builds a HealContext without node_id"
+                value = given["node_id"]
+                assert not (isinstance(value, ast.Constant) and value.value is None), (
+                    f"{where} passes node_id=None, which skips the comparison like omitting it"
                 )
     assert built >= 2  # the pipeline and the promotion rebuild
 

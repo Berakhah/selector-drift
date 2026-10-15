@@ -175,12 +175,13 @@ def _quarantine_reason(key: str) -> str | None:
 
 
 def _evaluate(key: str, target: str) -> tuple[list[Finding], str | None]:
-    """Quality over the landed rows (Task 29). Its two refusals are mapped, never swallowed
-    (ledger 588): the rows are already landed and accepted, so the run keeps its state, the
-    reason is recorded on it, and a human is told."""
+    """Quality over the landed rows (Task 29). Any failure is mapped, never swallowed (ledger
+    588; fix round 1): the rows are already landed and accepted, so the run keeps its state --
+    marking it failed would drop an accepted run from history -- the reason is recorded on it,
+    and a human is told."""
     try:
         return evaluate(key), None
-    except (LookupError, ScopeRefusal) as exc:
+    except Exception as exc:  # nothing after the lake write may fail the run
         note = f"quality not evaluated: {type(exc).__name__}: {exc}"
         post_alert("finding", target, key, note)
         return [], note

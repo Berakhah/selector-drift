@@ -171,9 +171,15 @@ def main(days: int) -> None:
                         key, "campaign", "operator policy: confirm what the gate allows"
                     )
                     decision = "promoted"
-                except (StillInvalid, ValueError):
+                except StillInvalid:
                     actions.discard(key, "campaign", "operator policy: the gate still refuses it")
                     decision = "discarded"
+                except ValueError as exc:  # rebuild_gate_inputs: nothing to promote (held empty)
+                    # Classified apart from a gate refusal and printed, so a real bug that raises
+                    # ValueError is seen in the campaign output instead of counted as a refusal.
+                    actions.discard(key, "campaign", f"unpromotable: {exc}"[:500])
+                    decision = "unpromotable"
+                    print(f"  {key}: unpromotable ({exc})")
                 decisions[decision] += 1
             print(f"{day}  {state:<11} {decision:<9} {','.join(scheduled_names(day, 'testbench'))}")
     finally:

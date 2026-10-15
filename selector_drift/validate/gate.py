@@ -34,8 +34,10 @@ class HealContext:
 
     `node_id` is the node the run EXTRACTED for this field, in `page`'s node-id space (Task 26A,
     ledger 551): IndependentRungAgreement FAILs a heal whose re-derivation lands elsewhere.
-    Every product construction passes it (tests/orchestrate/test_pipeline_wiring.py); None is
-    left only for unit tests that judge a check in isolation.
+    Every product construction passes it, as a real value rather than None -- pinned by
+    tests/orchestrate/test_pipeline_end_to_end.py::
+    test_every_heal_context_the_product_builds_carries_the_extracted_node. None is left only
+    for unit tests that judge a check in isolation.
     """
 
     healed: bool

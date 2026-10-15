@@ -5,14 +5,17 @@ Promotion re-runs the gate with human_confirmed=True (Task 25): it supplies the 
 confirmation and never overrides a FAIL. Then, in this order -- the record follows the data
 (ledger 2026-09-26):
 
-    quarantine.promote()        re-gate only; StillInvalid -> nothing written, quarantine open
-    accept_promoted()           accept(): land.write -> cache.put -> last-accepted   (C2)
-    quarantine.mark_promoted()  resolved_as="promoted" + the audit row
-    heal_events.promoted_by     the heals this human confirmed
-    record_intervention()       "manual_promote" (Task 29A)
+    quarantine.promote_and_land()   all under ONE quarantine row lock:
+        re-gate                     StillInvalid -> nothing written, quarantine open
+        accept_promoted()           accept(): land.write -> cache.put -> last-accepted   (C2)
+        mark                        resolved_as="promoted" + the audit row
+    heal_events.promoted_by         the heals this human confirmed
+    record_intervention()           "manual_promote" (Task 29A)
 
-A lake failure part-way leaves the quarantine open and retryable, never "promoted" with
-nothing landed. A discard writes nothing but the audited decision.
+A lake failure part-way rolls back and leaves the quarantine open and retryable, never
+"promoted" with nothing landed. A discard racing a promotion waits on the row and is then
+refused (AlreadyResolved): the audit trail cannot read "discarded" over rows that landed. A
+discard writes nothing but the audited decision.
 """
 
 from __future__ import annotations
@@ -222,13 +225,18 @@ def _mark_heals_promoted(run_key: str, actor: str) -> None:
 
 def build_quarantine_actions() -> QuarantineActions:
     def _promote(run_key: str, actor: str, reason: str) -> None:
-        validated = quarantine.promote(
-            run_key, actor=actor, reason=reason, rebuild=rebuild_gate_inputs
+        def land(validated: ValidatedExtraction) -> None:
+            if validated.run_key != run_key:  # Task 25 minor: the mark trusts any verdicts
+                raise ValueError(
+                    f"promotion of {run_key} re-gated another run ({validated.run_key})"
+                )
+            accept_promoted(run_key, validated, cache=CacheWriter.for_run_key(run_key))
+
+        # One row lock from the re-gate to the mark (fix round 1): a racing discard waits, then
+        # is refused, so the audit trail never disagrees with what landed.
+        quarantine.promote_and_land(
+            run_key, actor=actor, reason=reason, rebuild=rebuild_gate_inputs, land=land
         )
-        if validated.run_key != run_key:  # Task 25 minor: mark_promoted trusts any verdicts
-            raise ValueError(f"promotion of {run_key} re-gated another run ({validated.run_key})")
-        accept_promoted(run_key, validated, cache=CacheWriter.for_run_key(run_key))
-        quarantine.mark_promoted(run_key, actor=actor, reason=reason, verdicts=validated.verdicts)
         _mark_heals_promoted(run_key, actor)
         target, _version, _window = parse_run_key(run_key)
         record_intervention(

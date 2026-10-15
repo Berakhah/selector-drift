@@ -31,6 +31,7 @@ __all__ = [
     "discard",
     "mark_promoted",
     "promote",
+    "promote_and_land",
     "reconfirm",
 ]
 
@@ -130,6 +131,27 @@ def promote(
         raise
 
 
+def _resolve_promoted(
+    s: OrmSession,
+    q: Quarantine,
+    run_key: str,
+    actor: str,
+    reason: str,
+    verdicts: Sequence[Verdict],
+) -> None:
+    now = dt.datetime.now(dt.UTC)
+    q.resolved_as, q.actor, q.resolved_at = "promoted", actor, now
+    s.add(
+        AuditLog(
+            at=now,
+            actor=actor,
+            action="promote",
+            subject=run_key,
+            detail={"reason": reason, "verdicts": _dump(verdicts)},
+        )
+    )
+
+
 def mark_promoted(
     run_key: str,
     *,
@@ -140,20 +162,49 @@ def mark_promoted(
 ) -> None:
     """Record a promotion whose data has ALREADY landed (Task 26A's accept_promoted)."""
     actor, reason = _decision(actor, reason)
-    now = dt.datetime.now(dt.UTC)
     with session_factory() as s:
         q = _open(s, run_key)  # a concurrent decision wins first
-        q.resolved_as, q.actor, q.resolved_at = "promoted", actor, now
-        s.add(
-            AuditLog(
-                at=now,
-                actor=actor,
-                action="promote",
-                subject=run_key,
-                detail={"reason": reason, "verdicts": _dump(verdicts)},
-            )
-        )
+        _resolve_promoted(s, q, run_key, actor, reason, verdicts)
         s.commit()
+
+
+def promote_and_land(
+    run_key: str,
+    *,
+    actor: str,
+    reason: str,
+    rebuild: Rebuild,
+    land: Callable[[ValidatedExtraction], object],
+    session_factory: SessionFactory = Session,
+) -> ValidatedExtraction:
+    """The whole promotion under ONE row lock (Task 26A fix round 1): re-gate, land, mark.
+
+    A discard (or a second promotion) arriving meanwhile waits on the row and is then refused
+    with AlreadyResolved, so the audit trail can never read "discarded" over rows that landed.
+    If the re-gate fails or `land` raises, the transaction rolls back: nothing is marked and
+    the quarantine stays open and retryable. A refused re-gate is audited before the lock goes.
+    """
+    actor, reason = _decision(actor, reason)
+    with session_factory() as s:
+        q = _open(s, run_key)  # the lock is held until the commit below, or the rollback
+        try:
+            validated = reconfirm(run_key, rebuild(run_key))
+        except StillInvalid as exc:
+            s.add(
+                AuditLog(
+                    at=dt.datetime.now(dt.UTC),
+                    actor=actor,
+                    action="promote_refused",
+                    subject=run_key,
+                    detail={"reason": reason, "failing": _dump(exc.failing)},
+                )
+            )
+            s.commit()
+            raise
+        land(validated)  # an exception here rolls back: the quarantine is still open
+        _resolve_promoted(s, q, run_key, actor, reason, validated.verdicts)
+        s.commit()
+    return validated
 
 
 def discard(
