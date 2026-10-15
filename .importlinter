@@ -113,7 +113,12 @@ source_modules =
     selector_drift.quality
     selector_drift.extract
     selector_drift.browser
+    selector_drift.scope
+    selector_drift.spec
+    selector_drift.credentials
+    selector_drift.db
 forbidden_modules =
     selector_drift.orchestrate.cache_writer
 # Task 17 Step 8, landed with Task 26A. Widened from the plan's four source packages to every
-# product package outside orchestrate/: none of them has a reason to hold the writer.
+# product package outside orchestrate/: none of them has a reason to hold the writer. Fix round
+# 1 (M1) completed the list -- scope, spec, credentials and db were the packages still missing.
