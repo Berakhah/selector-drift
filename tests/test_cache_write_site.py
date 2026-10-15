@@ -51,13 +51,48 @@ def _is_built_string(node: ast.AST) -> bool:
     )
 
 
+def _str_const(node: ast.AST) -> str:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else ""
+
+
+def _filled(node: ast.AST) -> str:
+    """A `'..'.format(..)` or `'..' % (..)` with its constant arguments put into the template's
+    holes. In the source the template precedes its arguments, so reading constants in source
+    order cannot see a name split between the template and an argument."""
+    try:
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "format"
+            and isinstance(node.func.value, ast.Constant)
+            and isinstance(node.func.value.value, str)
+        ):
+            return node.func.value.value.format(
+                *map(_str_const, node.args),
+                **{k.arg: _str_const(k.value) for k in node.keywords if k.arg},
+            )
+        if (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Mod)
+            and isinstance(node.left, ast.Constant)
+            and isinstance(node.left.value, str)
+        ):
+            args = node.right.elts if isinstance(node.right, ast.Tuple) else [node.right]
+            return node.left.value % tuple(map(_str_const, args))
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        pass  # a template this cannot fill is still judged by the two spellings below
+    return ""
+
+
 def _text_of(node: ast.AST) -> str:
-    """The constants of a built string, both spaced (word boundaries kept) and run together (a
-    name split across parts, 'selector_' + 'cache', reads whole), so either spelling is seen."""
+    """The constants of a built string, spaced (word boundaries kept), run together (a name
+    split across parts, 'selector_' + 'cache', reads whole) and, for .format / %, with the
+    arguments put into the template's holes, so any of the three spellings is seen."""
     consts = [n for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
     consts.sort(key=lambda n: (n.lineno, n.col_offset))  # source order, not BFS order
     parts = [n.value for n in consts]
-    return (" ".join(parts) + "\n" + "".join(parts)).lower()
+    filled = "\n".join(_filled(n) for n in ast.walk(node))
+    return (" ".join(parts) + "\n" + "".join(parts) + "\n" + filled).lower()
 
 
 def write_site_offences(path: Path, tree: ast.AST) -> list[str]:
@@ -143,6 +178,13 @@ BUILT_ONLY = {
     "split name by join": "def f(s):\n    s.execute(''.join(['truncate selector_', 'cache']))\n",
     "variable between the parts": (
         "def f(s, name):\n    s.execute('insert into ' + name + 'selector_' + 'cache')\n"
+    ),
+    # The template precedes its arguments in the source, but they fill its holes in the text.
+    "template before its format argument": (
+        "def f(s):\n    s.execute('insert into {}cache'.format('selector_'))\n"
+    ),
+    "template before its % argument": (
+        "def f(s):\n    s.execute('delete from %scache' % ('selector_',))\n"
     ),
 }
 BUILT_RULE = "builds SQL that writes the cache table"
