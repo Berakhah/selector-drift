@@ -250,9 +250,14 @@ class _DemoAccount:
 
 
 def _point_product_at(
-    url: str, scopes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    url: str, scopes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, warmup_runs: int
 ) -> None:
-    write_scope(scopes, scope_record("testbench", url, rate_limit=FAST))
+    # Authorised from START, so a test may run the product for any window in the bench's year,
+    # not only today (the flow's window) and yesterday.
+    rec = scope_record(
+        "testbench", url, rate_limit=FAST, authorised_on=START, warmup_runs=warmup_runs
+    )
+    write_scope(scopes, rec)
     for name, sub in (
         ("SD_LAKE_ROOT", "lake"),
         ("SD_EVIDENCE_ROOT", "evidence"),
@@ -284,6 +289,7 @@ def _bench(
     *,
     mutated_day: dt.date | None = None,
     middleware: Callable[[Any], None] | None = None,
+    warmup_runs: int = 5,
 ) -> Iterator[Bench]:
     _bench_env(monkeypatch, secrets.token_hex(32))
     state = Bench(url="", day=day, mutated_day=mutated_day)
@@ -292,7 +298,7 @@ def _bench(
         middleware(app)
     for url in _serve(app):
         state.url = url
-        _point_product_at(url, scopes, tmp_path, monkeypatch)
+        _point_product_at(url, scopes, tmp_path, monkeypatch, warmup_runs=warmup_runs)
         yield state
     get_settings.cache_clear()
 
@@ -326,22 +332,27 @@ def bench(
 def bench_mutated(
     db: None, scope_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[Bench]:
-    """LabelReword only, on a day it is scheduled; `day` starts on the clean day before."""
+    """LabelReword only, on a day it is scheduled; `day` starts on the clean day before. A
+    warm-up of one accepted run, so a heal of a distributional field can be judged after a
+    single promotion (with the bench's five, the gate holds it as warm-up -- by design)."""
     clean, first = _mutated("LabelReword")
     yield from _bench(
-        _only("LabelReword"), clean, scope_dir, tmp_path, monkeypatch, mutated_day=first
-    )
+        _only("LabelReword"), clean, scope_dir, tmp_path, monkeypatch, mutated_day=first,
+        warmup_runs=1,
+    )  # fmt: skip
 
 
 @pytest.fixture
 def bench_decoy(
     db: None, scope_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[Bench]:
-    """DecoyColumn only (the plausible-but-wrong adjacent column); `day` starts clean."""
+    """DecoyColumn only (the plausible-but-wrong adjacent column); `day` starts clean. Warm-up
+    of one, as bench_mutated, so a refusal is the gate's judgement and not the warm-up."""
     clean, first = _mutated("DecoyColumn")
     yield from _bench(
-        _only("DecoyColumn"), clean, scope_dir, tmp_path, monkeypatch, mutated_day=first
-    )
+        _only("DecoyColumn"), clean, scope_dir, tmp_path, monkeypatch, mutated_day=first,
+        warmup_runs=1,
+    )  # fmt: skip
 
 
 @pytest.fixture
