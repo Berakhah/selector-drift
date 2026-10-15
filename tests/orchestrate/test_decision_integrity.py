@@ -120,6 +120,10 @@ def test_a_replay_of_a_discarded_window_stays_discarded(bench: Bench) -> None:
         ).all()
     (replay,) = replays
     assert replay.detail["resolved_as"] == "discarded" and replay.detail["data_uri"] != q.data_uri
+    # The read path a human (and the API, Task 34) sees: the replay is listed, never silent.
+    (seen,) = quarantine.replays_of(key)
+    assert (seen.resolved_as, seen.data_uri) == ("discarded", replay.detail["data_uri"])
+    assert quarantine.replays_of("testbench:2:2020-01-01") == []
 
 
 @pytest.mark.integration

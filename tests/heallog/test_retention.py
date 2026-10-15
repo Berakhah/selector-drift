@@ -203,6 +203,54 @@ def test_a_heal_with_an_open_quarantine_is_kept(db: Path) -> None:
 
 
 @pytest.mark.integration
+def test_a_replay_held_beside_a_decision_keeps_its_evidence(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 2: a replay of an already-decided window is held in quarantine/*.replay-*.parquet
+    and never re-opens the decision. Its evidence must not be silently purged while that file
+    exists -- and retention never touches the replay file itself."""
+    monkeypatch.setenv("SD_LAKE_ROOT", str(tmp_path / "lake"))
+    get_settings.cache_clear()
+    _client()
+    heal_id = _heal(db, "client-portal", TODAY - dt.timedelta(days=200))
+    replay = tmp_path / "lake" / "quarantine" / "x.replay-abc123.parquet"
+    replay.parent.mkdir(parents=True)
+    replay.write_bytes(b"held rows")
+    with Session() as s:
+        heal = s.get(HealEvent, heal_id)
+        assert heal is not None
+        s.add(
+            Quarantine(
+                run_key=heal.run_key,
+                reason="first heal",
+                verdicts=[],
+                data_uri="x",
+                resolved_as="discarded",
+                actor="op1",
+                resolved_at=datetime(2026, 12, 1, tzinfo=UTC),
+            )
+        )
+        s.add(
+            AuditLog(
+                at=datetime(2026, 12, 2, tzinfo=UTC),
+                actor="scheduler",
+                action="quarantine_replayed",
+                subject=heal.run_key,
+                detail={"resolved_as": "discarded", "reason": "r", "data_uri": str(replay)},
+            )
+        )
+        s.commit()
+    assert evidence_retention.fn(today=TODAY) == 0
+    assert (db / "heals" / str(heal_id)).exists() and replay.read_bytes() == b"held rows"
+    with Session() as s:
+        skipped = s.query(AuditLog).filter_by(action="retention_skipped").one()
+        assert skipped.detail["why"] == "replay held"
+    replay.unlink()  # once nothing is held any more, the usual policy applies
+    assert evidence_retention.fn(today=TODAY) == 1
+    assert not (db / "heals" / str(heal_id)).exists()
+
+
+@pytest.mark.integration
 def test_every_audit_row_is_committed_before_its_delete(
     db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
