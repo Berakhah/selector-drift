@@ -1,7 +1,15 @@
 # selector_drift/validate/quarantine.py
 """Quarantine keeps the run; a human promotes or discards it, audited (design 5.9).
 Promotion RE-RUNS the gate with human_confirmed=True: it supplies missing evidence and never
-skips a check. This module never lands data -- orchestrate.accept_promoted does (Task 26A)."""
+skips a check. This module never lands data -- orchestrate.accept_promoted does (Task 26A).
+
+A decision already taken is final (fix round 2). `hold()` of a window whose quarantine was
+promoted or discarded never overwrites the promoted rows and never re-opens the decision: the
+replay is held on its own `quarantine/<key>.replay-<uuid>.parquet`, audited `quarantine_replayed`,
+listed by `validate.quarantine.replays_of`, and protected from evidence retention while it
+exists. The intended path for a human who discarded a run and then FIXED THE CAUSE is a re-run
+under a new run key / an explicit operator action -- out of scope for 26A, a Task 26B follow-up.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +20,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
 from selector_drift.db.models import AuditLog, Quarantine
@@ -29,12 +38,14 @@ __all__ = [
     "NotInQuarantine",
     "QuarantinedRun",
     "Rebuild",
+    "Replay",
     "StillInvalid",
     "discard",
     "mark_promoted",
     "promote",
     "promote_and_land",
     "reconfirm",
+    "replays_of",
 ]
 
 _log = logging.getLogger(__name__)
@@ -90,6 +101,37 @@ def reconfirm(run_key: str, inputs: GateInputs) -> ValidatedExtraction:
     if isinstance(result, QuarantinedRun):
         raise StillInvalid(list(result.verdicts))
     return result
+
+
+@dataclass(frozen=True)
+class Replay:
+    """A re-run of a window whose quarantine was already decided: held on its own file, audited,
+    and never a re-opening of the decision (fix round 2)."""
+
+    at: dt.datetime
+    resolved_as: str
+    reason: str
+    data_uri: str
+
+
+def replays_of(run_key: str, *, session_factory: SessionFactory = Session) -> list[Replay]:
+    """The read path for `quarantine_replayed` audit rows of one run, oldest first. The API
+    (Task 34) lists these beside the decision so a replay is never silent."""
+    with session_factory() as s:
+        rows = s.scalars(
+            select(AuditLog)
+            .where(AuditLog.subject == run_key, AuditLog.action == "quarantine_replayed")
+            .order_by(AuditLog.at, AuditLog.id)
+        )
+        return [
+            Replay(
+                at=r.at,
+                resolved_as=str(r.detail.get("resolved_as", "")),
+                reason=str(r.detail.get("reason", "")),
+                data_uri=str(r.detail.get("data_uri", "")),
+            )
+            for r in rows
+        ]
 
 
 def _decision(actor: str, reason: str) -> tuple[str, str]:
