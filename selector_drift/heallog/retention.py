@@ -137,6 +137,11 @@ def _replay_name(uri: str) -> str | None:
     return name if fnmatch.fnmatchcase(name, _REPLAY_GLOB) and not name.startswith(".") else None
 
 
+def _utc_date(at: datetime) -> date:
+    """The day a replay was made, in UTC: the session may hand back any zone."""
+    return at.astimezone(UTC).date()
+
+
 def _quarantine_dir() -> Path:
     return get_settings().lake_root / _QUARANTINE_DIR
 
@@ -151,16 +156,22 @@ def _expire_replays(s: OrmSession, policy: dict[str, int | None], today: date) -
     deleted = 0
     targets = dict(s.execute(select(Run.run_key, Run.target)).tuples().all())
     for run_key, at, uri in _replays(s):
-        days = policy.get(targets.get(run_key, ""))
-        if days is None or (today - at.date()).days < days:
-            continue
+        target = targets.get(run_key)
+        stated = target is not None and target in policy
+        days = policy.get(target) if target is not None else None
+        if stated and (days is None or (today - _utc_date(at)).days < days):
+            continue  # self-owned: life of the log; or not yet due
         name = _replay_name(uri)
-        if name is None:
+        path = directory / name if name is not None else None
+        if path is not None and not (path.exists() or is_link(path)):
+            continue  # already gone
+        if not stated:
+            # Fail loud, not open, as the heals do: no stated policy means it is kept, and said.
+            _audit(s, "retention_skipped", run_key, {"why": "no scope record", "data_uri": uri})
+            continue
+        if path is None or days is None:
             # Audited, never followed: a stored string is not an authority to delete anything.
             _audit(s, "retention_skipped", run_key, {"why": "not a replay file", "data_uri": uri})
-            continue
-        path = directory / name
-        if not (path.exists() or is_link(path)):
             continue
         detail = {"data_uri": str(path), "retention_days": days, "replayed_at": at.isoformat()}
         if _remove(s, path, "replay_expired", run_key, detail):

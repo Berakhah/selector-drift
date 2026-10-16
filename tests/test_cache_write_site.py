@@ -55,10 +55,23 @@ def _str_const(node: ast.AST) -> str:
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else ""
 
 
+def _dict_of(node: ast.AST) -> dict[str, str]:
+    """A dict literal's constant-string keys and values; anything else it holds reads as ''."""
+    if not isinstance(node, ast.Dict):
+        return {}
+    return {
+        k.value: _str_const(v)
+        for k, v in zip(node.keys, node.values, strict=True)
+        if isinstance(k, ast.Constant) and isinstance(k.value, str)
+    }
+
+
 def _filled(node: ast.AST) -> str:
     """A `'..'.format(..)` or `'..' % (..)` with its constant arguments put into the template's
     holes. In the source the template precedes its arguments, so reading constants in source
-    order cannot see a name split between the template and an argument."""
+    order cannot see a name split between the template and an argument. Known limit: a
+    template reaching into an argument (`'{0.x}'`) or an argument held in a variable is not
+    filled in, so only the two spellings below judge it."""
     try:
         if (
             isinstance(node, ast.Call)
@@ -67,16 +80,19 @@ def _filled(node: ast.AST) -> str:
             and isinstance(node.func.value, ast.Constant)
             and isinstance(node.func.value.value, str)
         ):
-            return node.func.value.value.format(
-                *map(_str_const, node.args),
-                **{k.arg: _str_const(k.value) for k in node.keywords if k.arg},
-            )
+            named = {k.arg: _str_const(k.value) for k in node.keywords if k.arg}
+            for k in node.keywords:
+                if k.arg is None:  # **{...}
+                    named |= _dict_of(k.value)
+            return node.func.value.value.format(*map(_str_const, node.args), **named)
         if (
             isinstance(node, ast.BinOp)
             and isinstance(node.op, ast.Mod)
             and isinstance(node.left, ast.Constant)
             and isinstance(node.left.value, str)
         ):
+            if isinstance(node.right, ast.Dict):
+                return node.left.value % _dict_of(node.right)
             args = node.right.elts if isinstance(node.right, ast.Tuple) else [node.right]
             return node.left.value % tuple(map(_str_const, args))
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
@@ -185,6 +201,12 @@ BUILT_ONLY = {
     ),
     "template before its % argument": (
         "def f(s):\n    s.execute('delete from %scache' % ('selector_',))\n"
+    ),
+    "template before its % dict": (
+        "def f(s):\n    s.execute('delete from %(t)scache' % {'t': 'selector_'})\n"
+    ),
+    "template before its ** dict": (
+        "def f(s):\n    s.execute('update {t}cache set x=1'.format(**{'t': 'selector_'}))\n"
     ),
 }
 BUILT_RULE = "builds SQL that writes the cache table"
