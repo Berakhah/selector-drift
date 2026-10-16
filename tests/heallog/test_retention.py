@@ -487,6 +487,41 @@ def test_a_replay_audited_under_another_lake_path_still_expires(
 
 
 @pytest.mark.integration
+def test_a_replay_with_no_stated_policy_is_kept_and_flagged_not_kept_silently(
+    db: Path, lake: Path
+) -> None:
+    """The heals say so when no scope record states a policy; client data in a replay must not
+    sit forever with no signal. Both a target with no scope record and a run that is not in the
+    runs table at all are kept (fail loud, not open) and audited as skipped."""
+    ghost_heal = _heal(db, "ghost-portal", TODAY - dt.timedelta(days=200))  # no scope record
+    runless = "nowhere:1:2026-01-01"  # no runs row either
+    kept = [
+        _replay(lake, _run_key_of(ghost_heal), TODAY - dt.timedelta(days=100), "a.replay-aaaa00"),
+        _replay(lake, runless, TODAY - dt.timedelta(days=100), "b.replay-bbbb00"),
+    ]
+    evidence_retention.fn(today=TODAY)
+    assert all(p.exists() for p in kept)
+    with Session() as s:
+        for key in (_run_key_of(ghost_heal), runless):
+            row = (
+                s.query(AuditLog)
+                .filter_by(action="retention_skipped", subject=key)
+                .filter(AuditLog.detail["why"].astext == "no scope record")
+                .all()
+            )
+            assert len(row) >= 1, key
+
+
+@pytest.mark.unit
+def test_a_replay_date_is_counted_in_utc_whatever_zone_the_session_returns() -> None:
+    """23:30 UTC on the 1st is 02:30 on the 2nd in UTC+3: the replay was made on the 1st."""
+    plus3 = dt.timezone(dt.timedelta(hours=3))
+    assert retention_mod._utc_date(datetime(2026, 12, 2, 2, 30, tzinfo=plus3)) == dt.date(
+        2026, 12, 1
+    )
+
+
+@pytest.mark.integration
 def test_expiry_never_deletes_a_path_outside_the_quarantine_directory(
     db: Path, lake: Path, tmp_path: Path
 ) -> None:

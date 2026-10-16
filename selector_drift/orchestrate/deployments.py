@@ -75,8 +75,9 @@ def watch_deployment() -> RunnerDeployment:
 
 
 def retention_deployment() -> RunnerDeployment:
-    """Closes M30: client heal bundles expire after the scope record's evidence_retention_days
-    (heallog/retention.py); the heal_events rows and every count remain."""
+    """Closes M30: client heal bundles, and the replay files held beside a decided quarantine,
+    expire after the scope record's evidence_retention_days (heallog/retention.py); the
+    heal_events rows and every count remain."""
     return cast(
         RunnerDeployment,
         evidence_retention.to_deployment(
@@ -84,7 +85,7 @@ def retention_deployment() -> RunnerDeployment:
             schedules=[Cron(RETENTION_CRON, timezone=SCHEDULE_TIMEZONE)],
             job_variables=dict(RETENTION_JOB_LIMITS),
             tags=["retention"],
-            description="daily: delete client heal bundles past their retention",
+            description="daily: delete client heal bundles and replay files past their retention",
         ),
     )
 

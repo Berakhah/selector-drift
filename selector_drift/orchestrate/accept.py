@@ -16,8 +16,10 @@ A decision already taken is final (fix round 2). `hold()` of a window whose quar
 promoted or discarded never overwrites the promoted rows and never re-opens the decision: the
 replay is held on its own `quarantine/<key>.replay-<uuid>.parquet`, audited `quarantine_replayed`,
 listed by `validate.quarantine.replays_of`, and protected from evidence retention while it
-exists. The intended path for a human who discarded a run and then FIXED THE CAUSE is a re-run
-under a new run key / an explicit operator action -- out of scope for 26A, a Task 26B follow-up.
+exists: heallog.retention deletes it once the target's evidence_retention_days have passed since
+the replay (audited `replay_expired`), and releases the heal bundles it pinned. The intended path
+for a human who discarded a run and then FIXED THE CAUSE is a re-run under a new run key / an
+explicit operator action -- not built, and not part of Task 26A or the plan's Task 26B.
 """
 
 from __future__ import annotations
