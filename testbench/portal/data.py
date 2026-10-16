@@ -144,13 +144,19 @@ def _base_set() -> tuple[Claim, ...]:
 
 
 def _apply_delta(claims: tuple[Claim, ...], day: dt.date) -> tuple[Claim, ...]:
-    """About 2% of claims change Amount or Status, about 3 close, about 5 are filed, and claims
-    older than three years are archived. Seeded from the date alone."""
+    """About 2% of live claims change Amount or Status, about 3 close, about 5 are filed, and
+    claims older than three years are archived. Seeded from the date alone.
+
+    The rate is taken over the population it is applied to: the live claims (Task 26B). It was
+    taken over ALL claims while every change landed on a live one, and closed claims accumulate,
+    so ~40% of live claims -- nearly every row on the newest-first results page -- moved each day
+    and every benign heal of a churning field was refused (tests/testbench/test_page_continuity.py).
+    """
     rng = random.Random(_seed(f"delta:{day.isoformat()}"))
     by_key = {c.claim_number: c for c in claims}
 
     live = sorted(k for k, c in by_key.items() if c.status is not Status.CLOSED)
-    for key in rng.sample(live, min(len(live), max(1, round(len(by_key) * CHANGE_RATE)))):
+    for key in rng.sample(live, min(len(live), max(1, round(len(live) * CHANGE_RATE)))):
         claim = by_key[key]
         if rng.random() < 0.5:
             by_key[key] = replace(claim, amount=_nudge(claim.amount, rng))
