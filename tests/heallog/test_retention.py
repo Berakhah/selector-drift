@@ -433,3 +433,85 @@ def test_the_quarantine_directory_name_matches_the_one_hold_writes_to() -> None:
     from selector_drift.orchestrate.accept import QUARANTINE_DIR
 
     assert retention_mod._QUARANTINE_DIR == QUARANTINE_DIR
+
+
+# --- review fixes: a replay is found by its NAME under today's lake, never by a stored path ---
+
+
+def _audit_replay(run_key: str, replayed_on: dt.date, data_uri: str) -> None:
+    with Session() as s:
+        s.add(
+            AuditLog(
+                at=datetime.combine(replayed_on, dt.time(4, 12), UTC),
+                actor="scheduler",
+                action="quarantine_replayed",
+                subject=run_key,
+                detail={"resolved_as": "discarded", "reason": "r", "data_uri": data_uri},
+            )
+        )
+        s.commit()
+
+
+@pytest.mark.integration
+def test_a_replay_audited_under_another_lake_path_is_not_mistaken_for_an_orphan(
+    db: Path, lake: Path, tmp_path: Path
+) -> None:
+    """The audit row stores the path hold() used. If the lake is later remounted or its root
+    respelled, every audited replay would read as an orphan and be deleted a day later, whatever
+    its target's policy. The file is found by name, so an audited replay is never an orphan."""
+    _client(days=90)
+    heal_id = _heal(db, "client-portal", TODAY - dt.timedelta(days=200))
+    replay = lake / "x.replay-abc123.parquet"
+    replay.write_bytes(b"held rows")
+    _age_out(replay, days=3)
+    old_mount = tmp_path / "old-mount" / "quarantine" / replay.name
+    _audit_replay(_run_key_of(heal_id), TODAY - dt.timedelta(days=10), str(old_mount))
+    assert evidence_retention.fn(today=TODAY) == 0
+    assert replay.exists()
+    with Session() as s:
+        assert s.query(AuditLog).filter_by(action="replay_orphan_removed").count() == 0
+
+
+@pytest.mark.integration
+def test_a_replay_audited_under_another_lake_path_still_expires(
+    db: Path, lake: Path, tmp_path: Path
+) -> None:
+    _client(days=90)
+    heal_id = _heal(db, "client-portal", TODAY - dt.timedelta(days=200))
+    replay = lake / "x.replay-abc123.parquet"
+    replay.write_bytes(b"held rows")
+    old_mount = tmp_path / "old-mount" / "quarantine" / replay.name
+    _audit_replay(_run_key_of(heal_id), TODAY - dt.timedelta(days=100), str(old_mount))
+    assert evidence_retention.fn(today=TODAY) == 2  # the replay, then the bundle it pinned
+    assert not replay.exists()
+
+
+@pytest.mark.integration
+def test_expiry_never_deletes_a_path_outside_the_quarantine_directory(
+    db: Path, lake: Path, tmp_path: Path
+) -> None:
+    """The audit row's data_uri is a stored string, not an authority. Retention deletes only a
+    replay-named file inside <lake>/quarantine: anything else the row names is audited as
+    skipped and left alone -- a file, and a directory that merely carries a replay's name."""
+    _client(days=90)
+    heal_id = _heal(db, "client-portal", TODAY - dt.timedelta(days=200))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    precious = outside / "precious.txt"
+    precious.write_text("not a replay")
+    lookalike = outside / "d.replay-feed00.parquet"
+    lookalike.mkdir()
+    (lookalike / "inner.txt").write_text("not a replay either")
+    run_key = _run_key_of(heal_id)
+    for target in (precious, lookalike):
+        _audit_replay(run_key, TODAY - dt.timedelta(days=100), str(target))
+    evidence_retention.fn(today=TODAY)
+    assert precious.exists() and (lookalike / "inner.txt").exists()
+    with Session() as s:
+        assert s.query(AuditLog).filter_by(action="replay_expired").count() == 0
+        why = {
+            r.detail["why"]
+            for r in s.query(AuditLog).filter_by(action="retention_skipped")
+            if r.subject == run_key
+        }
+        assert "not a replay file" in why
