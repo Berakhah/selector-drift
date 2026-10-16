@@ -25,7 +25,7 @@ from selector_drift.resolve.page import StaticPageSource
 from selector_drift.resolve.rungs.r2_axtree import AxTreeRung
 from selector_drift.resolve.rungs.r3_anchors import AnchorRung
 from selector_drift.resolve.rungs.r4_heuristics import HeuristicRung
-from selector_drift.resolve.trace import CascadeTrace, ResolvedElement, Rung
+from selector_drift.resolve.trace import CascadeTrace, Family, ResolvedElement, Rung
 from selector_drift.scope.record import FirstHealPolicy
 from selector_drift.spec.loader import load_spec
 from selector_drift.spec.schema import FieldTarget
@@ -34,6 +34,7 @@ from selector_drift.validate.checks import checks_for
 from selector_drift.validate.gate import HealContext, ValidatedExtraction, gate_run
 from selector_drift.validate.history import AcceptedRun, History
 from selector_drift.validate.quarantine import QuarantinedRun
+from selector_drift.validate.verdict import Confirmation, Verdict
 from testbench.mutations.base import apply_all
 from testbench.mutations.catalogue import CATALOGUE
 from testbench.portal.render import render_results  # Task 7: render.py, not data.py
@@ -135,6 +136,44 @@ def judge_run(
     return elements, gate_run(
         candidate, history, contexts, {t.name: all_checks(t, confirmers) for t in SPEC.targets}
     )
+
+
+def run_pipeline_on(
+    ev: Evidence, *, history: History | None, cache: _DictCache
+) -> ValidatedExtraction | QuarantinedRun:
+    """Task 26B: judge_run's verdict alone. A benign page must never fail to resolve."""
+    _, result = judge_run(ev, history=history, cache=cache)
+    assert result is not None, "a benign mutation left a field unresolved or rows misaligned"
+    return result
+
+
+def verdicts_of(result: ValidatedExtraction | QuarantinedRun) -> list[Verdict]:
+    return list(result.verdicts) if isinstance(result, QuarantinedRun) else []
+
+
+def confirmer_of(result: ValidatedExtraction | QuarantinedRun, field: str) -> Confirmation | None:
+    """What record_heals (Task 26A) would write to confirmer_rung / confirmer_family: a DOM
+    confirmer when one passed, else the VALUE family, else None."""
+    passing = [
+        v.confirmed_by for v in result.verdicts if v.field == field and v.confirmed_by is not None
+    ]
+    dom = [c for c in passing if c.rung is not None]
+    return (dom or passing or [None])[0]
+
+
+def healed_fields(ev: Evidence, cache: _DictCache) -> list[tuple[str, int]]:
+    """(field, winning rung) for every field rung 1 did not carry on this page."""
+    page = StaticPageSource(ev.dom.value)
+    out: list[tuple[str, int]] = []
+    for t in SPEC.targets:
+        _, trace = resolve_cascade(page, t, cache, record=False)
+        if trace.winner != 1:
+            out.append((t.name, trace.winner or 5))
+    return out
+
+
+def family_of(rung: int) -> Family:
+    return {2: Family.TEXT_SEMANTIC, 3: Family.TEXT_SEMANTIC, 4: Family.STRUCTURAL}[rung]
 
 
 @pytest.fixture
