@@ -74,9 +74,11 @@ def test_a_day_changes_the_dataset_a_little() -> None:
 
 @pytest.mark.unit
 def test_benign_daily_delta_keeps_key_agreement_above_threshold() -> None:
-    """On a day with no mutation, RowKeyContinuity must see ~98% of shared keys agree --
-    above its 0.95 threshold -- for every field, for 90 consecutive days. Otherwise the bench's
-    own data churn would quarantine benign heals and the false-positive rate would be ours."""
+    """Over the WHOLE dataset, every field's day-over-day agreement stays >= 0.95 for 90
+    consecutive days. This is not what RowKeyContinuity sees: the dataset is mostly closed claims
+    that never change, while the results page shows the newest 50, almost all live. Before Task
+    26B this passed while the page churned ~20% a day in `amount` and `status`. The page-level
+    guard the gate depends on is tests/testbench/test_page_continuity.py."""
     start = dt.date(2026, 9, 1)
     for offset in range(90):
         day = start + dt.timedelta(days=offset)
