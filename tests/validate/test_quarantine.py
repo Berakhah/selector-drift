@@ -404,11 +404,13 @@ def _chain(exc: BaseException) -> list[BaseException]:
 
 
 @pytest.mark.integration
-def test_a_failing_compensation_still_frees_the_lock_and_keeps_the_original_in_the_chain(
+def test_a_failing_compensation_surfaces_with_the_original_in_its_chain_and_marks_nothing(
     quarantined, monkeypatch
 ):
-    """A stranded landing is surfaced, not swallowed -- but it must not strand the row lock, and
-    the failed mark that caused it stays readable as the exception's context."""
+    """A stranded landing is surfaced, not swallowed: the compensation's own error propagates
+    and the failed mark that caused it stays readable as the exception's context. The lock
+    ordering is pinned by the 'locked during compensation' test above, not here -- leaving the
+    `with` closes the session, so a lock check after it would not tell the orderings apart."""
     _fail_the_final_mark(monkeypatch)
 
     def compensate() -> None:
@@ -423,7 +425,6 @@ def test_a_failing_compensation_still_frees_the_lock_and_keeps_the_original_in_t
             land=lambda v: quarantine_mod.Landed(rollback=compensate, finish=lambda: None),
         )
     assert any(isinstance(e, OSError) for e in _chain(caught.value))
-    assert not _row_is_locked_by_someone_else(quarantined)
     row = _row(quarantined)
     assert row is not None and row.resolved_as is None  # still open: nothing was marked
     assert _audits() == []

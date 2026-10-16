@@ -122,6 +122,19 @@ quarantine** is kept (`retention_skipped`, "quarantine open") until it is promot
 promotion needs the bundle. Every audit row is committed *before* its delete, so a crash leaves a
 bundle audited as expired and retried, never one gone without its `evidence_expired` row.
 
+A **replay** — a re-run of a window whose quarantine was already promoted or discarded — is held
+on its own `lake/quarantine/<key>.replay-<id>.parquet` and audited `quarantine_replayed`. It holds
+extracted client data, so it lives as long as the target's `evidence_retention_days` counted from
+that audit row (a self-owned target keeps it for the life of the log), then is deleted and audited
+`replay_expired`; the `quarantine_replayed` row stays as the record, and the API should show a
+replay as *expired*, not as a dead link. While a replay exists its run's heal bundles are kept
+(`retention_skipped`, "replay held"); expiring it releases them in the same sweep. A replay of a
+target with no scope record is kept and audited, never deleted on a guess. The file is found by
+its name under today's quarantine directory, never by the path stored in the audit row, and a row
+naming anything that is not a replay file is audited and left alone. A replay file no audit row
+names (a crash between its write and its commit) is removed after the one-day grace, audited
+`replay_orphan_removed`.
+
 The same run sweeps client data nothing can reach, each removal audited by store-relative path:
 a `heals/<n>` directory with no heal row (after a one-day grace), crash leftovers (`.tmp-*`,
 `.old-*`, after an hour), and a `last-accepted` directory that no unexpired scope record names —
