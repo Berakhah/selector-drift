@@ -33,8 +33,9 @@ Six columns -- `Claim Number`, `Claimant`, `Amount`, `Reserve`, `Status`, `Filed
 generated deterministically from seed `0` on the dataset's epoch, 2026-01-01. Each day applies a
 daily delta on top of that base, seeded from the date alone: about 2% of the live (not closed)
 claims change `Amount` or `Status` (the rate was taken over all claims until Task 26B, which made
-~40% of live claims -- most of the results page -- move each day), about 3 close, about 5 new claims are filed, and claims older than three years are
-archived out of the live set. `Reserve` is drawn independently of `Amount` -- deliberately: a
+~40% of live claims -- most of the results page -- move each day), about 3 close, about 5 new
+claims are filed, and claims older than three years are archived out of the live set.
+`Reserve` is drawn independently of `Amount` -- deliberately: a
 reserve is a claims adjuster's own estimate, not a function of the claimed amount, so the two
 columns have no arithmetic relation for a cross-field assertion to check. That is also why the
 bench's `ValueSwap` mutation (below) can be caught only by row-key continuity, not by footing.
