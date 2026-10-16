@@ -34,6 +34,7 @@ Fix round 1:
 
 from __future__ import annotations
 
+import fnmatch
 import shutil
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
@@ -113,9 +114,9 @@ def _sweep_dir(
     return removed
 
 
-def _replays(s: OrmSession) -> list[tuple[str, datetime, Path]]:
-    """(run key, replayed at, file) of every audited replay, oldest first."""
-    found: list[tuple[str, datetime, Path]] = []
+def _replays(s: OrmSession) -> list[tuple[str, datetime, str]]:
+    """(run key, replayed at, stored data_uri) of every audited replay, oldest first."""
+    found: list[tuple[str, datetime, str]] = []
     for subject, at, detail in s.execute(
         select(AuditLog.subject, AuditLog.at, AuditLog.detail)
         .where(AuditLog.action == "quarantine_replayed")
@@ -123,21 +124,43 @@ def _replays(s: OrmSession) -> list[tuple[str, datetime, Path]]:
     ):
         uri = detail.get("data_uri") if isinstance(detail, dict) else None
         if isinstance(uri, str):
-            found.append((subject, at, Path(uri)))
+            found.append((subject, at, uri))
     return found
+
+
+def _replay_name(uri: str) -> str | None:
+    """The file name a stored data_uri names, if it is a replay's: `<key>.replay-<id>.parquet`.
+    The stored path is only a hint of where hold() wrote it -- the lake may have moved since --
+    so the file is found by this name under today's quarantine directory, and nothing else the
+    row could name is ever a candidate for deletion."""
+    name = Path(uri).name
+    return name if fnmatch.fnmatchcase(name, _REPLAY_GLOB) and not name.startswith(".") else None
+
+
+def _quarantine_dir() -> Path:
+    return get_settings().lake_root / _QUARANTINE_DIR
 
 
 def _expire_replays(s: OrmSession, policy: dict[str, int | None], today: date) -> int:
     """A replay holds extracted client data, so it lives as long as the target's own
     evidence_retention_days from the day it was replayed, never longer. No stated policy, or a
     self-owned target (None), keeps it. Expiring it also releases the heal bundles it pinned."""
+    directory = _quarantine_dir()
+    if is_link(directory):
+        return 0
     deleted = 0
     targets = dict(s.execute(select(Run.run_key, Run.target)).tuples().all())
-    for run_key, at, path in _replays(s):
-        if not (path.exists() or is_link(path)):
-            continue
+    for run_key, at, uri in _replays(s):
         days = policy.get(targets.get(run_key, ""))
         if days is None or (today - at.date()).days < days:
+            continue
+        name = _replay_name(uri)
+        if name is None:
+            # Audited, never followed: a stored string is not an authority to delete anything.
+            _audit(s, "retention_skipped", run_key, {"why": "not a replay file", "data_uri": uri})
+            continue
+        path = directory / name
+        if not (path.exists() or is_link(path)):
             continue
         detail = {"data_uri": str(path), "retention_days": days, "replayed_at": at.isoformat()}
         if _remove(s, path, "replay_expired", run_key, detail):
@@ -147,15 +170,17 @@ def _expire_replays(s: OrmSession, policy: dict[str, int | None], today: date) -
 
 def _sweep_replay_orphans(s: OrmSession, now: datetime) -> int:
     """hold() writes a replay file and then commits its audit row. A crash or a failed commit
-    between the two leaves client data that retention cannot see: swept past ORPHAN_GRACE."""
-    directory = get_settings().lake_root / _QUARANTINE_DIR
+    between the two leaves client data that retention cannot see: swept past ORPHAN_GRACE.
+    Audited by NAME, not by stored path, so a moved lake never turns audited replays into
+    orphans."""
+    directory = _quarantine_dir()
     if not directory.is_dir() or is_link(directory):
         return 0
-    audited = {path for _, _, path in _replays(s)}
+    audited = {Path(uri).name for _, _, uri in _replays(s)}
     removed = 0
     for entry in sorted(directory.glob(_REPLAY_GLOB)):
         if (
-            entry in audited
+            entry.name in audited
             or entry.name.startswith(".")
             or _age(entry, now) <= ORPHAN_GRACE
             or not _remove(
@@ -173,7 +198,12 @@ def _sweep_replay_orphans(s: OrmSession, now: datetime) -> int:
 
 def _replay_held(s: OrmSession) -> set[str]:
     """Run keys with a replay still held on disk beside a decision already taken."""
-    return {run_key for run_key, _, path in _replays(s) if path.is_file()}
+    directory = _quarantine_dir()
+    return {
+        run_key
+        for run_key, _, uri in _replays(s)
+        if (name := _replay_name(uri)) is not None and (directory / name).is_file()
+    }
 
 
 @flow(name="evidence_retention")
