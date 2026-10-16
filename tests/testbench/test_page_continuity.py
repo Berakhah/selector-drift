@@ -9,8 +9,9 @@ test stayed green. This guard measures the population the gate actually judges.
 
 Bench spec section 4: "on a benign day ~98% of keys agree, above its 0.95 threshold". With 45
 joined rows, three changes in one field (0.933) on a given day is the Poisson tail of a ~1% daily
-per-field rate -- not a defect -- so "every day" is asserted only for the days the regression suite
-judges, and the window is bounded: mean >= 0.98, never below 0.90, at most 2 of 60 days below 0.95.
+per-field rate -- and for `status` the 2-4 forced daily closures add to that rate -- not a defect.
+So "every day" is asserted only for the days the regression suite judges, and the window is
+bounded: mean >= 0.98, never below 0.90, at most 2 of 60 days below 0.95.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from selector_drift.spec.loader import load_spec
 from selector_drift.validate.assertions.independence import RowKeyContinuity
 from selector_drift.validate.history import AcceptedRun
 from testbench.portal.render import render_results
+from tests.suite.conftest import BASE_DAY
 
 SPEC = load_spec(Path(__file__).resolve().parents[2] / "specs" / "testbench.yaml")
 FIELDS = [t.name for t in SPEC.targets]
@@ -35,7 +37,7 @@ AT = dt.datetime(2026, 10, 1, 4, 12, tzinfo=dt.UTC)
 THRESHOLD = RowKeyContinuity().threshold  # 0.95, the heal threshold -- read, not restated
 START = dt.date(2026, 9, 1)
 DAYS = 60
-SUITE_DAYS = [dt.date(2026, 9, 25) + dt.timedelta(days=i) for i in range(7)]  # tests/suite
+SUITE_DAYS = [BASE_DAY - dt.timedelta(days=6 - i) for i in range(7)]  # tests/suite's history + base
 _PAGES: dict[dt.date, CandidateExtraction] = {}
 
 

@@ -1,4 +1,7 @@
-"""Task 26B: every benign heal is ACCEPTED by the gate (R14, C3).
+"""Task 26B: every benign heal is ACCEPTED by the gate (R14, C3), on the pinned BASE_DAY.
+
+The result is day-dependent: on a random bench day a benign `status` heal is falsely quarantined
+about 3% of the time (docs/methodology.md, Task 26B erratum). "8/8" means 8/8 on BASE_DAY.
 
 The complement of test_adversarial_refused. A gate that quarantines every legitimate heal passes
 every other test in the plan and is worthless; this suite is the one that says the product works.
@@ -51,17 +54,3 @@ def test_the_label_reword_case_specifically(bench_evidence, history, warm_cache)
     assert isinstance(result, ValidatedExtraction), _failing(result)
     c = confirmer_of(result, "claim_number")
     assert c is not None and c.family is Family.VALUE
-
-
-@pytest.mark.unit
-def test_the_quarantine_rate_on_benign_mutations_is_zero(bench_evidence, history, warm_cache):
-    # The number that goes in the methodology next to the heal count.
-    q = [
-        m.name
-        for m in ALL_BENIGN_MUTATION_CLASSES
-        if not isinstance(
-            run_pipeline_on(bench_evidence[m.name], history=history, cache=warm_cache()),
-            ValidatedExtraction,
-        )
-    ]
-    assert q == [], f"benign mutations quarantined: {q}"

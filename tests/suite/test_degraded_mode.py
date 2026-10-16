@@ -25,7 +25,9 @@ def test_degraded_mode_still_produces_findings(bench_evidence, history, warm_cac
             return isinstance(result, ValidatedExtraction)
 
         healed = [m.name for m in ALL_BENIGN_MUTATION_CLASSES if heals_under_blackout(m)]
+        # The floor is a majority; the bench holds 8/8, so a drop below that is a regression to see.
         assert len(healed) > len(ALL_BENIGN_MUTATION_CLASSES) / 2, healed
+        assert healed == [m.name for m in ALL_BENIGN_MUTATION_CLASSES], healed
         assert_blackout_complete()
 
 

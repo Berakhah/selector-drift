@@ -294,7 +294,7 @@ fixed one described in the erratum above.
 
 | Number | Value | Unit |
 |---|---|---|
-| Benign acceptance | **8/8 (100%)** | benign mutation classes whose run is minted as a `ValidatedExtraction` (written), with history |
+| Benign acceptance | **8/8 (100%) on the pinned day** | benign mutation classes whose run is minted as a `ValidatedExtraction` (written), with history; day-dependent, see the residual |
 | Adversarial refusal | **3/7 (43%)** | adversarial classes that do not write: `ValueSwap`, `LocaleFlip` quarantined; `DuplicateLabel` unresolved |
 | Degraded-mode floor | **8/8 classes; floor > 4/8** | benign classes resolved by rungs 1-4 **and** accepted, with all outbound network and every model provider blocked; 0 connection attempts recorded |
 
@@ -317,9 +317,16 @@ How to read them:
   `tests/suite/test_degraded_mode.py::test_degraded_mode_still_produces_findings`. It uses a
   local blackout helper that is itself tested to trip on any connection attempt.
 - **The residual.** With the bench fixed, `status` page continuity was still below 0.95 on 2 of
-  60 days (0.933: three changes among 45 joined rows, the tail of a ~1% daily per-field rate).
-  A benign heal of `status` on such a day would be refused. `test_page_continuity` bounds this
-  at no more than 2 days in 60.
+  60 days (0.933: three changes among 45 joined rows, the tail of a ~1% daily per-field rate plus
+  the 2-4 forced daily closures, which also change `status`). A benign heal of `status` on such a
+  day would be refused (about 3% of days), and `amount` sits near the edge (0.956) on three days.
+  So "8/8" is the result on the pinned day 2026-10-01 and its fixed history, not a rate over
+  random days; the suite does not claim a zero benign quarantine rate. `test_page_continuity`
+  bounds the tail at no more than 2 days in 60. The pin has no headroom: a change to the seed,
+  `CHANGE_RATE`, the closure count or the display window that adds one tail day fails it.
+- **Open before any public claim.** The 56/60-day campaign table in the erratum above was not
+  re-run on the fixed bench. Re-run it, and consider a per-field churn baseline, before the
+  ninety-day log or a proposal quotes benign-quarantine numbers.
 
 ## Pipeline decisions (Task 26A)
 
