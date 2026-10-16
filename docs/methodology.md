@@ -266,9 +266,60 @@ of a correct heal. This is reported, not tuned away: the 0.95 threshold is Task 
 number. Whether a non-key field that churns by nature should be judged against a per-field
 churn baseline is an open question for review, not a change made here.
 
+> **Erratum (2026-10-16, Task 26B).** The paragraph above was measured on a bench with a defect.
+> Its daily delta took the 2% change rate over *all* claims but applied every change to a *live*
+> one. Closed claims accumulate, so about 40% of live claims changed Amount or Status each day,
+> and the newest-first results page is almost all live claims. Page-level continuity sat below
+> 0.95 on 56 of 60 days for `amount` and 59 of 60 for `status`. The bench spec intends ~98%.
+> The 9 benign false refusals are therefore an artefact of the bench, not the gate. Task 26B
+> fixed the bench (`testbench/portal/data.py`: the rate is taken over the live claims) and added
+> the page-level guard `tests/testbench/test_page_continuity.py`. The gate and its 0.95
+> threshold are unchanged. The campaign has not been re-run on the fixed bench, so its table
+> above still describes the old bench. The original text is kept as it was published.
+
 Adversarial days the gate accepted (`DecoyColumn`, `HiddenDecoy` x3, `ImageHeader`) and the
 promoted `VirtualisedRows` day are not scored here: whether each write came from the true column
 is answered from the answer key by Task 26C's scorer, which the product cannot see.
+
+## The gate's three numbers (Task 26B)
+
+There are three numbers, and they only mean something together. A gate that refuses everything
+scores 100% on the second number and 0% on the first.
+
+Each was measured on 2026-10-16 by running the regression suite's decision core (`tests/suite`:
+resolve against the warm cache, extract, `gate_run` with every check). One mutation class is
+applied to the bench page of 2026-10-01. The cache was warmed on the clean page, and the history
+is six accepted clean runs (2026-09-25 .. 2026-09-30, past the 5-run warm-up). The bench is the
+fixed one described in the erratum above.
+
+| Number | Value | Unit |
+|---|---|---|
+| Benign acceptance | **8/8 (100%)** | benign mutation classes whose run is minted as a `ValidatedExtraction` (written), with history |
+| Adversarial refusal | **3/7 (43%)** | adversarial classes that do not write: `ValueSwap`, `LocaleFlip` quarantined; `DuplicateLabel` unresolved |
+| Degraded-mode floor | **8/8 classes; floor > 4/8** | benign classes resolved by rungs 1-4 **and** accepted, with all outbound network and every model provider blocked; 0 connection attempts recorded |
+
+How to read them:
+
+- **Refusal is not the safety number.** The four adversarial classes that write (`DecoyColumn`,
+  `HiddenDecoy`, `VirtualisedRows`, `ImageHeader`) write only from the true nodes. Wrong-node
+  writes are 0 of 7 classes, checked against the answer key with and without history. A
+  resolver fooled onto the decoy column (an injected off-by-one rung) is refused
+  (`test_a_rung_that_lands_on_the_decoy_is_refused_by_a_confirmer`). `DecoyColumn` wrote here
+  because the real cascade was not fooled. Before the bench fix it was quarantined only by churn.
+- **The exception is `ValueSwap` on run one.** It writes swapped values on the right nodes, which
+  is the known limit stated above. From the first run with history it is refused.
+- **Run one has no history,** so every heal is quarantined by design (5 of 8 benign classes heal).
+  Without a prior accepted run, RowKeyContinuity and the distributional check are INSUFFICIENT,
+  and INSUFFICIENT counts as FAIL on a heal. The 3 classes accepted on run one are all rung-1
+  hits.
+- **The degraded floor is a regression guard.** v1 makes zero model calls (rung 5 escalates to a
+  human), so 8/8 under blackout is expected. The test is
+  `tests/suite/test_degraded_mode.py::test_degraded_mode_still_produces_findings`. It uses a
+  local blackout helper that is itself tested to trip on any connection attempt.
+- **The residual.** With the bench fixed, `status` page continuity was still below 0.95 on 2 of
+  60 days (0.933: three changes among 45 joined rows, the tail of a ~1% daily per-field rate).
+  A benign heal of `status` on such a day would be refused. `test_page_continuity` bounds this
+  at no more than 2 days in 60.
 
 ## Pipeline decisions (Task 26A)
 
