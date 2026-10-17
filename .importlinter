@@ -68,11 +68,14 @@ ignore_imports =
     testbench.score -> selector_drift.db.**
     testbench.score -> selector_drift.orchestrate.history
     testbench.score -> selector_drift.orchestrate.run_record
+    testbench.score -> selector_drift.heallog.evidence
 # Task 26C: the scorer imports selector_drift.db.session/models only, so the bare
 # `-> selector_drift.db` ignore matched nothing; with unmatched-ignore alerting back on it went.
 # Fix round 1 (I2): it reuses the product's own accepted-run predicate (orchestrate.history)
 # and NO_TERMINAL_STATE (orchestrate.run_record) rather than re-deriving them; both reach
 # selector_drift.db, so those two edges -- from testbench.score only -- are ignored here too.
+# Fix round 2 (M1): it derives each bundle directory with heallog.evidence.heal_bundle_dir
+# rather than trusting the stored uri; heallog.evidence reaches selector_drift.db as well.
 
 [importlinter:contract:only-the-gate-mints]
 name = Only scope.gate may reach the mint token
