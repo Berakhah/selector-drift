@@ -65,10 +65,9 @@ type = forbidden
 source_modules = testbench
 forbidden_modules = selector_drift.db
 ignore_imports =
-    testbench.score -> selector_drift.db
     testbench.score -> selector_drift.db.**
-# testbench.score does not exist yet; without this the ignore lines fail as unmatched.
-unmatched_ignore_imports_alerting = none
+# Task 26C: the scorer imports selector_drift.db.session only (its flow's Session), so the bare
+# `-> selector_drift.db` ignore matched nothing; with unmatched-ignore alerting back on it went.
 
 [importlinter:contract:only-the-gate-mints]
 name = Only scope.gate may reach the mint token
