@@ -30,15 +30,18 @@ import lxml.html
 from bok_core.boundary.redact import redact
 from bok_core.boundary.sensitivity import Labelled, Sensitivity
 from prefect import flow
-from sqlalchemy import bindparam, text
+from sqlalchemy import Select, Text, cast, exists, select, text
 from sqlalchemy.orm import Session
 
+from selector_drift.db.models import AuditLog, HealEvent, Quarantine, Resolution, Run
 from selector_drift.heallog.bundle import (
     AFTER_HTML,
     EvidenceCorrupted,
     read_heal_manifest,
     verified_bytes,
 )
+from selector_drift.orchestrate.history import accepted_run
+from selector_drift.orchestrate.run_record import NO_TERMINAL_STATE
 from testbench.answers.key import expected_xpaths
 from testbench.portal.hook import SEED_META
 from testbench.portal.hook import TARGET as TARGET
@@ -50,9 +53,6 @@ UNSCORABLE = "unscorable"
 # The label the bench's evidence is stored under: its scope record's basis is self-owned, which
 # scope.record (R4) maps to SYNTHETIC.
 BENCH_LABEL = Sensitivity.SYNTHETIC
-# What the product counts as an accepted run (orchestrate.history.ACCEPTED_STATES; a unit test
-# pins the two equal -- importing orchestrate here would drag selector_drift.db in indirectly).
-ACCEPTED_STATES = ("completed", "healed")
 
 
 class Judgement(StrEnum):
@@ -121,27 +121,48 @@ def judge(*, correct: bool, accepted: bool) -> Judgement:
     return Judgement.FALSE_REFUSAL if correct else Judgement.CORRECT_REFUSAL
 
 
-# Accepted means what the product means (orchestrate.history): a quarantined run is accepted
-# only once promoted; a run with no quarantine row only if it settled completed/healed -- a
-# failed run wrote nothing. A heal with no resolutions row is selected too (left join), so it is
-# recorded unscorable rather than left pending forever. SKIP LOCKED: two concurrent scorers
-# never judge one heal twice.
-_PENDING = text("""
-    select h.id, h.run_key, h.field, h.evidence_uri, r.node_id,
-           case when q.run_key is not null then coalesce(q.resolved_as = 'promoted', false)
-                else coalesce(run.state in :accepted_states, false)
-           end as accepted
-      from heal_events h
-      join runs run on run.run_key = h.run_key
-      left join resolutions r on r.id = h.resolution_id
-      left join quarantine q on q.run_key = h.run_key
-     where h.target = :target
-       and not exists (select 1 from audit_log a
-                        where a.action = :action and a.actor = :actor
-                          and a.subject = h.id::text)
-     order by h.id
-       for update of h skip locked
-""").bindparams(bindparam("accepted_states", value=list(ACCEPTED_STATES), expanding=True))
+def _pending() -> Select[tuple[int, str, str, str | None, str | None, bool]]:
+    """Every bench heal whose outcome is SETTLED and that has no 'scored' row yet.
+
+    A heal is scored once, so it is scored only once the product has decided (fix round 1, C1):
+    - a run whose quarantine row is still unresolved is held -- a human may yet promote it, and
+      a decoy promoted at 09:00 must count as a FALSE_ACCEPT, not stay frozen as the refusal it
+      looked like at 04:42. So an undecided quarantine is ABSENT from the correct-refusal count
+      until a human promotes or discards it;
+    - a run held at NO_TERMINAL_STATE (run_record.record_attempt: in progress, or retrying) is
+      held -- it may still settle `healed`.
+
+    Accepted is the product's own predicate (orchestrate.history.accepted_run): the run settled
+    completed/healed, or its quarantine was promoted. A heal with no resolutions row is selected
+    too (outer join), so it is recorded unscorable rather than left pending forever. SKIP
+    LOCKED: two concurrent scorers never judge one heal twice."""
+    undecided = select(Quarantine.run_key).where(Quarantine.resolved_as.is_(None))
+    already = exists().where(
+        AuditLog.action == ACTION,
+        AuditLog.actor == ACTOR,
+        AuditLog.subject == cast(HealEvent.id, Text),
+    )
+    return (
+        select(
+            HealEvent.id,
+            HealEvent.run_key,
+            HealEvent.field,
+            HealEvent.evidence_uri,
+            Resolution.node_id,
+            accepted_run().label("accepted"),
+        )
+        .join(Run, Run.run_key == HealEvent.run_key)
+        .outerjoin(Resolution, Resolution.id == HealEvent.resolution_id)
+        .where(
+            HealEvent.target == TARGET,
+            HealEvent.run_key.not_in(undecided),
+            Run.error.is_distinct_from(NO_TERMINAL_STATE),
+            ~already,
+        )
+        .order_by(HealEvent.id)
+        .with_for_update(of=HealEvent, skip_locked=True)
+    )
+
 
 _RECORD = text(
     "insert into audit_log (at, actor, action, subject, detail) "
@@ -177,16 +198,16 @@ def _judged(
 
 
 def score_pending(session: Session, *, redaction_key: bytes | None = None) -> list[int]:
-    """Score every bench heal with no 'scored' row yet; returns the heal ids scored. An
-    unscorable heal is written, not skipped: skipping would leave it pending forever and hide
-    it, and a published count of unscorable heals is itself a finding about the bench."""
+    """Score every settled bench heal with no 'scored' row yet (see _pending for what is held);
+    returns the heal ids scored. An unscorable heal is written, not skipped: skipping would
+    leave it pending forever and hide it, and a published count of unscorable heals is itself a
+    finding about the bench."""
     if redaction_key is None:
         from selector_drift.config import get_settings
 
         redaction_key = get_settings().redaction_key
-    params = {"target": TARGET, "action": ACTION, "actor": ACTOR}
     scored: list[int] = []
-    for row in session.execute(_PENDING, params).mappings().all():
+    for row in session.execute(_pending()).mappings().all():
         detail: dict[str, object]
         try:
             detail = _judged(
