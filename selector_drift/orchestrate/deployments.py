@@ -1,13 +1,14 @@
 """One Prefect deployment per (target, spec), served by the worker container (design 9.2).
 
 `python -m selector_drift.orchestrate.deployments` registers them with the Prefect server and
-serves them; it blocks. Task 26C adds its deployment to the serve() call; Task 29A added the
+serves them; it blocks. Task 26C added the bench scorer (by entrypoint string); Task 29A added the
 fifteen-minute alert watch and Task 33 the daily evidence retention.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import cast
 
 from prefect import serve
@@ -34,6 +35,15 @@ RETENTION_CRON = "30 3 * * *"  # daily, 03:30 UTC -- clear of the 04:12 extracti
 # applies no job_variables, and this flow is bounded by the worker service's own limits. Kept so
 # a move to a Docker work pool starts from a stated number.
 RETENTION_JOB_LIMITS: dict[str, str | int] = {"mem_limit": "512m"}
+# Task 26C: judges each bench heal 30 minutes after the bench's 04:12 run. orchestrate/ must not
+# import the bench (bench spec 2), so the flow is named by entrypoint STRING and loaded by
+# Prefect at serve time -- never by an import here.
+BENCH_SCORER: dict[str, str] = {
+    "name": "bench-scorer",
+    "entrypoint": "testbench/score.py:score_pending_flow",  # a string: no import of the bench
+    "cron": "42 4 * * *",
+    "timezone": "UTC",
+}
 
 _log = logging.getLogger(__name__)
 
@@ -90,6 +100,22 @@ def retention_deployment() -> RunnerDeployment:
     )
 
 
+def bench_scorer_deployment() -> RunnerDeployment | None:
+    """The bench scorer, loaded from its entrypoint (relative to the working directory). None
+    where the bench is not installed -- the worker image ships selector_drift/ only -- so a
+    product deployment still serves its own flows."""
+    path = Path(BENCH_SCORER["entrypoint"].split(":", 1)[0])
+    if not path.is_file():
+        return None
+    return RunnerDeployment.from_entrypoint(
+        BENCH_SCORER["entrypoint"],
+        name=BENCH_SCORER["name"],
+        schedules=[Cron(BENCH_SCORER["cron"], timezone=BENCH_SCORER["timezone"])],
+        tags=["bench"],
+        description="daily, after the bench run: judge every bench heal against the answer key",
+    )
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     if webhook_url() is None:
@@ -97,7 +123,14 @@ def main() -> None:
     deployments = extraction_deployments()
     if not deployments:
         raise SystemExit(f"no task specs in {get_settings().spec_dir}")
-    serve(*deployments, watch_deployment(), retention_deployment())
+    scorer = bench_scorer_deployment()
+    if scorer is None:
+        _log.error(
+            "%s not found: bench heals will not be scored (no false-accept count)",
+            BENCH_SCORER["entrypoint"],
+        )
+    extra = [scorer] if scorer is not None else []
+    serve(*deployments, watch_deployment(), retention_deployment(), *extra)
 
 
 if __name__ == "__main__":
