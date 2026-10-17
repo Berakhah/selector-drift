@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -334,3 +335,157 @@ def test_a_heal_with_no_stored_evidence_is_recorded_unscorable(
     ).scalar_one()
     assert detail["judgement"] == "unscorable"
     assert detail["run_key"] == heal_without_evidence.run_key
+
+
+# ---------------------------------------------------------------- fix round 2: hardening
+
+
+def _all_details(db: OrmSession) -> list[str]:
+    return [str(d) for d in db.execute(text("select detail::text from audit_log")).scalars().all()]
+
+
+@pytest.mark.integration
+def test_a_poison_heal_does_not_stop_the_others(
+    db: OrmSession,
+    seeded_bench_heals: list[SeededHeal],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Round 2 (1): a scorer bug on one heal rolls back that heal's savepoint only. It stays
+    pending with no audit row, the rest are committed, and the call then fails loudly."""
+    import testbench.score as score
+
+    real = score.expected_xpaths
+    poison = seeded_bench_heals[1]  # the "amount" heal
+
+    def boom(day: dt.date, field: str, page: int = 1) -> list[str]:
+        if field == "amount":
+            raise RuntimeError("SENTINEL-poison-message")
+        return real(day, field, page)
+
+    monkeypatch.setattr(score, "expected_xpaths", boom)
+    with pytest.raises(score.ScorerFailed) as raised:
+        score.score_pending(db)
+    assert raised.value.heal_ids == [poison.id]
+    others = {h.id for h in seeded_bench_heals} - {poison.id}
+    subjects = db.execute(
+        text("select subject from audit_log where action = 'scored'")
+    ).scalars().all()  # fmt: skip
+    assert {int(s) for s in subjects} == others  # committed; the poison heal unrecorded
+    assert "RuntimeError" in caplog.text and str(poison.id) in caplog.text
+    assert "SENTINEL-poison-message" not in caplog.text  # class name only, never the message
+    monkeypatch.setattr(score, "expected_xpaths", real)
+    assert score.score_pending(db) == [poison.id]  # still pending, scored once fixed
+
+
+@pytest.mark.integration
+def test_an_overlapping_scorer_waits_and_never_double_scores(
+    db: OrmSession, seeded_bench_heals: list[SeededHeal], redaction_key: bytes
+) -> None:
+    """Round 2 (2): every score_pending takes one advisory transaction lock first. Here a
+    second session holds the lock; a scorer started in a thread blocks on it, the holder
+    scores everything and commits (releasing the lock), and the waiter's query -- a new
+    READ COMMITTED snapshot taken after the lock -- then finds nothing pending."""
+    import threading
+
+    from selector_drift.db.session import Session as DbSession
+    from testbench.score import SCORER_LOCK_KEY, score_pending
+
+    result: dict[str, object] = {}
+
+    def waiter() -> None:
+        with DbSession() as other:
+            result["ids"] = score_pending(other, redaction_key=redaction_key)
+
+    with DbSession() as holder:
+        holder.execute(text("select pg_advisory_xact_lock(:k)"), {"k": SCORER_LOCK_KEY})
+        thread = threading.Thread(target=waiter, daemon=True)
+        thread.start()
+        thread.join(timeout=2)
+        assert thread.is_alive()  # blocked on the lock, not scoring
+        first = score_pending(holder, redaction_key=redaction_key)  # commits, releases the lock
+    thread.join(timeout=60)
+    assert not thread.is_alive()
+    assert sorted(first) == sorted(h.id for h in seeded_bench_heals)
+    assert result["ids"] == []
+    counts = db.execute(
+        text("select subject, count(*) from audit_log where action = 'scored' group by subject")
+    ).all()
+    assert all(n == 1 for _, n in counts) and len(counts) == len(seeded_bench_heals)
+
+
+@pytest.mark.integration
+def test_a_stored_uri_naming_another_bundle_is_unscorable(
+    db: OrmSession, seeded_bench_heals: list[SeededHeal]
+) -> None:
+    """Round 2 (3): the bundle is derived from the heal id, never trusted from the row."""
+    from testbench.score import score_pending
+
+    victim, foreign = seeded_bench_heals[0], seeded_bench_heals[1]
+    foreign_uri = db.execute(
+        text("select evidence_uri from heal_events where id = :i"), {"i": foreign.id}
+    ).scalar_one()
+    db.execute(
+        text("update heal_events set evidence_uri = :u where id = :i"),
+        {"u": foreign_uri, "i": victim.id},
+    )
+    db.commit()
+    score_pending(db)
+    detail = _detail(db, victim)
+    assert detail["judgement"] == "unscorable"
+    assert "evidence outside the store" in str(detail["reason"])
+    assert foreign_uri not in json.dumps(detail) and str(foreign.id) not in str(detail["reason"])
+    assert _detail(db, foreign)["judgement"] == foreign.expected  # its own bundle still scores
+
+
+def _replace_after_html(bundle: Path, data: bytes) -> None:
+    from selector_drift.heallog.bundle import AFTER_HTML, MANIFEST, file_digest
+
+    (bundle / AFTER_HTML).write_bytes(data)
+    manifest = json.loads((bundle / MANIFEST).read_text(encoding="utf-8"))
+    manifest["files"][AFTER_HTML] = file_digest(data)  # still passes its manifest hash
+    (bundle / MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+
+
+SENTINEL = "SENTINEL-zq9-page-text"
+
+
+@pytest.mark.integration
+def test_a_page_that_cannot_be_decoded_never_leaks_into_the_reason(
+    db: OrmSession, seeded_bench_heals: list[SeededHeal]
+) -> None:
+    """Round 2 (4): only UnscorableHeal and EvidenceCorrupted keep their authored message;
+    anything else records its type name alone."""
+    from testbench.score import score_pending
+
+    heal = seeded_bench_heals[0]
+    uri = db.execute(
+        text("select evidence_uri from heal_events where id = :i"), {"i": heal.id}
+    ).scalar_one()
+    _replace_after_html(Path(uri), f"<html><body>{SENTINEL}".encode() + b"\xff\xfe" + b"</body>")
+    score_pending(db)
+    detail = _detail(db, heal)
+    assert detail["judgement"] == "unscorable"
+    assert detail["reason"] == "UnicodeDecodeError"
+    assert not any(SENTINEL in d for d in _all_details(db))
+
+
+@pytest.mark.integration
+def test_an_evidence_error_message_is_reduced_to_its_type(
+    db: OrmSession, seeded_bench_heals: list[SeededHeal], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import testbench.score as score
+
+    def leaky(*args: object, **kwargs: object) -> bytes:
+        raise OSError(f"cannot read: {SENTINEL}")
+
+    monkeypatch.setattr(score, "verified_bytes", leaky)
+    score.score_pending(db)
+    for heal in seeded_bench_heals:
+        assert _detail(db, heal) == {
+            "field": _detail(db, heal)["field"],
+            "judgement": "unscorable",
+            "reason": "OSError",
+            "run_key": heal.run_key,
+        }
+    assert not any(SENTINEL in d for d in _all_details(db))
