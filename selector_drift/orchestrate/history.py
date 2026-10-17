@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.orm import Session
 
 from selector_drift.db.models import AuditLog, FindingRow, Quarantine, Run
@@ -48,6 +48,14 @@ def _data(row: dict[str, Any]) -> dict[str, str]:
     return {k: str(v) for k, v in row.items() if is_data_column(k) and v is not None}
 
 
+def accepted_run() -> ColumnElement[bool]:
+    """THE predicate for "this run's rows were accepted", over `Run`: the gate passed it, or a
+    human promoted its quarantine. One definition, so the bench scorer (Task 26C) judges
+    acceptance exactly as history does."""
+    promoted = select(Quarantine.run_key).where(Quarantine.resolved_as == "promoted")
+    return Run.state.in_(ACCEPTED_STATES) | Run.run_key.in_(promoted)
+
+
 def history_for(
     db: Session,
     target: str,
@@ -58,11 +66,10 @@ def history_for(
 ) -> History | None:
     """The newest `limit` accepted runs of `target` under `spec.version` with a window before
     `before`, oldest first. None when there are none (no history is not an empty history)."""
-    promoted = select(Quarantine.run_key).where(Quarantine.resolved_as == "promoted")
     stmt = select(Run).where(
         Run.target == target,
         Run.spec_version == spec.version,
-        Run.state.in_(ACCEPTED_STATES) | Run.run_key.in_(promoted),
+        accepted_run(),
     )
     if before is not None:
         stmt = stmt.where(Run.window < before)

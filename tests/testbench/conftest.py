@@ -216,17 +216,18 @@ def _seed_heal(
     key: bytes,
     quarantine: str | None = "absent",
     store: bool = True,
+    error: str | None = None,
 ) -> tuple[int, str]:
     """One run, its resolutions row and heal_events row, and (if `store`) its heal bundle
     written by the product's own write path. `quarantine`: "absent" (no row), None
-    (unresolved), or the resolved_as value."""
+    (unresolved), or the resolved_as value. `error` is the run's error column."""
     from selector_drift.db.models import HealEvent, Quarantine, Resolution, Run
     from selector_drift.heallog.evidence import write_heal_bundle
 
     run_key = f"testbench:{SPEC_VERSION}:{day.isoformat()}"
     now = dt.datetime.now(dt.UTC)
     s.add(Run(run_key=run_key, target="testbench", spec_version=SPEC_VERSION, window=day,
-              first_started_at=now, state=state))  # fmt: skip
+              first_started_at=now, state=state, error=error))  # fmt: skip
     s.flush()
     res = Resolution(run_key=run_key, target="testbench", field=field, winning_rung=3,
                      attempts=[], node_id=node_id, ms=1, at=now)  # fmt: skip
@@ -252,14 +253,17 @@ def _seed_heal(
 
 @pytest.fixture
 def seeded_bench_heals(db: OrmSession, redaction_key: bytes) -> list[SeededHeal]:
-    """Four correct heals; what differs is whether the product accepted them."""
+    """Five correct heals, every one settled; what differs is whether the product accepted
+    them -- by the product's own predicate (orchestrate.history.accepted_run)."""
     out: list[SeededHeal] = []
     cases: list[tuple[str, bool, str, str | None, str]] = [
         # (field, live node id?, run state, quarantine, expected judgement)
         ("claim_number", False, "healed", "absent", "true_accept"),
-        ("amount", False, "quarantined", None, "false_refusal"),  # awaiting a human
+        ("amount", False, "quarantined", "discarded", "false_refusal"),  # a human said no
         ("reserve", True, "quarantined", "promoted", "true_accept"),
-        ("status", False, "failed", "absent", "false_refusal"),  # never wrote anything
+        ("status", False, "failed", "absent", "false_refusal"),  # failed terminally, no write
+        # A stale quarantine row beside a run that settled healed: the product landed its rows.
+        ("filed", False, "healed", "discarded", "true_accept"),
     ]
     for offset, (field, live, state, quarantine, expected) in enumerate(cases):
         day = PLAIN_DAY + dt.timedelta(days=offset)
@@ -273,16 +277,32 @@ def seeded_bench_heals(db: OrmSession, redaction_key: bytes) -> list[SeededHeal]
     return out
 
 
+SeedDecoy = Callable[..., SeededHeal]
+
+
 @pytest.fixture
-def decoy_heal_quarantined(db: OrmSession, redaction_key: bytes) -> SeededHeal:
-    """The resolver locked onto DecoyColumn's plausible adjacent column; the gate held it."""
+def seed_decoy(db: OrmSession, redaction_key: bytes) -> SeedDecoy:
+    """A heal that locked onto DecoyColumn's plausible adjacent column, in a run settled (or
+    not) as asked: seed_decoy(state=..., quarantine=..., error=...)."""
     path = decoy_path(DECOY_DAY)
     assert path not in expected_xpaths(DECOY_DAY, "amount")
-    heal_id, run_key = _seed_heal(
-        db, day=DECOY_DAY, field="amount", node_id=path, state="quarantined",
-        key=redaction_key, quarantine=None,
-    )  # fmt: skip
-    return SeededHeal(heal_id, run_key, "correct_refusal")
+
+    def make(
+        *, state: str, quarantine: str | None = "absent", error: str | None = None
+    ) -> SeededHeal:
+        heal_id, run_key = _seed_heal(
+            db, day=DECOY_DAY, field="amount", node_id=path, state=state, key=redaction_key,
+            quarantine=quarantine, error=error,
+        )  # fmt: skip
+        return SeededHeal(heal_id, run_key, "")
+
+    return make
+
+
+@pytest.fixture
+def decoy_heal_quarantined(seed_decoy: SeedDecoy) -> SeededHeal:
+    """The gate held the decoy heal; no human has decided yet (first-heal confirmation)."""
+    return seed_decoy(state="quarantined", quarantine=None)
 
 
 @pytest.fixture
@@ -290,6 +310,6 @@ def heal_without_evidence(db: OrmSession, redaction_key: bytes) -> SeededHeal:
     """Redaction failed at heal time, so nothing was stored (accept.py REDACTION_FAILED)."""
     heal_id, run_key = _seed_heal(
         db, day=PLAIN_DAY, field="amount", node_id=expected_xpaths(PLAIN_DAY, "amount")[0],
-        state="quarantined", key=redaction_key, quarantine=None, store=False,
+        state="quarantined", key=redaction_key, quarantine="discarded", store=False,
     )  # fmt: skip
     return SeededHeal(heal_id, run_key, "unscorable")

@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session as OrmSession
 
 from testbench.score import Judgement, UnscorableHeal, judge, seed_day, truth_path
-from tests.testbench.conftest import SeededHeal
+from tests.testbench.conftest import SeedDecoy, SeededHeal
 
 
 def _seed(day: dt.date) -> str:
@@ -135,11 +135,14 @@ def test_a_page_with_no_seed_tag_is_unscorable() -> None:
 
 
 @pytest.mark.unit
-def test_accepted_means_what_the_product_means() -> None:
-    from selector_drift.orchestrate.history import ACCEPTED_STATES
+def test_accepted_is_the_products_own_predicate_not_a_copy() -> None:
+    """Fix round 1 (I2): the scorer reuses orchestrate.history's predicate; the integration
+    tests below exercise it (promoted, discarded, stale row beside a healed run)."""
+    from selector_drift.orchestrate import history
     from testbench import score
 
-    assert score.ACCEPTED_STATES == ACCEPTED_STATES
+    assert score.accepted_run is history.accepted_run
+    assert not hasattr(score, "ACCEPTED_STATES")  # no re-derived copy to drift
 
 
 # ---------------------------------------------------------------- the deployment
@@ -222,20 +225,100 @@ def test_each_seeded_heal_gets_the_judgement_its_run_earned(
     assert got == {h.id: h.expected for h in seeded_bench_heals}
 
 
+def _detail(db: OrmSession, heal: SeededHeal) -> dict[str, object]:
+    detail: dict[str, object] = db.execute(
+        text("select detail from audit_log where action = 'scored' and subject = :s "
+             "and actor = 'testbench.score'"),
+        {"s": str(heal.id)},
+    ).scalar_one()  # fmt: skip
+    return detail
+
+
+def _scored_rows(db: OrmSession) -> int:
+    return int(db.execute(text("select count(*) from audit_log where action = 'scored'")).one()[0])
+
+
+def _resolve(db: OrmSession, run_key: str, resolved_as: str) -> None:
+    db.execute(
+        text("update quarantine set resolved_as = :r, actor = 'tester', resolved_at = now() "
+             "where run_key = :k"),
+        {"r": resolved_as, "k": run_key},
+    )  # fmt: skip
+    db.commit()
+
+
 @pytest.mark.integration
-def test_a_quarantined_decoy_heal_scores_as_a_correct_refusal(
+def test_an_undecided_quarantine_stays_pending_then_a_promotion_scores_false_accept(
+    db: OrmSession, decoy_heal_quarantined: SeededHeal
+) -> None:
+    """Fix round 1 (C1): scoring before the human decides would freeze a later promotion of
+    the decoy as a correct refusal. Pending means no judgement and no audit row."""
+    from testbench.score import score_pending
+
+    assert score_pending(db) == []
+    assert _scored_rows(db) == 0
+    _resolve(db, decoy_heal_quarantined.run_key, "promoted")
+    assert score_pending(db) == [decoy_heal_quarantined.id]
+    detail = _detail(db, decoy_heal_quarantined)
+    assert detail["judgement"] == Judgement.FALSE_ACCEPT.value
+    assert detail["run_key"] == decoy_heal_quarantined.run_key  # the pinned row shape
+
+
+@pytest.mark.integration
+def test_a_discarded_decoy_heal_scores_as_a_correct_refusal(
     db: OrmSession, decoy_heal_quarantined: SeededHeal
 ) -> None:
     from testbench.score import score_pending
 
-    score_pending(db)
-    detail = db.execute(
-        text("select detail from audit_log where action = 'scored' and subject = :s "
-             "and actor = 'testbench.score'"),
-        {"s": str(decoy_heal_quarantined.id)},
-    ).scalar_one()  # fmt: skip
+    _resolve(db, decoy_heal_quarantined.run_key, "discarded")
+    assert score_pending(db) == [decoy_heal_quarantined.id]
+    detail = _detail(db, decoy_heal_quarantined)
     assert detail["judgement"] == Judgement.CORRECT_REFUSAL.value
-    assert detail["run_key"] == decoy_heal_quarantined.run_key  # the pinned row shape
+    assert detail["run_key"] == decoy_heal_quarantined.run_key
+
+
+@pytest.mark.integration
+def test_a_run_with_no_terminal_state_stays_pending(db: OrmSession, seed_decoy: SeedDecoy) -> None:
+    """record_attempt holds an in-progress (or retrying) run at failed/NO_TERMINAL_STATE: that
+    is not a refusal, and a later `healed` settle of a wrong heal must still be caught."""
+    from selector_drift.orchestrate.run_record import NO_TERMINAL_STATE
+    from testbench.score import score_pending
+
+    heal = seed_decoy(state="failed", error=NO_TERMINAL_STATE)
+    assert score_pending(db) == []
+    assert _scored_rows(db) == 0
+    db.execute(
+        text("update runs set state = 'healed', error = null where run_key = :k"),
+        {"k": heal.run_key},
+    )
+    db.commit()
+    assert score_pending(db) == [heal.id]
+    assert _detail(db, heal)["judgement"] == Judgement.FALSE_ACCEPT.value
+
+
+@pytest.mark.integration
+def test_a_decoy_heal_the_gate_let_through_is_a_false_accept(
+    db: OrmSession, seed_decoy: SeedDecoy
+) -> None:
+    """Fix round 1 (I3): the failure this product exists to prevent, end to end."""
+    from testbench.score import score_pending
+
+    heal = seed_decoy(state="healed")  # no quarantine row: the gate passed it
+    assert score_pending(db) == [heal.id]
+    detail = _detail(db, heal)
+    assert detail["judgement"] == Judgement.FALSE_ACCEPT.value
+    assert detail["run_key"] == heal.run_key
+
+
+@pytest.mark.integration
+def test_a_promoted_decoy_heal_is_a_false_accept(db: OrmSession, seed_decoy: SeedDecoy) -> None:
+    from testbench.score import score_pending
+
+    heal = seed_decoy(state="quarantined", quarantine="promoted")
+    assert score_pending(db) == [heal.id]
+    detail = _detail(db, heal)
+    assert detail["judgement"] == Judgement.FALSE_ACCEPT.value
+    assert detail["run_key"] == heal.run_key
 
 
 @pytest.mark.integration
