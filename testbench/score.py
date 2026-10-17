@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 from enum import StrEnum
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from selector_drift.heallog.bundle import (
     read_heal_manifest,
     verified_bytes,
 )
+from selector_drift.heallog.evidence import heal_bundle_dir
 from selector_drift.orchestrate.history import accepted_run
 from selector_drift.orchestrate.run_record import NO_TERMINAL_STATE
 from testbench.answers.key import expected_xpaths
@@ -47,6 +49,7 @@ from testbench.portal.hook import SEED_META
 from testbench.portal.hook import TARGET as TARGET
 from testbench.schedule import scheduled_names, seed_for
 
+_log = logging.getLogger(__name__)
 ACTOR = "testbench.score"
 ACTION = "scored"
 UNSCORABLE = "unscorable"
@@ -92,7 +95,10 @@ def seed_day(
 
 def _parse(html: str) -> lxml.html.HtmlElement:
     # The answer key's parser (testbench.mutations.base.parse), so paths are computed alike.
-    return lxml.html.document_fromstring(html)
+    try:
+        return lxml.html.document_fromstring(html)
+    except (lxml.etree.LxmlError, ValueError):  # lxml's own ValueErrors: empty, encoding decl
+        raise UnscorableHeal("the stored page could not be parsed") from None
 
 
 def meta_seed(after_html: str) -> str:
@@ -134,8 +140,10 @@ def _pending() -> Select[tuple[int, str, str, str | None, str | None, bool]]:
 
     Accepted is the product's own predicate (orchestrate.history.accepted_run): the run settled
     completed/healed, or its quarantine was promoted. A heal with no resolutions row is selected
-    too (outer join), so it is recorded unscorable rather than left pending forever. SKIP
-    LOCKED: two concurrent scorers never judge one heal twice."""
+    too (outer join), so it is recorded unscorable rather than left pending forever. Run only
+    under SCORER_LOCK_KEY (score_pending takes it first): that, not the row lock, is what stops
+    two overlapping scorers judging one heal twice -- under READ COMMITTED the NOT EXISTS on
+    audit_log is re-read only by a statement started after the first scorer commits."""
     undecided = select(Quarantine.run_key).where(Quarantine.resolved_as.is_(None))
     already = exists().where(
         AuditLog.action == ACTION,
@@ -168,22 +176,72 @@ _RECORD = text(
     "insert into audit_log (at, actor, action, subject, detail) "
     "values (now(), :actor, :action, :subject, cast(:detail as jsonb))"
 )
+# Round 2: one scorer at a time. A stable bigint (b"sd-score" as a big-endian int); held for the
+# whole transaction, so an overlapping run waits, then sees the first run's committed rows.
+SCORER_LOCK_KEY = int.from_bytes(b"sd-score", "big", signed=True)
+_LOCK = text("select pg_advisory_xact_lock(:k)")
+
+# What the evidence path legitimately raises; each becomes an `unscorable` row. Anything else is
+# a scorer bug: never laundered into a permanent row (see score_pending).
+_EVIDENCE_ERRORS: tuple[type[Exception], ...] = (
+    UnscorableHeal,
+    EvidenceCorrupted,
+    lxml.etree.LxmlError,
+    UnicodeDecodeError,
+    OSError,  # FileNotFoundError included
+)
+# Authored messages that carry only names, ids and caps -- never page text (bundle.py's
+# EvidenceCorrupted messages name files, directories and byte caps; ours, days and node ids).
+_MESSAGE_KEPT: tuple[type[Exception], ...] = (UnscorableHeal, EvidenceCorrupted)
+
+
+class ScorerFailed(Exception):
+    """Raised after the rest of the batch is committed: these heals hit an unexpected error and
+    were left pending, with no audit row."""
+
+    def __init__(self, heal_ids: list[int]) -> None:
+        self.heal_ids = heal_ids
+        super().__init__(
+            f"{len(heal_ids)} bench heal(s) left pending by a scorer error: {heal_ids}"
+        )
+
+
+def _reason(exc: Exception) -> str:
+    if isinstance(exc, _MESSAGE_KEPT):
+        return f"{type(exc).__name__}: {exc}"
+    return type(exc).__name__
+
+
+def _bundle(heal_id: int, evidence_uri: str | None) -> Path:
+    """The heal's bundle directory, derived from its id under the store root (never trusted
+    from the row): a stored uri naming any other directory is refused."""
+    if evidence_uri is None:
+        raise UnscorableHeal("no evidence was stored for this heal")
+    bundle = heal_bundle_dir(heal_id)
+    if Path(evidence_uri) != bundle:
+        raise UnscorableHeal("evidence outside the store")
+    return bundle
+
+
+def _expected(day: dt.date, field: str) -> list[str]:
+    try:
+        return expected_xpaths(day, field)
+    except KeyError:
+        raise UnscorableHeal("the heal's field is not a bench field") from None
 
 
 def _judged(
-    *, field: str, run_key: str, evidence_uri: str | None, node_id: str | None,
+    *, heal_id: int, field: str, run_key: str, evidence_uri: str | None, node_id: str | None,
     accepted: bool, key: bytes,
 ) -> dict[str, object]:  # fmt: skip
-    if evidence_uri is None:
-        raise UnscorableHeal("no evidence was stored for this heal")
+    bundle = _bundle(heal_id, evidence_uri)
     if node_id is None:
         raise UnscorableHeal("the heal has no resolution node to score")
-    bundle = Path(evidence_uri)
     manifest = read_heal_manifest(bundle)  # the bundle verified against its manifest
     after_html = verified_bytes(bundle, manifest.files, AFTER_HTML).decode("utf-8")
     day = seed_day(meta_seed(after_html), manifest.after.captured_at, key=key)
     resolved = truth_path(after_html, node_id)
-    expected = expected_xpaths(day, field)
+    expected = _expected(day, field)
     # Any row's cell in the right column is the right column: row 3's Amount is a correct
     # heal, row 1's Reserve is not.
     correct = resolved in expected
@@ -199,42 +257,59 @@ def _judged(
 
 def score_pending(session: Session, *, redaction_key: bytes | None = None) -> list[int]:
     """Score every settled bench heal with no 'scored' row yet (see _pending for what is held);
-    returns the heal ids scored. An unscorable heal is written, not skipped: skipping would
-    leave it pending forever and hide it, and a published count of unscorable heals is itself a
-    finding about the bench."""
+    returns the heal ids scored.
+
+    One transaction, under the scorer's advisory lock, with each heal in its own savepoint. An
+    evidence-path error (_EVIDENCE_ERRORS) is written as an `unscorable` row, not skipped:
+    skipping would leave it pending forever and hide it, and a published count of unscorable
+    heals is itself a finding about the bench. Any OTHER exception is a scorer bug: that heal's
+    savepoint is rolled back (no row, it stays pending), its class name and id are logged
+    (never the message), the rest of the batch is committed, and ScorerFailed is raised."""
     if redaction_key is None:
         from selector_drift.config import get_settings
 
         redaction_key = get_settings().redaction_key
+    session.execute(_LOCK, {"k": SCORER_LOCK_KEY})  # first: the pending query runs after it
     scored: list[int] = []
+    failed: list[int] = []
     for row in session.execute(_pending()).mappings().all():
-        detail: dict[str, object]
+        heal_id = int(row["id"])
         try:
-            detail = _judged(
-                field=row["field"], run_key=row["run_key"], evidence_uri=row["evidence_uri"],
-                node_id=row["node_id"], accepted=bool(row["accepted"]), key=redaction_key,
-            )  # fmt: skip
-        except (UnscorableHeal, EvidenceCorrupted, LookupError, ValueError,
-                lxml.etree.LxmlError) as exc:  # fmt: skip
-            detail = {
-                "field": row["field"],
-                "judgement": UNSCORABLE,
-                "reason": f"{type(exc).__name__}: {exc}",
-                "run_key": row["run_key"],
-            }
-        session.execute(
-            _RECORD,
-            {"actor": ACTOR, "action": ACTION, "subject": str(row["id"]),
-             "detail": json.dumps(detail)},
-        )  # fmt: skip
-        scored.append(int(row["id"]))
+            with session.begin_nested():
+                detail: dict[str, object]
+                try:
+                    detail = _judged(
+                        heal_id=heal_id, field=row["field"], run_key=row["run_key"],
+                        evidence_uri=row["evidence_uri"], node_id=row["node_id"],
+                        accepted=bool(row["accepted"]), key=redaction_key,
+                    )  # fmt: skip
+                except _EVIDENCE_ERRORS as exc:
+                    detail = {
+                        "field": row["field"],
+                        "judgement": UNSCORABLE,
+                        "reason": _reason(exc),
+                        "run_key": row["run_key"],
+                    }
+                session.execute(
+                    _RECORD,
+                    {"actor": ACTOR, "action": ACTION, "subject": str(heal_id),
+                     "detail": json.dumps(detail)},
+                )  # fmt: skip
+        except Exception as exc:  # a scorer bug: this heal only, and loudly at the end
+            _log.error("bench heal %d not scored: %s", heal_id, type(exc).__name__)
+            failed.append(heal_id)
+            continue
+        scored.append(heal_id)
     session.commit()
+    if failed:
+        raise ScorerFailed(failed)
     return scored
 
 
 @flow(name="bench-scorer")
 def score_pending_flow() -> int:
-    from selector_drift.db.session import Session  # permitted: only-the-scorer-reads-the-product
+    # permitted: only-the-scorer-reads-the-product
+    from selector_drift.db.session import Session as DbSession
 
-    with Session() as s:
+    with DbSession() as s:
         return len(score_pending(s))
