@@ -150,9 +150,11 @@ def _fresh_rate_limit_bucket(request: pytest.FixtureRequest) -> None:
     from selector_drift.config import get_settings
     from selector_drift.db.models import AuditLog
     from selector_drift.db.session import Session
-    from tests.conftest import require_database_reachable
+    from tests.conftest import require_usable_test_database
 
-    require_database_reachable(get_settings().database_url)
+    # The URL the engine will actually use: with SD_DATABASE_URL unset that is the development
+    # database, which this fixture's DELETE must never reach.
+    require_usable_test_database(get_settings().database_url)
     with Session() as s, s.begin():
         s.execute(
             delete(AuditLog).where(
