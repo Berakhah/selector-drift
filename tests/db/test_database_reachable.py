@@ -12,7 +12,12 @@ from contextlib import contextmanager
 
 import pytest
 
-from tests.conftest import DatabaseUnreachableError, require_database_reachable
+from tests.conftest import (
+    DatabaseUnreachableError,
+    NotATestDatabaseError,
+    require_database_reachable,
+    require_usable_test_database,
+)
 
 PASSWORD = "S3CRET-probe-canary"
 
@@ -31,6 +36,19 @@ def _stalled_server() -> Iterator[int]:
 
 def _url(port: int) -> str:
     return f"postgresql+psycopg://selector_drift:{PASSWORD}@127.0.0.1:{port}/selector_drift_test"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("database", ["selector_drift", "selector_drift_log", ""])
+def test_a_non_test_database_is_refused_by_name_before_any_connection(database: str) -> None:
+    # The refusal must be the name guard's, not the probe's: the dev database must never be
+    # connected to at all, even when it happens to be up.
+    with _stalled_server() as port:
+        url = f"postgresql+psycopg://selector_drift:{PASSWORD}@127.0.0.1:{port}/{database}"
+        started = time.monotonic()
+        with pytest.raises(NotATestDatabaseError):
+            require_usable_test_database(url)
+        assert time.monotonic() - started < 0.5
 
 
 @pytest.mark.unit
