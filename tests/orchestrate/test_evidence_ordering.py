@@ -98,15 +98,20 @@ class FakeCache:
 
 
 @pytest.fixture(autouse=True)
-def evidence_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def evidence_env(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
     monkeypatch.setenv("SD_EVIDENCE_ROOT", str(tmp_path / "evidence"))
     monkeypatch.setenv("SD_LAKE_ROOT", str(tmp_path / "lake"))
     monkeypatch.setenv("SD_REDACTION_KEY", KEY.hex())
     get_settings.cache_clear()
-    with engine.begin() as c:
-        c.execute(
-            text("TRUNCATE runs, heal_events, quarantine, heartbeats RESTART IDENTITY CASCADE")
-        )
+    # The static-analysis tests (`unit`) read source and need no database; truncating for them
+    # made them error wherever Postgres is absent.
+    if request.node.get_closest_marker("unit") is None:
+        with engine.begin() as c:
+            c.execute(
+                text("TRUNCATE runs, heal_events, quarantine, heartbeats RESTART IDENTITY CASCADE")
+            )
     yield
     get_settings.cache_clear()
 
