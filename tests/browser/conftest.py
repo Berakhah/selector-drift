@@ -147,9 +147,12 @@ def _fresh_rate_limit_bucket(request: pytest.FixtureRequest) -> None:
         return
     from sqlalchemy import delete
 
+    from selector_drift.config import get_settings
     from selector_drift.db.models import AuditLog
     from selector_drift.db.session import Session
+    from tests.conftest import require_database_reachable
 
+    require_database_reachable(get_settings().database_url)
     with Session() as s, s.begin():
         s.execute(
             delete(AuditLog).where(
