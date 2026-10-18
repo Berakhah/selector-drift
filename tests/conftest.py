@@ -68,6 +68,44 @@ def require_test_database_url(url: str) -> None:
         )
 
 
+class DatabaseUnreachableError(RuntimeError):
+    """Raised when the database a test needs does not answer within the probe's timeout."""
+
+
+# url -> failure message, or None once it answered. Failures are cached too: re-probing per test
+# would put the timeout back in front of every one of them.
+_REACHABILITY: dict[str, str | None] = {}
+
+
+def require_database_reachable(url: str, *, timeout: float = 3.0) -> None:
+    """Fail fast, once per URL, unless Postgres answers within `timeout` seconds.
+
+    The engine in `db.session` sets no connect timeout, and against an unreachable
+    `localhost:5432` libpq took ~130 s to give up -- per test, so a run looked hung. This fails
+    instead of skipping: a CI run with its database missing must not go green. The message names
+    host, port and database only, never the credentials.
+    """
+    if url not in _REACHABILITY:
+        import psycopg
+
+        parsed = make_url(url)
+        conninfo = parsed.set(drivername="postgresql").render_as_string(hide_password=False)
+        try:
+            psycopg.connect(conninfo, connect_timeout=max(1, round(timeout))).close()
+        except psycopg.Error:
+            _REACHABILITY[url] = (
+                f"Postgres at {parsed.host}:{parsed.port} (database {parsed.database!r}) did not "
+                f"answer within {timeout:g}s. Start it (docker compose up -d postgres), point "
+                "SD_DATABASE_URL at it, or deselect the tests that need it "
+                "(-m 'not integration and not e2e')."
+            )
+        else:
+            _REACHABILITY[url] = None
+    failure = _REACHABILITY[url]
+    if failure is not None:
+        raise DatabaseUnreachableError(failure)
+
+
 def worker_database_url(url: str, worker: str) -> str:
     """The database URL one xdist worker should use: `<base>_gw<N>_test` in place of
     `<base>_test`, everything else unchanged. A serial run (`worker` empty or `"master"`) keeps
@@ -146,4 +184,6 @@ def _guard_integration_database_name(request: pytest.FixtureRequest) -> None:
     """Runs before every test in the suite; only integration-marked tests pay for it."""
     if request.node.get_closest_marker("integration") is None:
         return
-    require_test_database_url(os.environ.get("SD_DATABASE_URL", ""))
+    url = os.environ.get("SD_DATABASE_URL", "")
+    require_test_database_url(url)
+    require_database_reachable(url)
