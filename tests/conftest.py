@@ -106,6 +106,13 @@ def require_database_reachable(url: str, *, timeout: float = 3.0) -> None:
         raise DatabaseUnreachableError(failure)
 
 
+def require_usable_test_database(url: str) -> None:
+    """The one gate for a test that touches Postgres: the name guard first (so the development
+    or log database is never even connected to), then the reachability probe."""
+    require_test_database_url(url)
+    require_database_reachable(url)
+
+
 def worker_database_url(url: str, worker: str) -> str:
     """The database URL one xdist worker should use: `<base>_gw<N>_test` in place of
     `<base>_test`, everything else unchanged. A serial run (`worker` empty or `"master"`) keeps
@@ -184,6 +191,4 @@ def _guard_integration_database_name(request: pytest.FixtureRequest) -> None:
     """Runs before every test in the suite; only integration-marked tests pay for it."""
     if request.node.get_closest_marker("integration") is None:
         return
-    url = os.environ.get("SD_DATABASE_URL", "")
-    require_test_database_url(url)
-    require_database_reachable(url)
+    require_usable_test_database(os.environ.get("SD_DATABASE_URL", ""))
