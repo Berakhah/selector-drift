@@ -15,6 +15,7 @@ license = "Apache-2.0"
 # remove the bok-core entry from [tool.uv.sources], then `uv lock`.
 dependencies = [
     "alembic>=1.19.1",
+    "argon2-cffi>=25.1.0",
     "bok-core",
     "croniter>=6.2.4",
     "cryptography>=50.0.1",
@@ -33,6 +34,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "regex>=2026.7.19",
     "sqlalchemy>=2.0.52",
+    "uvicorn>=0.52.4",
 ]
 
 [dependency-groups]
