@@ -3,13 +3,13 @@ import dataclasses
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from selector_drift.api.auth import create_operator
 from selector_drift.api.errors import install_problem_handlers
 from selector_drift.api.main import create_app
 from selector_drift.config import ConfigError, Settings
-from selector_drift.db.models import Operator
+from selector_drift.db.models import AuditLog, Operator
 from selector_drift.db.session import Session
 from tests.api.conftest import LOGIN
 
@@ -107,3 +107,28 @@ def test_production_normalises_the_web_origin_for_the_guard(clean_db):
     assert ok.status_code == 401  # past the guard, refused for want of a session
     bad = c.post("/api/v1/auth/logout", headers={"Origin": "https://evil.example.com"})
     assert bad.status_code == 403
+
+
+@pytest.mark.integration
+def test_a_full_verify_cap_is_refused_at_once_with_429(anon_client, operator, monkeypatch):
+    import threading
+
+    from selector_drift.api import auth
+
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(auth, "_verify_slots", slots)
+    assert slots.acquire(blocking=False)  # every slot is busy
+    try:
+        r = anon_client.post(LOGIN, json={"username": "op1", "password": operator[1]})
+    finally:
+        slots.release()
+    assert r.status_code == 429 and r.json()["type"].endswith("throttled")
+    assert "busy" in r.json()["detail"] and r.headers["Retry-After"] == "1"
+    # a refused attempt is not a guess: it must not count toward the username's 5
+    with Session() as s:
+        n = s.scalar(
+            select(func.count()).select_from(AuditLog).where(AuditLog.action == "login_failure")
+        )
+    assert n == 0
+    ok = anon_client.post(LOGIN, json={"username": "op1", "password": operator[1]})
+    assert ok.status_code == 200

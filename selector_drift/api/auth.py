@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 import secrets
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -27,6 +28,11 @@ THROTTLE_WINDOW = timedelta(minutes=15)
 USERNAME_RE = re.compile(r"^[a-z0-9_.-]{1,64}$")
 _hasher = PasswordHasher()  # argon2id, library defaults
 _DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(16))  # equalises timing for unknown users
+# Each argon2id verify allocates ~64 MiB. Cap concurrent verifies per process so rotating
+# usernames cannot exhaust memory; a full cap is refused at once, never queued. Per PROCESS:
+# N uvicorn workers allow N * VERIFY_CAP.
+VERIFY_CAP = 4
+_verify_slots = threading.BoundedSemaphore(VERIFY_CAP)
 
 
 def audit(
@@ -100,11 +106,19 @@ def authenticate(db: OrmSession, username: str, password: str, now: datetime) ->
         )
     op = db.scalars(select(Operator).where(Operator.username == username)).first()
     usable = op is not None and op.disabled_at is None
+    if not _verify_slots.acquire(blocking=False):
+        db.rollback()
+        raise Throttled(
+            "The server is busy verifying other sign-ins - try again shortly",
+            headers={"Retry-After": "1"},
+        )
     ok: bool
     try:
         ok = _hasher.verify(op.password_hash if usable and op else _DUMMY_HASH, password)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         ok = False
+    finally:
+        _verify_slots.release()
     if not (ok and usable and op):
         audit(db, actor="anonymous", action="login_failure", subject=f"operator:{username}")
         db.commit()
