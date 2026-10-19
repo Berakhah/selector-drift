@@ -547,3 +547,11 @@ Written before Task 34 starts, after Tasks 1–33 and 26A–C landed. The rest o
    step of the Task 34 plan, not an assumption.
 4. **Unchanged from §6.2.** The vendored bok-core has no `QuerySource`, so `StatsView` stays plain
    numbers with `method_url`; the proposal remains a document (Task 34B).
+5. **`api-is-read-side` as built.** The contract forbids only `resolve.cascade`, `resolve.rungs`,
+   `resolve.cache`, `land.writer`, `land.compact`, `heallog.replay`, `heallog.retention`,
+   `browser`, `orchestrate` and `credentials`. The API reaches `resolve.page` and the aria types
+   only through the type modules (`resolve.trace`, `heallog.capture`), which are pure lxml. Section
+   2's prose "the rest of `resolve/`, `land/`" is read as the contract states it.
+6. **`create_app` gains `actions`.** In Task 34C `create_app` takes a keyword-only
+   `actions: QuarantineActions`, REQUIRED: tests pass a fake, and there is never a silent no-op
+   default that would let promote/discard appear to succeed.

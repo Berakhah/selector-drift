@@ -24,7 +24,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 SESSION_LIFETIME = timedelta(hours=12)  # absolute; no sliding renewal
 THROTTLE_LIMIT = 5
 THROTTLE_WINDOW = timedelta(minutes=15)
-_USERNAME = re.compile(r"^[a-z0-9_.-]{1,64}$")
+USERNAME_RE = re.compile(r"^[a-z0-9_.-]{1,64}$")
 _hasher = PasswordHasher()  # argon2id, library defaults
 _DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(16))  # equalises timing for unknown users
 
@@ -45,7 +45,7 @@ def audit(
 
 
 def create_operator(db: OrmSession, username: str, password: str) -> Operator:
-    if not _USERNAME.fullmatch(username):
+    if not USERNAME_RE.fullmatch(username):
         raise Invalid("username must match ^[a-z0-9_.-]{1,64}$")
     op = Operator(
         username=username,
@@ -76,11 +76,20 @@ def _failures(db: OrmSession, username: str, now: datetime) -> tuple[int, dateti
 
 
 def authenticate(db: OrmSession, username: str, password: str, now: datetime) -> Operator:
-    # Serialise attempts per username: count -> verify -> failure row is one critical section,
-    # else N concurrent requests all see count < limit and each gets a guess. The xact lock is
-    # released by the commit on failure / by issue_session's commit on success; the throttled
-    # path rolls back explicitly.
-    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"login:{username}"})
+    # Serialise attempts per username: lock -> count -> verify -> failure row is one critical
+    # section, else N concurrent requests all see count < limit and each gets a guess. It is a
+    # TRY lock: a loser is refused at once instead of parking a pooled connection and a thread
+    # behind a slow argon2 verify. The xact lock is released by the failure-row commit, by
+    # issue_session's commit on success, and by the explicit rollbacks on the refusal paths.
+    got = db.execute(
+        text("SELECT pg_try_advisory_xact_lock(hashtext(:k))"), {"k": f"login:{username}"}
+    ).scalar_one()
+    if not got:
+        db.rollback()
+        raise Throttled(
+            "Another sign-in attempt for this username is in progress - try again shortly",
+            headers={"Retry-After": "1"},
+        )
     count, oldest = _failures(db, username, now)
     if count >= THROTTLE_LIMIT and oldest is not None:
         db.rollback()

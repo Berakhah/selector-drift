@@ -16,6 +16,10 @@ from sqlalchemy.orm import sessionmaker
 
 from selector_drift.config import get_settings
 
-engine: Engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+engine: Engine = create_engine(
+    get_settings().database_url,
+    pool_pre_ping=True,
+    hide_parameters=True,  # a bound argon2 hash must never print in a traceback
+)
 
 Session = sessionmaker(bind=engine)
