@@ -53,6 +53,8 @@ def test_uv_lock_has_no_absolute_path_and_references_the_vendored_wheel() -> Non
     relative = _bok_core_source()["path"]
     assert isinstance(relative, str)
     assert relative in lock, f"uv.lock does not reference {relative}"
+    actual = hashlib.sha256(_wheel_path().read_bytes()).hexdigest()
+    assert f"sha256:{actual}" in lock, "uv.lock records a stale hash for the vendored wheel"
 
 
 @pytest.mark.unit
@@ -62,7 +64,7 @@ def test_dockerfile_copies_vendor_before_the_first_uv_sync(dockerfile: Path) -> 
         "" if ln.lstrip().startswith("#") else ln
         for ln in dockerfile.read_text(encoding="utf-8").splitlines()
     ]
-    copy_idx = [i for i, ln in enumerate(lines) if re.match(r"\s*COPY\s+vendor\b", ln)]
+    copy_idx = [i for i, ln in enumerate(lines) if re.match(r"\s*COPY\s+vendor(\s|/)", ln)]
     sync_idx = [i for i, ln in enumerate(lines) if "uv sync" in ln]
     assert copy_idx, f"{dockerfile.name} has no `COPY vendor` line"
     assert sync_idx, f"{dockerfile.name} has no `uv sync` line"
@@ -73,4 +75,8 @@ def test_dockerfile_copies_vendor_before_the_first_uv_sync(dockerfile: Path) -> 
 def test_vendor_readme_records_the_wheels_real_sha256() -> None:
     readme = (ROOT / "vendor" / "README.md").read_text(encoding="utf-8")
     actual = hashlib.sha256(_wheel_path().read_bytes()).hexdigest()
-    assert actual in readme, "vendor/README.md does not state the wheel's sha256"
+    labelled = [ln for ln in readme.splitlines() if ln.lstrip("| ").startswith("sha256")]
+    assert labelled, "vendor/README.md has no sha256 line"
+    assert any(actual in ln for ln in labelled), (
+        "the sha256 line in vendor/README.md does not match the wheel"
+    )
