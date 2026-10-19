@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+import http
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -24,9 +24,9 @@ class ProblemDetail(BaseModel):
 
 
 class ApiProblem(Exception):
-    slug: ClassVar[str] = "invalid"
-    status: ClassVar[int] = 400
-    title: ClassVar[str] = "Bad request"
+    slug: str = "invalid"
+    status: int = 400
+    title: str = "Bad request"
 
     def __init__(
         self,
@@ -67,6 +67,25 @@ class AlreadyResolved(ApiProblem):
 
 class Throttled(ApiProblem):
     slug, status, title = "throttled", 429, "Too many sign-in attempts"
+
+
+class HttpError(ApiProblem):
+    """Any other HTTP error raised by the framework (405, 413, ...): its real status, the
+    standard phrase as title, and its own headers (405 keeps `Allow`)."""
+
+    slug = "http-error"
+
+    def __init__(self, status_code: int, detail: str, headers: dict[str, str] | None = None):
+        super().__init__(detail, headers=headers)
+        self.status = status_code
+        try:
+            self.title = http.HTTPStatus(status_code).phrase
+        except ValueError:
+            self.title = "HTTP error"
+
+
+class InternalError(ApiProblem):
+    slug, status, title = "internal", 500, "Internal server error"
 
 
 class EvidenceGone(ApiProblem):
@@ -128,9 +147,14 @@ def install_problem_handlers(app: FastAPI) -> None:
         problem: ApiProblem = (
             NotFound("no route or resource at this path")
             if exc.status_code == 404
-            else Invalid(str(exc.detail))
+            else HttpError(exc.status_code, str(exc.detail), dict(exc.headers or {}))
         )
-        response = problem_response(problem, _base(request))
-        if exc.status_code not in (404, 422):
-            response.status_code = exc.status_code
-        return response
+        return problem_response(problem, _base(request))
+
+    @app.exception_handler(Exception)
+    async def _internal(request: Request, exc: Exception) -> JSONResponse:
+        # Fixed text, never the exception: it can carry SQL parameters or a hash. Starlette
+        # still logs and re-raises after this response is sent.
+        return problem_response(
+            InternalError("the server failed to handle this request"), _base(request)
+        )
