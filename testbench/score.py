@@ -141,9 +141,10 @@ def _pending() -> Select[tuple[int, str, str, str | None, str | None, bool]]:
     Accepted is the product's own predicate (orchestrate.history.accepted_run): the run settled
     completed/healed, or its quarantine was promoted. A heal with no resolutions row is selected
     too (outer join), so it is recorded unscorable rather than left pending forever. Run only
-    under SCORER_LOCK_KEY (score_pending takes it first): that, not the row lock, is what stops
-    two overlapping scorers judging one heal twice -- under READ COMMITTED the NOT EXISTS on
-    audit_log is re-read only by a statement started after the first scorer commits."""
+    under SCORER_LOCK_KEY (score_pending takes it first): that, not a row lock (the scorer's
+    role has no UPDATE, so it cannot take one), is what stops two overlapping scorers judging
+    one heal twice -- under READ COMMITTED the NOT EXISTS on audit_log is re-read only by a
+    statement started after the first scorer commits."""
     undecided = select(Quarantine.run_key).where(Quarantine.resolved_as.is_(None))
     already = exists().where(
         AuditLog.action == ACTION,
@@ -168,7 +169,6 @@ def _pending() -> Select[tuple[int, str, str, str | None, str | None, bool]]:
             ~already,
         )
         .order_by(HealEvent.id)
-        .with_for_update(of=HealEvent, skip_locked=True)
     )
 
 
