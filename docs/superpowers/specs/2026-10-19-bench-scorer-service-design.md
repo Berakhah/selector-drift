@@ -104,18 +104,9 @@ redacted form.
 - Re-running the 60-day campaign table in `docs/methodology.md`.
 - A product-side database connect timeout (a separate decision).
 
-## 6a. Known blocker: no container image of this product builds from the repo today
+## 6a. Resolved: P-1 vendored wheel
 
-`pyproject.toml` pins `bok-core` as an absolute host-path editable dependency (the documented
-TEMPORARY workaround, P-1, `pyproject.toml:7-21`; `uv.lock` records the same path). `uv sync`
-therefore cannot run inside any image, and the product's own `./Dockerfile` (the worker) hits it
-exactly as `docker/Dockerfile.bench-scorer` does. This design does not change that. The scorer
-image was verified in a scratch build outside the repo with `bok-core` vendored and `--frozen`
-dropped (all 121 resolved packages matched `uv.lock`): imports resolve, uid is 10001, there are no
-browser binaries, the deployment entrypoint inside the image is
-`testbench/score.py:score_pending_flow`, and it loads under `--read-only --cap-drop ALL
---security-opt no-new-privileges`. Resolving P-1 (a PyPI release, a merged branch, or a vendored
-wheel) unblocks both images.
+"bok-core" is now a pre-built wheel vendored at endor/bok_core-0.0.1-py3-none-any.whl (built from backoffice-kit ok-core-minimal at commit 3a4044d) and referenced by a repo-relative path in pyproject.toml and uv.lock, replacing the absolute host-path editable dependency. Both Dockerfiles COPY vendor ./vendor before the first uv sync. On 2026-10-19 both the worker image (./Dockerfile) and docker/Dockerfile.bench-scorer were built from the repo with uv sync --frozen; in each, ok_core imports from /opt/venv/lib/python3.12/site-packages/ and the uid is 10001. The earlier scratch-build evidence (bok-core vendored outside the repo, --frozen dropped) is superseded.
 
 ## 7. Operational note
 
