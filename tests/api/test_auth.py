@@ -131,3 +131,56 @@ def test_create_operator_refuses_to_read_a_password_without_a_tty(monkeypatch, c
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     assert main(["create-operator", "op9"]) == 2
     assert "terminal" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_concurrent_wrong_guesses_for_one_username_are_capped_at_the_throttle_limit(
+    settings, operator
+):
+    """The count -> verify -> record sequence is serialised per username, so a burst cannot
+    buy more than THROTTLE_LIMIT password guesses per window."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from selector_drift.api.auth import THROTTLE_LIMIT
+    from selector_drift.db.models import AuditLog
+
+    app = create_app(settings=settings)
+    burst = 12
+
+    def guess(_: int) -> int:
+        c = make_client(app)
+        return c.post(LOGIN, json={"username": "op1", "password": "wrong"}).status_code
+
+    with ThreadPoolExecutor(max_workers=burst) as pool:
+        codes = list(pool.map(guess, range(burst)))
+    with Session() as s:
+        failures = s.scalars(select(AuditLog).where(AuditLog.action == "login_failure")).all()
+    assert len(failures) == THROTTLE_LIMIT, (len(failures), codes)
+    assert codes.count(401) == THROTTLE_LIMIT
+    assert codes.count(429) == burst - THROTTLE_LIMIT
+
+
+@pytest.mark.integration
+def test_the_password_appears_in_no_audit_row_log_or_response(anon_client, operator, caplog):
+    import json
+
+    from selector_drift.db.models import AuditLog
+
+    secret = operator[1]
+    caplog.set_level("DEBUG")
+    responses = [
+        anon_client.post(LOGIN, json={"username": "op1", "password": secret}),
+        anon_client.post(LOGIN, json={"username": "op1", "password": secret + "x"}),
+        anon_client.post(LOGIN, json={"username": "NOT VALID!", "password": secret}),
+    ]
+    assert [r.status_code for r in responses] == [200, 401, 422]
+    for r in responses:
+        assert secret not in r.text
+        assert secret not in json.dumps(dict(r.headers))
+    assert secret not in caplog.text
+    with Session() as s:
+        rows = s.scalars(select(AuditLog)).all()
+        assert rows
+        for row in rows:
+            blob = json.dumps([row.action, row.subject, row.actor, row.detail], default=str)
+            assert secret not in blob

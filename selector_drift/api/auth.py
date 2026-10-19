@@ -11,7 +11,7 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import APIRouter, Request, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session as OrmSession
 
 from selector_drift.api.deps import SESSION_COOKIE, CurrentOperator, Db, token_sha256
@@ -76,8 +76,14 @@ def _failures(db: OrmSession, username: str, now: datetime) -> tuple[int, dateti
 
 
 def authenticate(db: OrmSession, username: str, password: str, now: datetime) -> Operator:
+    # Serialise attempts per username: count -> verify -> failure row is one critical section,
+    # else N concurrent requests all see count < limit and each gets a guess. The xact lock is
+    # released by the commit on failure / by issue_session's commit on success; the throttled
+    # path rolls back explicitly.
+    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"login:{username}"})
     count, oldest = _failures(db, username, now)
     if count >= THROTTLE_LIMIT and oldest is not None:
+        db.rollback()
         wait = max(1, math.ceil((oldest + THROTTLE_WINDOW - now).total_seconds()))
         raise Throttled(
             f"Too many attempts - try again in {math.ceil(wait / 60)} minutes",
