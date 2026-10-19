@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+import logging
 import math
 import re
 import secrets
@@ -33,6 +35,15 @@ _DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(16))  # equalises timing for un
 # N uvicorn workers allow N * VERIFY_CAP.
 VERIFY_CAP = 4
 _verify_slots = threading.BoundedSemaphore(VERIFY_CAP)
+
+_log = logging.getLogger(__name__)
+_unknown_counter = itertools.count(1)  # next() is atomic under the GIL
+_unknown_seen = [0]  # one-element holder: avoids a `global` rebind
+
+
+def unknown_user_failures() -> int:
+    """Failed sign-ins for usernames with no operator row, since process start."""
+    return _unknown_seen[0]
 
 
 def audit(
@@ -120,8 +131,14 @@ def authenticate(db: OrmSession, username: str, password: str, now: datetime) ->
     finally:
         _verify_slots.release()
     if not (ok and usable and op):
-        audit(db, actor="anonymous", action="login_failure", subject=f"operator:{username}")
-        db.commit()
+        if op is None:
+            # Unknown names are attacker-controlled: count them, never persist or log them.
+            _unknown_seen[0] = next(_unknown_counter)
+            _log.warning("login failure for an unknown username (count=%d)", _unknown_seen[0])
+            db.rollback()  # releases the xact lock; nothing to persist
+        else:
+            audit(db, actor="anonymous", action="login_failure", subject=f"operator:{username}")
+            db.commit()
         raise Unauthenticated("Username or password is incorrect")
     if _hasher.check_needs_rehash(op.password_hash):
         op.password_hash = _hasher.hash(password)
