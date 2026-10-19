@@ -8,6 +8,37 @@ The buyer's entrypoint is the Prefect scheduler
 from __future__ import annotations
 
 import argparse
+import getpass
+import sys
+
+MIN_PASSWORD = 12
+
+
+def _create_operator(username: str) -> int:
+    if not sys.stdin.isatty():
+        print(
+            "create-operator reads the password from a terminal only - never an argument, "
+            "never an environment variable. Refusing.",
+            file=sys.stderr,
+        )
+        return 2
+    password = getpass.getpass("Password: ")
+    if password != getpass.getpass("Again: "):
+        print("passwords differ", file=sys.stderr)
+        return 2
+    if len(password) < MIN_PASSWORD:
+        print(f"use at least {MIN_PASSWORD} characters", file=sys.stderr)
+        return 2
+    # Imported here: create-operator must not pull in the orchestrator and its Playwright
+    # dependency tree just to hash a password.
+    from selector_drift.api.auth import create_operator
+    from selector_drift.db.session import Session
+
+    with Session() as s:
+        create_operator(s, username, password)
+        s.commit()
+    print(f"operator {username} created")
+    return 0
 
 
 def _run(spec: str) -> int:
@@ -25,9 +56,13 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "spec", help="a spec file name such as testbench.yaml, resolved under SD_SPEC_DIR"
     )
+    op = sub.add_parser("create-operator", help="create an API operator (password from a TTY)")
+    op.add_argument("username")
     args = parser.parse_args(argv)
     if args.command == "run":
         return _run(str(args.spec))
+    if args.command == "create-operator":
+        return _create_operator(str(args.username))
     parser.error(f"unknown command {args.command}")
 
 
