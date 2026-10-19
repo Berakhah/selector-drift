@@ -15,6 +15,11 @@ MIN_PASSWORD = 12
 
 
 def _create_operator(username: str) -> int:
+    from selector_drift.api.auth import USERNAME_RE
+
+    if not USERNAME_RE.fullmatch(username):
+        print("username must match ^[a-z0-9_.-]{1,64}$", file=sys.stderr)
+        return 2
     if not sys.stdin.isatty():
         print(
             "create-operator reads the password from a terminal only - never an argument, "
@@ -31,12 +36,18 @@ def _create_operator(username: str) -> int:
         return 2
     # Imported here: create-operator must not pull in the orchestrator and its Playwright
     # dependency tree just to hash a password.
+    from sqlalchemy.exc import IntegrityError
+
     from selector_drift.api.auth import create_operator
     from selector_drift.db.session import Session
 
-    with Session() as s:
-        create_operator(s, username, password)
-        s.commit()
+    try:
+        with Session() as s:
+            create_operator(s, username, password)
+            s.commit()
+    except IntegrityError:
+        print(f"operator {username} already exists", file=sys.stderr)
+        return 2
     print(f"operator {username} created")
     return 0
 

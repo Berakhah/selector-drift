@@ -134,30 +134,48 @@ def test_create_operator_refuses_to_read_a_password_without_a_tty(monkeypatch, c
 
 
 @pytest.mark.integration
-def test_concurrent_wrong_guesses_for_one_username_are_capped_at_the_throttle_limit(
-    settings, operator
-):
-    """The count -> verify -> record sequence is serialised per username, so a burst cannot
-    buy more than THROTTLE_LIMIT password guesses per window."""
+def test_a_burst_of_wrong_guesses_is_capped_never_starves_and_never_5xx(app, client):
+    """Attempts for one username are serialised with a try-lock: a loser is refused at once
+    (429) instead of waiting on a pooled connection. A burst larger than the pool therefore
+    buys at most THROTTLE_LIMIT guesses, returns only 401/429, and leaves /me responsive."""
     from concurrent.futures import ThreadPoolExecutor
 
     from selector_drift.api.auth import THROTTLE_LIMIT
     from selector_drift.db.models import AuditLog
 
-    app = create_app(settings=settings)
-    burst = 12
+    burst = 30
 
     def guess(_: int) -> int:
         c = make_client(app)
         return c.post(LOGIN, json={"username": "op1", "password": "wrong"}).status_code
 
     with ThreadPoolExecutor(max_workers=burst) as pool:
-        codes = list(pool.map(guess, range(burst)))
+        futures = [pool.submit(guess, i) for i in range(burst)]
+        assert client.get(ME).status_code == 200  # still served while the burst runs
+        codes = [f.result() for f in futures]
     with Session() as s:
         failures = s.scalars(select(AuditLog).where(AuditLog.action == "login_failure")).all()
-    assert len(failures) == THROTTLE_LIMIT, (len(failures), codes)
-    assert codes.count(401) == THROTTLE_LIMIT
-    assert codes.count(429) == burst - THROTTLE_LIMIT
+    assert len(failures) <= THROTTLE_LIMIT, (len(failures), codes)
+    assert codes.count(401) + codes.count(429) == burst, codes
+
+
+@pytest.mark.integration
+def test_an_attempt_that_finds_the_username_lock_taken_is_refused_at_once(anon_client, operator):
+    from sqlalchemy import text
+
+    from selector_drift.db.session import engine
+
+    with engine.connect() as holder:
+        holder.execute(text("SELECT pg_advisory_lock(hashtext('login:op1'))"))
+        try:
+            r = anon_client.post(LOGIN, json={"username": "op1", "password": operator[1]})
+            ghost = anon_client.post(LOGIN, json={"username": "nobody", "password": "x"})
+        finally:
+            holder.execute(text("SELECT pg_advisory_unlock(hashtext('login:op1'))"))
+            holder.commit()
+    assert r.status_code == 429 and r.headers["Retry-After"] == "1"
+    assert r.json()["type"].endswith("throttled") and "in progress" in r.json()["detail"]
+    assert ghost.status_code == 401  # a different username has its own lock
 
 
 @pytest.mark.integration
