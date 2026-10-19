@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import itertools
+import hashlib
+import hmac
 import logging
 import math
 import re
 import secrets
 import threading
+from collections import OrderedDict, deque
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -37,13 +39,57 @@ VERIFY_CAP = 4
 _verify_slots = threading.BoundedSemaphore(VERIFY_CAP)
 
 _log = logging.getLogger(__name__)
-_unknown_counter = itertools.count(1)  # next() is atomic under the GIL
-_unknown_seen = [0]  # one-element holder: avoids a `global` rebind
+# Unknown usernames are attacker-controlled, so they are throttled in process memory only:
+# keyed by an HMAC under a per-process random key (the name itself is never stored or logged),
+# bounded, and behind one lock. Per PROCESS: N workers each keep their own table.
+UNKNOWN_KEYS_CAP = 10_000
+_unknown_lock = threading.Lock()
+_unknown_key = secrets.token_bytes(32)
+_unknown_hits: OrderedDict[bytes, deque[datetime]] = OrderedDict()
+_unknown_total = 0
 
 
 def unknown_user_failures() -> int:
     """Failed sign-ins for usernames with no operator row, since process start."""
-    return _unknown_seen[0]
+    with _unknown_lock:
+        return _unknown_total
+
+
+def _unknown_digest(username: str) -> bytes:
+    return hmac.new(_unknown_key, username.encode(), hashlib.sha256).digest()
+
+
+def _unknown_wait(username: str, now: datetime) -> int | None:
+    """Seconds until an unknown username may try again, or None if it is under the limit."""
+    key = _unknown_digest(username)
+    since = now - THROTTLE_WINDOW
+    with _unknown_lock:
+        hits = _unknown_hits.get(key)
+        if hits is None:
+            return None
+        while hits and hits[0] <= since:
+            hits.popleft()
+        if not hits:
+            del _unknown_hits[key]
+            return None
+        if len(hits) >= THROTTLE_LIMIT:
+            return max(1, math.ceil((hits[0] + THROTTLE_WINDOW - now).total_seconds()))
+        return None
+
+
+def _unknown_record(username: str, now: datetime) -> int:
+    """Record one failure for an unknown username; return the running total."""
+    global _unknown_total
+    key = _unknown_digest(username)
+    with _unknown_lock:
+        hits = _unknown_hits.get(key)
+        if hits is None:
+            while len(_unknown_hits) >= UNKNOWN_KEYS_CAP:
+                _unknown_hits.popitem(last=False)  # evict the oldest key
+            hits = _unknown_hits[key] = deque()
+        hits.append(now)
+        _unknown_total += 1
+        return _unknown_total
 
 
 def audit(
@@ -101,7 +147,9 @@ def _failures(db: OrmSession, username: str, now: datetime) -> tuple[int, dateti
             AuditLog.action == "login_unlock", AuditLog.subject == subject
         )
     )
-    if last_unlock is not None and last_unlock > since:
+    # A future-dated unlock (clock skew between the CLI and API hosts) is ignored: honouring it
+    # would hide every failure up to that instant, including the ones still to come.
+    if last_unlock is not None and since < last_unlock <= now:
         since = last_unlock
     q = select(func.count(), func.min(AuditLog.at)).where(
         AuditLog.action == "login_failure",
@@ -136,6 +184,14 @@ def authenticate(db: OrmSession, username: str, password: str, now: datetime) ->
             headers={"Retry-After": str(wait)},
         )
     op = db.scalars(select(Operator).where(Operator.username == username)).first()
+    if op is None:
+        unknown_wait = _unknown_wait(username, now)
+        if unknown_wait is not None:  # identical to the real-user refusal above
+            db.rollback()
+            raise Throttled(
+                f"Too many attempts - try again in {math.ceil(unknown_wait / 60)} minutes",
+                headers={"Retry-After": str(unknown_wait)},
+            )
     usable = op is not None and op.disabled_at is None
     if not _verify_slots.acquire(blocking=False):
         db.rollback()
@@ -153,8 +209,8 @@ def authenticate(db: OrmSession, username: str, password: str, now: datetime) ->
     if not (ok and usable and op):
         if op is None:
             # Unknown names are attacker-controlled: count them, never persist or log them.
-            _unknown_seen[0] = next(_unknown_counter)
-            _log.warning("login failure for an unknown username (count=%d)", _unknown_seen[0])
+            total = _unknown_record(username, now)
+            _log.warning("login failure for an unknown username (count=%d)", total)
             db.rollback()  # releases the xact lock; nothing to persist
         else:
             audit(db, actor="anonymous", action="login_failure", subject=f"operator:{username}")

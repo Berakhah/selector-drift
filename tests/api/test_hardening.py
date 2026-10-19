@@ -1,4 +1,5 @@
 import dataclasses
+import secrets
 
 import pytest
 from fastapi import FastAPI
@@ -213,3 +214,125 @@ def test_unlock_operator_cli_reports_and_audits(operator, capsys):
     assert "op1" in capsys.readouterr().out
     assert latest_audit("login_unlock").subject == "operator:op1"
     assert main(["unlock-operator", "nobody"]) == 2
+
+
+def _bad(client, name):
+    return client.post(LOGIN, json={"username": name, "password": "wrong-guess"})
+
+
+@pytest.mark.integration
+def test_unknown_usernames_are_throttled_exactly_like_real_ones(anon_client, operator):
+    ghost = "ghost-" + secrets.token_hex(4)
+    real = [_bad(anon_client, "op1") for _ in range(6)]
+    unknown = [_bad(anon_client, ghost) for _ in range(6)]
+    assert [r.status_code for r in unknown] == [r.status_code for r in real]
+    assert [r.status_code for r in unknown] == [401] * 5 + [429]
+    assert unknown[5].json()["type"] == real[5].json()["type"]
+    assert unknown[5].json()["type"].endswith("throttled")
+    assert unknown[5].json()["detail"].split(" in ")[0] == real[5].json()["detail"].split(" in ")[0]
+    assert 0 < int(unknown[5].headers["Retry-After"]) <= 900
+
+
+@pytest.mark.integration
+def test_throttled_unknown_names_write_no_audit_rows_and_are_never_logged(
+    anon_client, operator, caplog
+):
+    ghost = "ghost-" + secrets.token_hex(4)
+    for _ in range(7):
+        _bad(anon_client, ghost)
+    with Session() as s:
+        n = s.scalar(select(func.count()).select_from(AuditLog))
+    assert n == 1  # only the operator_created row
+    assert ghost not in caplog.text
+
+
+@pytest.mark.unit
+def test_unknown_throttle_keys_are_bounded(monkeypatch):
+    from datetime import UTC, datetime
+
+    from selector_drift.api import auth
+
+    monkeypatch.setattr(auth, "UNKNOWN_KEYS_CAP", 3)
+    now = datetime.now(UTC)
+    for i in range(10):
+        auth._unknown_record(f"name{i}", now)
+        assert len(auth._unknown_hits) <= 3
+    assert auth._unknown_wait("name9", now) is None  # newest kept, no throttle at 1 failure
+
+
+@pytest.mark.unit
+def test_unknown_throttle_prunes_entries_older_than_the_window():
+    from datetime import UTC, datetime, timedelta
+
+    from selector_drift.api import auth
+
+    name = "old-" + secrets.token_hex(4)
+    t0 = datetime.now(UTC) - auth.THROTTLE_WINDOW - timedelta(minutes=1)
+    for _ in range(auth.THROTTLE_LIMIT):
+        auth._unknown_record(name, t0)
+    assert auth._unknown_wait(name, t0) is not None
+    assert auth._unknown_wait(name, datetime.now(UTC)) is None
+
+
+@pytest.mark.integration
+def test_a_future_dated_unlock_cannot_hide_new_failures(anon_client, operator):
+    from datetime import UTC, datetime, timedelta
+
+    with Session() as s:
+        s.add(
+            AuditLog(
+                at=datetime.now(UTC) + timedelta(hours=1),
+                actor="system:unlock-operator",
+                action="login_unlock",
+                subject="operator:op1",
+                detail={},
+            )
+        )
+        s.commit()
+    for _ in range(5):
+        assert _bad(anon_client, "op1").status_code == 401
+    r = anon_client.post(LOGIN, json={"username": "op1", "password": operator[1]})
+    assert r.status_code == 429
+
+
+@pytest.mark.integration
+def test_the_advisory_lock_is_released_on_the_unknown_user_path(anon_client, operator):
+    ghost = "ghost-" + secrets.token_hex(4)
+    assert _bad(anon_client, ghost).status_code == 401
+    second = _bad(anon_client, ghost)
+    assert second.status_code == 401  # not 429 "in progress"
+
+
+@pytest.mark.integration
+def test_a_disabled_operators_failures_are_still_audited(anon_client, operator):
+    from datetime import UTC, datetime
+
+    with Session() as s:
+        s.scalars(select(Operator)).one().disabled_at = datetime.now(UTC)
+        s.commit()
+    r = anon_client.post(LOGIN, json={"username": "op1", "password": operator[1]})
+    assert r.status_code == 401
+    assert latest_audit("login_failure").subject == "operator:op1"
+
+
+@pytest.mark.unit
+def test_unlock_operator_cli_rejects_a_bad_name(capsys):
+    from selector_drift.__main__ import main
+
+    assert main(["unlock-operator", "BAD NAME"]) == 2
+
+
+@pytest.mark.integration
+def test_retry_after_stays_positive_after_an_unlock_and_five_new_failures(anon_client, operator):
+    from selector_drift.api.auth import unlock_operator
+
+    for _ in range(5):
+        _bad(anon_client, "op1")
+    with Session() as s:
+        unlock_operator(s, "op1")
+        s.commit()
+    for _ in range(5):
+        assert _bad(anon_client, "op1").status_code == 401
+    r = anon_client.post(LOGIN, json={"username": "op1", "password": operator[1]})
+    assert r.status_code == 429
+    assert 0 < int(r.headers["Retry-After"]) <= 900
