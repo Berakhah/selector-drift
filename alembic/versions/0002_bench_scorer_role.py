@@ -41,6 +41,10 @@ def upgrade() -> None:
         END
         $$
     """)
+    # The DO block skips a role that already exists: reset any powers it was given elsewhere.
+    op.execute(
+        f"ALTER ROLE {ROLE} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS LOGIN"
+    )
     for table in READS:
         op.execute(f"GRANT SELECT ON {table} TO {ROLE}")
     op.execute(f"GRANT INSERT ON audit_log TO {ROLE}")
