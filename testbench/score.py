@@ -32,6 +32,7 @@ from bok_core.boundary.redact import redact
 from bok_core.boundary.sensitivity import Labelled, Sensitivity
 from prefect import flow
 from sqlalchemy import Select, Text, cast, exists, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from selector_drift.db.models import AuditLog, HealEvent, Quarantine, Resolution, Run
@@ -304,6 +305,49 @@ def score_pending(session: Session, *, redaction_key: bytes | None = None) -> li
     if failed:
         raise ScorerFailed(failed)
     return scored
+
+
+class ScorerNotReady(RuntimeError):
+    """The scorer cannot act as the scorer: its database role or its evidence mount is wrong."""
+
+
+# Directories of the shared volume that must NOT be visible at the evidence root. A Docker Engine
+# older than 26 ignores the compose `volume.subpath` field and would mount the whole volume, which
+# holds injected client sessions, here.
+_NOT_EVIDENCE = ("sessions", "lake", "corpus")
+
+
+def check_scorer_access(session: Session, evidence_root: Path) -> None:
+    """Raise ScorerNotReady unless this session's role can read and insert into audit_log and the
+    evidence root is a directory exposing only evidence. Messages are authored here; an exception
+    from the database is never echoed (it can carry connection details)."""
+    try:
+        session.execute(text("select 1 from audit_log limit 1"))
+    except DBAPIError:
+        raise ScorerNotReady("cannot read audit_log as the current database role") from None
+    if not session.scalar(text("select has_table_privilege(current_user, 'audit_log', 'INSERT')")):
+        raise ScorerNotReady("the database role cannot insert into audit_log")
+    if not evidence_root.is_dir():
+        raise ScorerNotReady("the evidence root is not a directory")
+    if any((evidence_root / name).exists() for name in _NOT_EVIDENCE):
+        raise ScorerNotReady(
+            "the evidence mount exposes more than evidence/ (sessions, lake or corpus present)"
+        )
+
+
+def preflight() -> None:
+    """Run by the service's entrypoint before it serves: a dead scorer must fail at start-up (a
+    restart loop under `restart: unless-stopped`), because nothing alerts on a scorer whose runs
+    only fail inside Prefect -- it looks exactly like zero false accepts."""
+    # permitted: only-the-scorer-reads-the-product
+    from selector_drift.config import get_settings
+    from selector_drift.db.session import Session as DbSession
+
+    with DbSession() as s:
+        try:
+            check_scorer_access(s, get_settings().evidence_root)
+        finally:
+            s.rollback()
 
 
 @flow(name="bench-scorer")

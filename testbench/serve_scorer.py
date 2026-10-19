@@ -9,7 +9,9 @@ alone. The name, cron and timezone repeat deployments.BENCH_SCORER; test_serve_s
 the two agree.
 
 A missing or broken testbench.score is an ImportError at start-up: the service exits non-zero
-rather than serving nothing.
+rather than serving nothing. It also fails at start-up, before serving, when the database role
+cannot read and insert into audit_log or the evidence mount is missing or exposes more than
+evidence (testbench.score.preflight): nothing alerts on a scorer that only fails inside Prefect.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from prefect import serve
 from prefect.deployments.runner import RunnerDeployment
 from prefect.schedules import Cron
 
-from testbench.score import score_pending_flow
+from testbench.score import preflight, score_pending_flow
 
 NAME = "bench-scorer"
 CRON = "42 4 * * *"  # 30 minutes after the bench's 04:12 run
@@ -44,6 +46,7 @@ def scorer_deployment() -> RunnerDeployment:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    preflight()  # raises ScorerNotReady: exit non-zero, never serve a scorer that cannot score
     serve(scorer_deployment())
 
 
