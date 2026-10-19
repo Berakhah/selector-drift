@@ -112,6 +112,47 @@ services:
     expose: [ "8080" ]
     restart: unless-stopped
 
+  # The bench scorer (Task 26C): judges each bench heal against the answer key and writes one
+  # audit_log row per heal, which is where the false-accept count and the Task 29A alert come
+  # from. Its own service because the worker image ships selector_drift/ only (bench spec 2), and
+  # the portal image must not import the product. It holds SD_REDACTION_KEY (it matches the
+  # redacted seed tag) and reads heal bundles, so: a Postgres role that can read five tables and
+  # insert into audit_log and nothing else (alembic 0002), and ONLY the evidence subpath of
+  # sd_data, read-only -- the rest of sd_data holds injected client sessions and the lake.
+  # The subpath must exist before this starts (spec 7): the volume mount fails otherwise.
+  bench-scorer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.bench-scorer
+    restart: unless-stopped
+    command: [ "python", "-m", "testbench.serve_scorer" ]
+    init: true
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ ALL ]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs: [ "/tmp" ]
+    mem_limit: 512m
+    pids_limit: 128
+    volumes:
+      - type: volume
+        source: sd_data
+        target: /data/evidence
+        read_only: true
+        volume:
+          subpath: evidence
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PREFECT_HOME: /tmp/prefect                 # the rootfs is read-only
+      SD_DATABASE_URL: postgresql+psycopg://sd_scorer:${SD_SCORER_PASSWORD:?set SD_SCORER_PASSWORD in .env -- see .env.example}@postgres:5432/${POSTGRES_DB:-selector_drift}
+      SD_EVIDENCE_ROOT: /data/evidence
+      SD_REDACTION_KEY: ${SD_REDACTION_KEY:?set SD_REDACTION_KEY in .env -- see .env.example}
+      TZ: UTC
+    depends_on:
+      postgres: { condition: service_healthy }
+      prefect-server: { condition: service_healthy }
+
   # One reverse proxy, one origin, for both the bench and (Task 34) the API -- the bench's scope
   # record lists exactly one origin, so the browser's allowlist (Task 4, H2) names a single host.
   #
