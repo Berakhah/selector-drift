@@ -71,7 +71,10 @@ redacted form.
   second holder, which the user approved on 2026-10-19.
 - Hardening, as the other services: read-only root filesystem, `cap_drop: ALL`,
   `no-new-privileges`, non-root user, `mem_limit` and `pids_limit`, a `tmpfs` for `/tmp`,
-  `PREFECT_HOME` under `/tmp`. Networked only to Postgres and the Prefect server.
+  `PREFECT_HOME` under `/tmp`. It `depends_on` Postgres and the Prefect server and talks to
+  nothing else, but compose puts every service on one default network and defines no `networks:`
+  for any of them, so that is a dependency, not a segmentation. Segmenting the stack is a separate
+  decision (it would cover the worker, the portal and Caddy too).
 
 ## 5. Testing
 
@@ -96,6 +99,19 @@ redacted form.
 - Checking that XPaths captured from a live browser match the answer key's.
 - Re-running the 60-day campaign table in `docs/methodology.md`.
 - A product-side database connect timeout (a separate decision).
+
+## 6a. Known blocker: no container image of this product builds from the repo today
+
+`pyproject.toml` pins `bok-core` as an absolute host-path editable dependency (the documented
+TEMPORARY workaround, P-1, `pyproject.toml:7-21`; `uv.lock` records the same path). `uv sync`
+therefore cannot run inside any image, and the product's own `./Dockerfile` (the worker) hits it
+exactly as `docker/Dockerfile.bench-scorer` does. This design does not change that. The scorer
+image was verified in a scratch build outside the repo with `bok-core` vendored and `--frozen`
+dropped (all 121 resolved packages matched `uv.lock`): imports resolve, uid is 10001, there are no
+browser binaries, the deployment entrypoint inside the image is
+`testbench/score.py:score_pending_flow`, and it loads under `--read-only --cap-drop ALL
+--security-opt no-new-privileges`. Resolving P-1 (a PyPI release, a merged branch, or a vendored
+wheel) unblocks both images.
 
 ## 7. Operational note
 
