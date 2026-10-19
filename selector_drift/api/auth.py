@@ -81,12 +81,32 @@ def create_operator(db: OrmSession, username: str, password: str) -> Operator:
     return op
 
 
+def unlock_operator(db: OrmSession, username: str) -> None:
+    """Reset the login throttle for one operator. History is kept; the reset is audited."""
+    if db.scalars(select(Operator).where(Operator.username == username)).first() is None:
+        raise Invalid(f"no such operator: {username}")
+    audit(
+        db,
+        actor="system:unlock-operator",
+        action="login_unlock",
+        subject=f"operator:{username}",
+    )
+
+
 def _failures(db: OrmSession, username: str, now: datetime) -> tuple[int, datetime | None]:
+    subject = f"operator:{username}"
     since = now - THROTTLE_WINDOW
+    last_unlock = db.scalar(
+        select(func.max(AuditLog.at)).where(
+            AuditLog.action == "login_unlock", AuditLog.subject == subject
+        )
+    )
+    if last_unlock is not None and last_unlock > since:
+        since = last_unlock
     q = select(func.count(), func.min(AuditLog.at)).where(
         AuditLog.action == "login_failure",
-        AuditLog.subject == f"operator:{username}",
-        AuditLog.at >= since,
+        AuditLog.subject == subject,
+        AuditLog.at > since,
     )
     count, oldest = db.execute(q).one()
     return int(count), oldest

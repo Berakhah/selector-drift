@@ -157,3 +157,59 @@ def test_failures_for_unknown_usernames_write_no_audit_rows_but_are_counted(
 def test_a_wrong_password_for_a_real_operator_is_still_audited(anon_client, operator):
     anon_client.post(LOGIN, json={"username": "op1", "password": "wrong-guess"})
     assert latest_audit("login_failure").subject == "operator:op1"
+
+
+@pytest.mark.integration
+def test_unlock_clears_the_throttle_and_leaves_the_failure_history(anon_client, operator):
+    from selector_drift.api.auth import unlock_operator
+
+    for _ in range(5):
+        anon_client.post(LOGIN, json={"username": "op1", "password": "wrong-guess"})
+    right = {"username": "op1", "password": operator[1]}
+    assert anon_client.post(LOGIN, json=right).status_code == 429
+    with Session() as s:
+        unlock_operator(s, "op1")
+        s.commit()
+    assert anon_client.post(LOGIN, json=right).status_code == 200
+    with Session() as s:
+        failures = s.scalar(
+            select(func.count()).select_from(AuditLog).where(AuditLog.action == "login_failure")
+        )
+        unlock = s.scalars(select(AuditLog).where(AuditLog.action == "login_unlock")).one()
+    assert failures == 5  # evidence kept
+    assert unlock.actor == "system:unlock-operator" and unlock.subject == "operator:op1"
+
+
+@pytest.mark.integration
+def test_failures_after_an_unlock_count_again(anon_client, operator):
+    from selector_drift.api.auth import unlock_operator
+
+    with Session() as s:
+        unlock_operator(s, "op1")
+        s.commit()
+    for _ in range(5):
+        assert (
+            anon_client.post(LOGIN, json={"username": "op1", "password": "wrong-guess"}).status_code
+            == 401
+        )
+    r = anon_client.post(LOGIN, json={"username": "op1", "password": operator[1]})
+    assert r.status_code == 429
+
+
+@pytest.mark.integration
+def test_unlocking_an_unknown_operator_is_refused(clean_db):
+    from selector_drift.api.auth import unlock_operator
+    from selector_drift.api.errors import Invalid
+
+    with Session() as s, pytest.raises(Invalid):
+        unlock_operator(s, "nobody")
+
+
+@pytest.mark.integration
+def test_unlock_operator_cli_reports_and_audits(operator, capsys):
+    from selector_drift.__main__ import main
+
+    assert main(["unlock-operator", "op1"]) == 0
+    assert "op1" in capsys.readouterr().out
+    assert latest_audit("login_unlock").subject == "operator:op1"
+    assert main(["unlock-operator", "nobody"]) == 2
