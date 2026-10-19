@@ -15,6 +15,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /usr/local/bin/uv
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
+# The lock references the vendored bok-core wheel by a relative path, so it must exist before uv sync.
+COPY vendor ./vendor
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY selector_drift ./selector_drift
