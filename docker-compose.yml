@@ -78,6 +78,7 @@ services:
       SD_SCOPE_DIR: /app/scopes
       SD_LAKE_ROOT: /data/lake
       SD_EVIDENCE_ROOT: /data/evidence
+      SD_REDACTION_KEY: ${SD_REDACTION_KEY:?set SD_REDACTION_KEY in .env -- see .env.example}
       SD_SESSION_DIR: /data/sessions
       SD_ESCALATION_CORPUS: /data/corpus/escalations
       SD_ALERT_WEBHOOK_URL: ${SD_ALERT_WEBHOOK_URL:-}

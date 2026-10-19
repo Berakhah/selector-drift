@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 COMPOSE = Path(__file__).resolve().parents[1] / "docker-compose.yml"
 
@@ -24,4 +25,14 @@ def test_postgres_password_fails_closed_rather_than_defaulting() -> None:
     )
     assert re.search(r"POSTGRES_PASSWORD:\?\S", text), (
         "POSTGRES_PASSWORD must use the ${POSTGRES_PASSWORD:?message} fail-closed form."
+    )
+
+
+@pytest.mark.unit
+def test_the_worker_receives_the_redaction_key_and_fails_closed_without_it() -> None:
+    env = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]["worker"]["environment"]
+    value = env["SD_REDACTION_KEY"]
+    assert re.fullmatch(r"\$\{SD_REDACTION_KEY:\?\S.*\}", value), (
+        "the worker's SD_REDACTION_KEY must use the fail-closed ${VAR:?message} form; "
+        f"got {value!r}"
     )
