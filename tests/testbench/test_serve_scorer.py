@@ -17,11 +17,22 @@ REPO = Path(__file__).resolve().parents[2]
 def test_the_deployment_agrees_with_the_one_the_worker_declares(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from selector_drift.orchestrate.deployments import BENCH_SCORER
+    from selector_drift.orchestrate.deployments import BENCH_SCORER, bench_scorer_deployment
     from testbench.serve_scorer import scorer_deployment
 
     monkeypatch.chdir(REPO)
     d = scorer_deployment()
+    worker = bench_scorer_deployment()
+    assert worker is not None
+    assert (d.name, d.flow_name, d.tags, d.description) == (
+        worker.name, worker.flow_name, worker.tags, worker.description,
+    )  # fmt: skip
+    assert d.entrypoint is not None and worker.entrypoint is not None
+    assert d.entrypoint.replace("\\", "/") == worker.entrypoint.replace("\\", "/")
+    (mine,), (theirs,) = d.schedules, worker.schedules
+    assert (mine.schedule.cron, mine.schedule.timezone) == (
+        theirs.schedule.cron, theirs.schedule.timezone,
+    )  # fmt: skip
     assert d.name == BENCH_SCORER["name"]
     assert d.flow_name == "bench-scorer"
     (schedule,) = d.schedules
@@ -37,9 +48,40 @@ def test_main_serves_exactly_the_one_deployment(monkeypatch: pytest.MonkeyPatch)
 
     served: list[object] = []
     monkeypatch.setattr(module, "serve", lambda *deployments: served.extend(deployments))
+    monkeypatch.setattr(module, "preflight", lambda: None)
     monkeypatch.chdir(REPO)
     module.main()
     assert [d.name for d in served] == ["bench-scorer"]  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+def test_main_runs_the_preflight_before_it_serves(monkeypatch: pytest.MonkeyPatch) -> None:
+    import testbench.serve_scorer as module
+
+    order: list[str] = []
+    monkeypatch.setattr(module, "preflight", lambda: order.append("preflight"))
+    monkeypatch.setattr(module, "serve", lambda *_d: order.append("serve"))
+    monkeypatch.chdir(REPO)
+    module.main()
+    assert order == ["preflight", "serve"]
+
+
+@pytest.mark.unit
+def test_a_failed_preflight_never_serves_and_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    import testbench.serve_scorer as module
+    from testbench.score import ScorerNotReady
+
+    served: list[object] = []
+
+    def refuse() -> None:
+        raise ScorerNotReady("cannot read audit_log as the current database role")
+
+    monkeypatch.setattr(module, "preflight", refuse)
+    monkeypatch.setattr(module, "serve", lambda *d: served.extend(d))
+    monkeypatch.chdir(REPO)
+    with pytest.raises(ScorerNotReady):
+        module.main()
+    assert served == []
 
 
 @pytest.mark.unit
