@@ -70,8 +70,11 @@ control (closes audit H3):
 | Session | 32 random bytes, sent as cookie `sd_session`, `HttpOnly; Secure; SameSite=Strict; Path=/`. **Stored as its SHA-256** in `sessions`, so a database read does not yield a usable cookie. Absolute lifetime 12 h, no sliding renewal |
 | CSRF | `SameSite=Strict` plus an `Origin` check on every non-GET: the header must equal the configured web origin, else `403` |
 | Brute force | 5 failed logins per username per 15 min → `429` with `Retry-After`. Failures are counted in the audit log, not in memory, so a restart does not reset the count |
+| Verify cap | At most `VERIFY_CAP=4` argon2 verifies run concurrently per process. A login that cannot take a slot is refused `429` `busy` with `Retry-After: 1`, before any verify. A refused attempt is not a guess and does not count toward the 5 |
+| Unknown username | A failure for a username with no `operators` row writes **no** `audit_log` row (unauthenticated input must not grow the table the 90-day log publishes from). It increments an in-memory counter, `unknown_user_failures()`, and emits a warning log that does not contain the username. The response is the same `401` as a wrong password |
+| Unlock | `python -m selector_drift unlock-operator <username>` writes an audited `login_unlock` row. The throttle counts only failures after the latest `login_unlock`; the earlier failure rows stay as history, none are deleted |
 | Actor | Always `current_operator.username` from `Depends(current_operator)`. **No request model declares an `actor` field**, and every request model sets `extra="forbid"`, so a body carrying `actor` gets `422`. An audit trail whose actor is supplied by the party being audited is not an audit trail |
-| Audit | login success, login failure, logout, promote, discard → `audit_log` rows |
+| Audit | login success, login failure (known username), login unlock, logout, promote, discard → `audit_log` rows |
 
 **Two tables join the day-one schema (plan Task 3).** `operators(id, username UNIQUE, password_hash,
 created_at, disabled_at)` and `sessions(token_sha256 PK, operator_id FK, created_at, expires_at,
