@@ -37,7 +37,11 @@ boundary, with the import contract as the only separation).
   `only-the-scorer-reads-the-product` forbids for every bench module but `score`. It lives
   bench-side, so `selector_drift` still never imports `testbench`. A missing or broken
   `testbench.score` is an ImportError at start-up, so the service exits non-zero rather than
-  serving nothing.
+  serving nothing. `main()` first runs `testbench.score.preflight()`, which raises
+  `ScorerNotReady` (non-zero exit, before `serve()`) unless the database role can read and insert
+  into `audit_log` and the evidence root is a directory that does not expose `sessions`, `lake`
+  or `corpus` (a Docker Engine older than 26 ignores `volume.subpath` and would mount the whole
+  volume).
 - `docker-compose.yml`: a `bench-scorer` service (section 4).
 - `orchestrate/deployments.py`: the worker's missing-scorer message is softened from an error to an
   info line saying the scorer is served by its own service.
@@ -119,5 +123,8 @@ First deploy needs these manual steps on the VM, in order: add `SD_SCORER_PASSWO
 `SD_REDACTION_KEY` to `.env`; apply the migration (`alembic upgrade head`); create the evidence
 directory once, because a `subpath` mount fails if it does not exist
 (`docker compose run --rm --no-deps worker mkdir -p /data/evidence`); set the role's password
-(the SQL is in `.env.example`). Until then the service fails to start, loudly; it does not fall
-back to the product's database user.
+(the SQL is in `.env.example`). Until then the service fails to start, loudly:
+`testbench.serve_scorer` runs `preflight()` before `serve()` and exits non-zero if the `sd_scorer`
+role cannot read and insert into `audit_log`, or if the evidence mount is missing or exposes
+sessions/lake/corpus; with `restart: unless-stopped` that is a visible restart loop. It does not
+fall back to the product's database user.
