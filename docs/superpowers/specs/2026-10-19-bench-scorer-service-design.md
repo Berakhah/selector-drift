@@ -106,7 +106,17 @@ redacted form.
 
 ## 6a. Resolved: P-1 vendored wheel
 
-"bok-core" is now a pre-built wheel vendored at endor/bok_core-0.0.1-py3-none-any.whl (built from backoffice-kit ok-core-minimal at commit 3a4044d) and referenced by a repo-relative path in pyproject.toml and uv.lock, replacing the absolute host-path editable dependency. Both Dockerfiles COPY vendor ./vendor before the first uv sync. On 2026-10-19 both the worker image (./Dockerfile) and docker/Dockerfile.bench-scorer were built from the repo with uv sync --frozen; in each, ok_core imports from /opt/venv/lib/python3.12/site-packages/ and the uid is 10001. The earlier scratch-build evidence (bok-core vendored outside the repo, --frozen dropped) is superseded.
+`bok-core` is now a pre-built wheel vendored at `vendor/bok_core-0.0.1-py3-none-any.whl`, built
+from backoffice-kit branch `bok-core-minimal` at commit `3a4044d`, and referenced by a
+repo-relative path in `pyproject.toml` and `uv.lock`. This replaces the absolute host-path
+editable dependency. Both Dockerfiles run `COPY vendor ./vendor` before the first `uv sync`. On
+2026-10-19 the worker image (`./Dockerfile`) and `docker/Dockerfile.bench-scorer` were both built
+from the repo with `uv sync --frozen`; in each, `bok_core` loaded from
+`/opt/venv/lib/python3.12/site-packages/` and the uid was 10001. The earlier scratch-build
+evidence (`bok-core` vendored outside the repo, `--frozen` dropped) is superseded. The unit tests
+and `mypy` still run against the editable install in the shared venv, whose source is
+byte-identical to the wheel's apart from line endings.
+
 
 ## 7. Operational note
 
