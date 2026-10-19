@@ -379,6 +379,17 @@ def test_a_poison_heal_does_not_stop_the_others(
 
 
 @pytest.mark.integration
+def test_the_scorer_runs_under_read_committed() -> None:
+    """The advisory lock alone stops double-scoring only under READ COMMITTED (see _pending's
+    docstring): a REPEATABLE READ waiter would take its snapshot before the wait and re-judge
+    heals the first scorer committed. Nothing else pins the isolation level, so this does."""
+    from selector_drift.db.session import Session as DbSession
+
+    with DbSession() as s:
+        assert s.scalar(text("select current_setting('transaction_isolation')")) == "read committed"
+
+
+@pytest.mark.integration
 def test_an_overlapping_scorer_waits_and_never_double_scores(
     db: OrmSession, seeded_bench_heals: list[SeededHeal], redaction_key: bytes
 ) -> None:
