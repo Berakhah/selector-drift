@@ -74,6 +74,14 @@ def test_it_has_no_browser_and_no_session_or_lake_paths() -> None:
 
 
 @pytest.mark.unit
+def test_env_example_documents_a_password_step_that_works_and_holds_no_secret() -> None:
+    env = (REPO / ".env.example").read_text("utf-8")
+    assert "set -a" in env  # the snippet loads .env, so the variables are not empty
+    assert "log_min_error_statement" in env  # a failed ALTER ROLE must not log the password
+    assert re.search(r"^SD_SCORER_PASSWORD=\s*(#.*)?$", env, re.MULTILINE)
+
+
+@pytest.mark.unit
 def test_the_dockerfile_installs_no_browser_and_runs_non_root() -> None:
     text = (REPO / "docker" / "Dockerfile.bench-scorer").read_text("utf-8")
     assert "playwright install" not in text
