@@ -1,13 +1,21 @@
 """Migration 0002: the bench scorer's Postgres role. It is cluster-wide, so these tests switch
 role with `SET ROLE` on a dedicated engine instead of logging in (a login needs a password, and
 parallel test workers would race on it). The last test is the one that matters: the real scorer,
-run with nothing but the role's grants, so the grant list is exact."""
+run with nothing but the role's grants, so the grant list is exact.
+
+The test connection (SD_DATABASE_URL) must be a superuser, or a member of sd_scorer with SET: the
+tests become the role with `SET ROLE`. On PG16 a non-superuser role owner gets ADMIN OPTION only,
+which does not allow SET ROLE, so a plain owner connection fails with "permission denied to set
+role" -- a test-connection problem, not a grants bug."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import uuid
+from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
+import psycopg.errors
 import pytest
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
@@ -15,7 +23,7 @@ from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session as OrmSession
 
 from selector_drift.db.session import engine
-from testbench.score import score_pending
+from testbench.score import ScorerNotReady, check_scorer_access, score_pending
 from tests.testbench.conftest import SeededHeal
 
 ROLE = "sd_scorer"
@@ -23,19 +31,55 @@ READABLE = {"runs", "heal_events", "quarantine", "resolutions", "audit_log"}
 INSUFFICIENT_PRIVILEGE = "42501"
 
 
-@pytest.fixture
-def scorer_engine() -> Iterator[Engine]:
-    scorer = create_engine(engine.url)
+def _engine_as(role: str) -> Engine:
+    acting = create_engine(engine.url)
 
-    @event.listens_for(scorer, "connect")
-    def _as_scorer(dbapi_connection: Any, _record: Any) -> None:
+    @event.listens_for(acting, "connect")
+    def _set_role(dbapi_connection: Any, _record: Any) -> None:
         cursor = dbapi_connection.cursor()
-        cursor.execute(f"SET ROLE {ROLE}")
-        cursor.close()
+        try:
+            cursor.execute(f"SET ROLE {role}")
+        except psycopg.errors.InsufficientPrivilege:
+            pytest.fail(
+                "scorer_engine needs a superuser (or SET membership in sd_scorer); this reads "
+                "like a grants bug but is a test-connection problem",
+                pytrace=False,
+            )
+        finally:
+            cursor.close()
         dbapi_connection.commit()
 
+    return acting
+
+
+@pytest.fixture
+def scorer_engine() -> Iterator[Engine]:
+    scorer = _engine_as(ROLE)
     yield scorer
     scorer.dispose()
+
+
+@pytest.fixture
+def throwaway_role() -> Iterator[Callable[..., Engine]]:
+    """Roles are cluster-wide and workers run in parallel: a uuid-suffixed name, dropped after."""
+    made: list[tuple[str, Engine]] = []
+
+    def make(*grants: str) -> Engine:
+        name = f"sd_t_{uuid.uuid4().hex[:12]}"
+        with engine.begin() as c:
+            c.execute(text(f"CREATE ROLE {name} NOLOGIN"))
+            for grant in grants:
+                c.execute(text(grant.format(role=name)))
+        acting = _engine_as(name)
+        made.append((name, acting))
+        return acting
+
+    yield make
+    for name, acting in made:
+        acting.dispose()
+        with engine.begin() as c:
+            c.execute(text(f"DROP OWNED BY {name}"))
+            c.execute(text(f"DROP ROLE {name}"))
 
 
 def _all_tables() -> list[str]:
@@ -56,11 +100,21 @@ def _has(privilege: str, table: str) -> bool:
 def test_the_role_can_log_in_in_principle_and_has_no_other_powers() -> None:
     with engine.connect() as c:
         row = c.execute(
-            text("select rolcanlogin, rolsuper, rolcreatedb, rolcreaterole "
-                 "from pg_roles where rolname = :r"),
+            text("select rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, "
+                 "rolreplication, rolbypassrls from pg_roles where rolname = :r"),
             {"r": ROLE},
         ).one()  # fmt: skip
-    assert tuple(row) == (True, False, False, False)
+    assert tuple(row) == (True, False, False, False, False, False)
+
+
+@pytest.mark.unit
+def test_the_migration_resets_a_pre_existing_roles_powers() -> None:
+    """The create is skipped for an existing role, so the migration also ALTERs it. Asserted on
+    the source: tampering with the cluster-wide role would disturb parallel workers."""
+    source = (
+        Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0002_bench_scorer_role.py"
+    ).read_text("utf-8")
+    assert "ALTER ROLE" in source and "NOSUPERUSER" in source and "NOBYPASSRLS" in source
 
 
 @pytest.mark.integration
@@ -112,6 +166,30 @@ def test_a_scorer_connection_is_refused_everything_outside_its_grants(
     with pytest.raises(ProgrammingError) as caught, scorer_engine.begin() as c:
         c.execute(text(statement))
     assert caught.value.orig.sqlstate == INSUFFICIENT_PRIVILEGE  # type: ignore[union-attr]
+
+
+@pytest.mark.integration
+def test_the_preflight_passes_as_the_scorer(scorer_engine: Engine, tmp_path: Path) -> None:
+    with OrmSession(scorer_engine) as s:
+        check_scorer_access(s, tmp_path)
+
+
+@pytest.mark.integration
+def test_the_preflight_refuses_a_role_with_no_grants(
+    throwaway_role: Callable[..., Engine], tmp_path: Path
+) -> None:
+    acting = throwaway_role()
+    with OrmSession(acting) as s, pytest.raises(ScorerNotReady, match="cannot read audit_log"):
+        check_scorer_access(s, tmp_path)
+
+
+@pytest.mark.integration
+def test_the_preflight_refuses_a_role_that_cannot_insert(
+    throwaway_role: Callable[..., Engine], tmp_path: Path
+) -> None:
+    acting = throwaway_role("GRANT SELECT ON audit_log TO {role}")
+    with OrmSession(acting) as s, pytest.raises(ScorerNotReady, match="cannot insert"):
+        check_scorer_access(s, tmp_path)
 
 
 @pytest.mark.integration
