@@ -11,7 +11,7 @@ from selector_drift.api.main import create_app
 from selector_drift.config import ConfigError, Settings
 from selector_drift.db.models import AuditLog, Operator
 from selector_drift.db.session import Session
-from tests.api.conftest import LOGIN
+from tests.api.conftest import LOGIN, latest_audit
 
 
 @pytest.mark.integration
@@ -132,3 +132,28 @@ def test_a_full_verify_cap_is_refused_at_once_with_429(anon_client, operator, mo
     assert n == 0
     ok = anon_client.post(LOGIN, json={"username": "op1", "password": operator[1]})
     assert ok.status_code == 200
+
+
+@pytest.mark.integration
+def test_failures_for_unknown_usernames_write_no_audit_rows_but_are_counted(
+    anon_client, operator, caplog
+):
+    from selector_drift.api.auth import unknown_user_failures
+
+    before = unknown_user_failures()
+    for i in range(8):
+        r = anon_client.post(LOGIN, json={"username": f"ghost{i}", "password": "wrong-guess"})
+        assert r.status_code == 401
+    with Session() as s:
+        n = s.scalar(
+            select(func.count()).select_from(AuditLog).where(AuditLog.action == "login_failure")
+        )
+    assert n == 0
+    assert unknown_user_failures() == before + 8
+    assert "ghost" not in caplog.text  # the typed name is attacker-controlled input
+
+
+@pytest.mark.integration
+def test_a_wrong_password_for_a_real_operator_is_still_audited(anon_client, operator):
+    anon_client.post(LOGIN, json={"username": "op1", "password": "wrong-guess"})
+    assert latest_audit("login_failure").subject == "operator:op1"
