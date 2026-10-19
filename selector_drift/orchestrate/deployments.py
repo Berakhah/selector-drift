@@ -125,8 +125,9 @@ def main() -> None:
         raise SystemExit(f"no task specs in {get_settings().spec_dir}")
     scorer = bench_scorer_deployment()
     if scorer is None:
-        _log.error(
-            "%s not found: bench heals will not be scored (no false-accept count)",
+        _log.info(
+            "%s not found in this image: the bench scorer is served by the bench-scorer "
+            "service, not the worker",
             BENCH_SCORER["entrypoint"],
         )
     extra = [scorer] if scorer is not None else []
