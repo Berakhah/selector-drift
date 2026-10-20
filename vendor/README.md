@@ -42,9 +42,26 @@ build is pure Python and independent of the uv version.)
 
 Output: `dist/bok_core-0.0.1-py3-none-any.whl`.
 
-Rebuild check: a rebuild from commit `3a4044d` should reproduce the sha256 above. If it
-differs, unzip both wheels and compare file contents (a timestamp or tooling difference in
-the archive is harmless; a content difference is not).
+**This build is not byte-reproducible, and nothing here claims it is.** The builder image is
+a floating tag, and `uv build` fetches the `hatchling` backend at build time, so a rebuild
+months later can produce a wheel with a different sha256 and identical contents. The sha256
+above identifies *this file*; `tests/test_vendored_bok_core.py` pins it against `uv.lock`.
+
+Rebuild check: compare **contents**, not the hash. Unzip both wheels and diff every file
+(byte-identical `bok_core/**/*.py`, and the same `METADATA` apart from the builder's own
+fields). A hash difference with identical contents is harmless; a content difference is not.
+When you rebuild, pin the builder by digest so the next audit can reproduce it: `docker pull`
+the image, read its digest with `docker image inspect --format '{{index .RepoDigests 0}}'`,
+and record `ghcr.io/astral-sh/uv@sha256:<digest>` in the command above.
+
+### Lock file
+
+Switching to the wheel re-locked the project (commit `0ff2373`). The `uv.lock` diff is the
+`bok-core` source and hash, the dropped `[package.metadata.requires-dev]` block (a wheel has
+no dev group), and narrower environment markers on the `pendulum` and `whenever` dependencies.
+It changes **no resolved version**. `uv lock --check` passes under uv 0.11.21, the version both
+Dockerfiles pin, and under uv 0.12.13; the markers are what uv derives from those packages'
+own metadata. If a later re-lock changes anything beyond this, review it as a dependency change.
 
 ### How to rebuild or refresh
 

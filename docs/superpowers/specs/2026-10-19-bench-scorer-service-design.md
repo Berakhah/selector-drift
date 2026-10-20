@@ -113,9 +113,16 @@ editable dependency. Both Dockerfiles run `COPY vendor ./vendor` before the firs
 2026-10-19 the worker image (`./Dockerfile`) and `docker/Dockerfile.bench-scorer` were both built
 from the repo with `uv sync --frozen`; in each, `bok_core` loaded from
 `/opt/venv/lib/python3.12/site-packages/` and the uid was 10001. The earlier scratch-build
-evidence (`bok-core` vendored outside the repo, `--frozen` dropped) is superseded. The unit tests
-and `mypy` still run against the editable install in the shared venv, whose source is
-byte-identical to the wheel's apart from line endings.
+evidence (`bok-core` vendored outside the repo, `--frozen` dropped) is superseded.
+
+Unit tests and `mypy` now run against the wheel too. `pyproject.toml` and `uv.lock` no longer
+point at an editable checkout, so a venv built with `uv sync --frozen` installs `bok-core` from
+`vendor/`. Observed 2026-10-20 in the Task 34 worktree venv: `bok_core` imports from
+`.venv/Lib/site-packages/` and its `direct_url.json` names the vendored wheel (non-editable).
+The earlier statement here, that tests ran against an editable install in a shared venv with
+source "byte-identical to the wheel's apart from line endings", described a venv outside the
+repo and is withdrawn: it was never checked by anything in the repo. A stale pre-P-1 venv can
+still carry an editable install; rebuild it with `uv sync --frozen` before trusting its results.
 
 
 ## 7. Operational note
