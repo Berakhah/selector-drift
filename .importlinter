@@ -11,6 +11,9 @@ root_packages =
 # Keeps third-party packages (bok_core included) in the graph, so a future contract naming an
 # external module matches real imports instead of reporting "kept" over an empty graph.
 include_external_packages = True
+# Task 34: imports under `if TYPE_CHECKING:` never execute, so they are not edges a contract
+# should break on (validate/gate.py names CacheReader/PageSource in annotations only).
+exclude_type_checking_imports = True
 
 [importlinter:contract:resolver-cannot-write]
 name = A resolver cannot write
@@ -129,3 +132,21 @@ forbidden_modules =
 # Task 17 Step 8, landed with Task 26A. Widened from the plan's four source packages to every
 # product package outside orchestrate/: none of them has a reason to hold the writer. Fix round
 # 1 (M1) completed the list -- scope, spec, credentials and db were the packages still missing.
+
+[importlinter:contract:api-is-read-side]
+name = The API reports on runs; it never starts one
+type = forbidden
+source_modules = selector_drift.api
+forbidden_modules =
+    selector_drift.browser
+    selector_drift.orchestrate
+    selector_drift.credentials
+    selector_drift.resolve.cascade
+    selector_drift.resolve.rungs
+    selector_drift.resolve.cache
+    selector_drift.land.writer
+    selector_drift.land.compact
+    selector_drift.heallog.replay
+    selector_drift.heallog.retention
+# Task 34 (API spec 2). The API may import db/, heallog/ (read side), validate/, spec/, scope/
+# (loaders, never authorise()), land/catalog.py. Promotion is injected (Task 34C), never imported.
