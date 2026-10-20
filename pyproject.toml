@@ -4,21 +4,15 @@ version = "0.1.0"
 description = "Self-healing extraction for business systems with no API."
 requires-python = ">=3.12"
 license = "Apache-2.0"
-# TEMPORARY: bok-core is not on PyPI yet (P-1). A git dependency on the bok-core-minimal
-# branch was tried first and hit a reproducible uv 0.11.21 panic on any git+file:// URL
-# with a pinned ref (AmbiguousAuthority in crates/uv-pypi-types/src/parsed_url.rs, not a
-# path-encoding issue -- see .superpowers/sdd/2024-11-07-selector-drift/task-1-report.md).
-# Using an editable path dependency into the sibling backoffice-kit repo's own
-# .worktrees/bok-core-minimal worktree instead -- sidesteps git-URL parsing entirely and
-# needs no pinned ref, at the cost of depending on a worktree that lives outside this repo.
-# The path below is ABSOLUTE, not relative, on purpose (code review finding): a relative
-# path is resolved from pyproject.toml's own directory, so `../../../../` only lands on
-# `backoffice-kit/` from inside this nested .claude/worktrees/ checkout -- from the real
-# repo root after this branch merges, the same `../../../../` overshoots past the repo's
-# drive root. An absolute path is correct from any checkout of this repo but is NOT
-# portable across machines (it hardcodes this machine's path to the sibling repo).
-# Unblocked by either: the bok-core-minimal branch merging to backoffice-kit's main, or a
-# real PyPI release -- switch this source back to a normal PyPI dependency at that point.
+# bok-core is not on PyPI yet (P-1), so it is vendored as a pre-built wheel in vendor/ and
+# referenced by a repo-relative path in [tool.uv.sources] below. A relative path to a built
+# wheel works from any checkout and inside the worker and bench-scorer images (both
+# Dockerfiles COPY vendor before `uv sync --frozen`); the earlier editable absolute path into
+# a sibling repo did not exist inside a container.
+# Source: backoffice-kit branch bok-core-minimal, commit 3a4044d. vendor/README.md records
+# the exact build command and the wheel sha256, and how to refresh it.
+# Switching to PyPI later: delete vendor/, change the dependency to `bok-core==<version>`,
+# remove the bok-core entry from [tool.uv.sources], then `uv lock`.
 dependencies = [
     "alembic>=1.19.1",
     "bok-core",
@@ -93,7 +87,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-# bok-core is the sibling editable path dependency described above (P-1) -- it ships no
+# bok-core is the vendored wheel described above (P-1) -- it ships no
 # py.typed marker yet, so mypy --strict cannot see its inline types at all without this.
 # `follow_untyped_imports` (not `ignore_missing_imports`, fix round 1, I-3): the latter makes
 # every name imported from bok_core resolve to `Any`, silently defeating strict checking on
@@ -127,4 +121,4 @@ playwright_chromium_revision = "1234"
 default-groups = ["dev", "testbench"]
 
 [tool.uv.sources]
-bok-core = { path = "D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-core-minimal", editable = true }
+bok-core = { path = "vendor/bok_core-0.0.1-py3-none-any.whl" }

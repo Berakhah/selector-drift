@@ -525,3 +525,25 @@ Added:
 - `test_stats_and_the_published_log_agree` — `derive.stats()` vs `heallog.publish` on the same fixture
 - `test_api_imports_nothing_that_can_start_a_run` — the `api-is-read-side` contract
 - `test_generated_types_are_current` — the CI drift check, runnable locally
+
+---
+
+## 10. Addendum 2026-10-19 — pre-flight against the code as built
+
+Written before Task 34 starts, after Tasks 1–33 and 26A–C landed. The rest of this document stands.
+
+1. **`StatsView` gains `false_accepts: int | None`** (amends §4.3). A wrong heal the gate let
+   through is the figure the published log most needs, and the bench scorer already records it:
+   `audit_log` rows with `actor="testbench.score"`, `action="scored"`, `detail.judgement ==
+   "false_accept"`. `derive.py` counts them by actor and date window, exactly as it counts
+   `quarantines_refused_correctly` (`judgement == "correct_refusal"`), and never parses `subject`.
+   `None` for targets without an answer key. It is published beside `quarantines_refused_correctly`
+   from day one; the answer key still never enters `selector_drift/`.
+2. **Dependencies (Task 34 step 1).** `argon2-cffi` is added. `uvicorn` moves from the `testbench`
+   dependency group into the main dependencies, because `serve-api` is a product entrypoint.
+3. **Test environment.** `tests/api` truncates `operators`, `sessions` and `audit_log`, so it needs
+   the Postgres the other DB tests use. The main checkout has no `.venv`; commands run as
+   `python -m uv run --frozen …` where `uv` is not on PATH. Bringing Postgres up is a prerequisite
+   step of the Task 34 plan, not an assumption.
+4. **Unchanged from §6.2.** The vendored bok-core has no `QuerySource`, so `StatsView` stays plain
+   numbers with `method_url`; the proposal remains a document (Task 34B).
