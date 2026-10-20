@@ -1,3 +1,5 @@
+import ast
+import configparser
 import inspect
 import os
 import subprocess
@@ -112,6 +114,80 @@ def test_api_imports_nothing_that_can_start_a_run():
     # import-linter prints a contract's `name`, not its id, so name the contract by its title.
     assert "The API reports on runs; it never starts one KEPT" in r.stdout, r.stdout
     assert "1 kept, 0 broken" in r.stdout, r.stdout
+
+
+def _type_checking_imports(source: str, package: str) -> set[str]:
+    """Absolute dotted names imported under `if TYPE_CHECKING:` (or `typing.TYPE_CHECKING`).
+
+    `exclude_type_checking_imports = True` in .importlinter makes every contract blind to these,
+    so the one hiding place import-linter cannot police is policed here, by reading the AST.
+    """
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        name = test.attr if isinstance(test, ast.Attribute) else getattr(test, "id", "")
+        if name != "TYPE_CHECKING":
+            continue
+        for stmt in ast.walk(ast.Module(body=node.body, type_ignores=[])):
+            if isinstance(stmt, ast.Import):
+                found.update(a.name for a in stmt.names)
+            elif isinstance(stmt, ast.ImportFrom):
+                base = stmt.module or ""
+                if stmt.level:
+                    parent = package.split(".")[: len(package.split(".")) - stmt.level + 1]
+                    base = ".".join([*parent, base] if base else parent)
+                found.add(base)
+                found.update(f"{base}.{a.name}" for a in stmt.names)
+    return found
+
+
+def _forbidden_for_api() -> list[str]:
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.read(REPO / ".importlinter", encoding="utf-8")
+    raw = cp["importlinter:contract:api-is-read-side"]["forbidden_modules"]
+    return [m.strip() for m in raw.splitlines() if m.strip()]
+
+
+def _is_forbidden(imported: str, forbidden: list[str]) -> bool:
+    return any(imported == f or imported.startswith(f + ".") for f in forbidden)
+
+
+@pytest.mark.unit
+def test_the_type_checking_scan_sees_a_planted_forbidden_import():
+    """Guard the guard: a scan that finds nothing would pass the real test below vacuously."""
+    forbidden = _forbidden_for_api()
+    planted = (
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from selector_drift.resolve import cascade\n"
+        "    import selector_drift.browser.driver\n"
+        "    from ...orchestrate import flows\n"
+    )
+    imported = _type_checking_imports(planted, "selector_drift.api.routers")
+    hits = {i for i in imported if _is_forbidden(i, forbidden)}
+    assert {
+        "selector_drift.resolve.cascade",
+        "selector_drift.browser.driver",
+        "selector_drift.orchestrate.flows",
+    } <= hits
+
+
+@pytest.mark.unit
+def test_api_hides_no_forbidden_import_behind_type_checking():
+    """The api-is-read-side contract cannot see `if TYPE_CHECKING:` imports; this test can."""
+    forbidden = _forbidden_for_api()
+    assert forbidden, "api-is-read-side lists no forbidden modules"
+    offenders: list[str] = []
+    for path in sorted((REPO / "selector_drift" / "api").rglob("*.py")):
+        package = ".".join(path.relative_to(REPO).with_suffix("").parts[:-1])
+        offenders += [
+            f"{path.relative_to(REPO)}: {i}"
+            for i in _type_checking_imports(path.read_text(encoding="utf-8"), package)
+            if _is_forbidden(i, forbidden)
+        ]
+    assert not offenders, offenders
 
 
 @pytest.mark.unit
