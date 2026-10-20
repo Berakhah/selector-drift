@@ -539,8 +539,10 @@ Written before Task 34 starts, after Tasks 1–33 and 26A–C landed. The rest o
    `quarantines_refused_correctly` (`judgement == "correct_refusal"`), and never parses `subject`.
    `None` for targets without an answer key. It is published beside `quarantines_refused_correctly`
    from day one; the answer key still never enters `selector_drift/`.
-2. **Dependencies (Task 34 step 1).** `argon2-cffi` is added. `uvicorn` moves from the `testbench`
-   dependency group into the main dependencies, because `serve-api` is a product entrypoint.
+2. **Dependencies (Task 34 step 1).** `argon2-cffi` is added. `uvicorn` is added to the main
+   dependencies, because `serve-api` is a product entrypoint. It **also stays** in the `testbench`
+   dependency group, where the testbench portal (`testbench/portal/app.py`) still uses it (an earlier draft said
+   "moves"; the plan's amendment A1 and the implementation keep both).
 3. **Test environment.** `tests/api` truncates `operators`, `sessions` and `audit_log`, so it needs
    the Postgres the other DB tests use. The main checkout has no `.venv`; commands run as
    `python -m uv run --frozen …` where `uv` is not on PATH. Bringing Postgres up is a prerequisite

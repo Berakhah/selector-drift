@@ -44,6 +44,14 @@ def test_bok_core_source_is_a_relative_non_editable_path_to_an_existing_wheel() 
     assert fnmatch.fnmatch(wheel.name, WHEEL_GLOB), f"{wheel.name} is not a bok_core wheel"
 
 
+def _lock_bok_core_package() -> dict[str, object]:
+    packages = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))["package"]
+    entries = [p for p in packages if p["name"] == "bok-core"]
+    assert len(entries) == 1, f"expected exactly one bok-core in uv.lock, found {len(entries)}"
+    entry: dict[str, object] = entries[0]
+    return entry
+
+
 @pytest.mark.unit
 def test_uv_lock_has_no_absolute_path_and_references_the_vendored_wheel() -> None:
     lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
@@ -51,24 +59,78 @@ def test_uv_lock_has_no_absolute_path_and_references_the_vendored_wheel() -> Non
     assert not drive_letter_path, "uv.lock contains a drive-letter path"
     assert "backoffice-kit" not in lock, "uv.lock still points at the sibling repo"
     relative = _bok_core_source()["path"]
-    assert isinstance(relative, str)
-    assert relative in lock, f"uv.lock does not reference {relative}"
+    entry = _lock_bok_core_package()
+    # The bok-core *package entry* must source from the vendored wheel. A substring match
+    # anywhere in the file would also pass on a `requires-dist` line while `source` pointed at a
+    # registry or an editable checkout.
+    assert entry["source"] == {"path": relative}, f"bok-core source is {entry['source']!r}"
     actual = hashlib.sha256(_wheel_path().read_bytes()).hexdigest()
-    assert f"sha256:{actual}" in lock, "uv.lock records a stale hash for the vendored wheel"
+    wheels = entry["wheels"]
+    assert isinstance(wheels, list)
+    assert [w["hash"] for w in wheels] == [f"sha256:{actual}"], (
+        "uv.lock records a stale or extra hash for the vendored wheel"
+    )
+
+
+COPY_VENDOR = re.compile(r"^\s*COPY(\s+--\S+)*\s+vendor(\s|/)", re.IGNORECASE)
+FROM_LINE = re.compile(r"^\s*FROM\s", re.IGNORECASE)
+
+
+def _uv_syncs_without_vendor(dockerfile_text: str) -> tuple[int, list[int]]:
+    """(number of `uv sync` lines, line numbers of those with no `COPY vendor` earlier in their
+    own stage). A new FROM starts a stage with nothing copied yet."""
+    syncs, missing, vendored = 0, [], False
+    for number, raw in enumerate(dockerfile_text.splitlines(), start=1):
+        if raw.lstrip().startswith("#"):
+            continue
+        if FROM_LINE.match(raw):
+            vendored = False
+        elif COPY_VENDOR.match(raw):
+            vendored = True
+        elif "uv sync" in raw:
+            syncs += 1
+            if not vendored:
+                missing.append(number)
+    return syncs, missing
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("dockerfile", DOCKERFILES, ids=lambda p: p.name)
-def test_dockerfile_copies_vendor_before_the_first_uv_sync(dockerfile: Path) -> None:
-    lines = [
-        "" if ln.lstrip().startswith("#") else ln
-        for ln in dockerfile.read_text(encoding="utf-8").splitlines()
-    ]
-    copy_idx = [i for i, ln in enumerate(lines) if re.match(r"\s*COPY\s+vendor(\s|/)", ln)]
-    sync_idx = [i for i, ln in enumerate(lines) if "uv sync" in ln]
-    assert copy_idx, f"{dockerfile.name} has no `COPY vendor` line"
-    assert sync_idx, f"{dockerfile.name} has no `uv sync` line"
-    assert copy_idx[0] < sync_idx[0], "`COPY vendor` must precede the first `uv sync`"
+def test_dockerfile_copies_vendor_before_every_uv_sync(dockerfile: Path) -> None:
+    syncs, missing = _uv_syncs_without_vendor(dockerfile.read_text(encoding="utf-8"))
+    assert syncs, f"{dockerfile.name} has no `uv sync` line"
+    assert not missing, f"{dockerfile.name}: `uv sync` before `COPY vendor` on line(s) {missing}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("copy_line", "recognised"),
+    [
+        ("COPY vendor ./vendor", True),
+        ("COPY vendor/ ./vendor/", True),
+        ("COPY --chown=10001:10001 vendor ./vendor", True),
+        ("COPY --link --chown=1:1 vendor ./vendor", True),
+        ("COPY vendors ./x", False),
+        ("COPY --from=build /vendor ./vendor", False),
+    ],
+)
+def test_the_vendor_copy_matcher_handles_flags_and_rejects_lookalikes(
+    copy_line: str, recognised: bool
+) -> None:
+    assert bool(COPY_VENDOR.match(copy_line)) is recognised
+
+
+@pytest.mark.unit
+def test_a_uv_sync_in_a_later_stage_without_vendor_is_caught() -> None:
+    """Guard the guard: the first stage is fine, the second syncs without vendor."""
+    text = (
+        "FROM python:3.12 AS build\n"
+        "COPY --chown=1:1 vendor ./vendor\n"
+        "RUN uv sync --frozen\n"
+        "FROM python:3.12\n"
+        "RUN uv sync --frozen\n"
+    )
+    assert _uv_syncs_without_vendor(text) == (2, [5])
 
 
 @pytest.mark.unit
