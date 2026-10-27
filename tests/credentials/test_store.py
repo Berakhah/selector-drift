@@ -204,7 +204,11 @@ def test_a_tampered_history_is_never_overwritten_by_a_new_recording(tmp_path, ac
 def test_a_forged_acknowledgement_is_no_acknowledgement(tmp_path, target, body):
     root = tmp_path / "store"
     EncryptedStore("client-a", root=root)._data_key()  # the KEK is present; the forger lacks it
-    (root / "client-a" / "acknowledgements.bin").write_text(body, encoding="utf-8")
+    forged = root / "client-a" / "acknowledgements.bin"
+    forged.write_text(body, encoding="utf-8")
+    # Owner-only, as a real sealed file is: on POSIX the store refuses a group/other-readable file
+    # before it looks at the content, which would test the mode check instead of the forgery.
+    forged.chmod(0o600)
     with pytest.raises(AcknowledgementRequired):
         EncryptedStore("client-a", root=root).put(target, _creds())
 
