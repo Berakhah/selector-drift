@@ -205,6 +205,19 @@ class PageHandle:
         self._ledger.raise_if_off_scope()
         await self._page.locator(f"[name='{field}']").fill(value)
 
+    @asynccontextmanager
+    async def submitting_forms(self) -> AsyncIterator[None]:
+        """The one window in which a write (a POST, say) may reach the portal: the spec's
+        navigate steps, where logging in happens. Outside it the route handler refuses every
+        request that is not GET, HEAD or OPTIONS (never-rule 7). Only the pipeline opens it
+        (pinned by tests/browser/test_write_block.py); it closes even if a step fails."""
+        previous = self._ledger.writes_allowed
+        self._ledger.writes_allowed = True
+        try:
+            yield
+        finally:
+            self._ledger.writes_allowed = previous
+
     async def goto_step(self, step: Mapping[str, object]) -> None:
         """`{"step": "goto", "path": "/results"}` -- a path, resolved against the registry URL."""
         self._ledger.raise_if_off_scope()
