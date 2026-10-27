@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Final
+from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, ProxySettings, Request, Route
 from playwright.async_api import Error as PlaywrightError
@@ -43,6 +44,28 @@ _DEAD_PROXY: Final = "http://egress-denied.invalid:1"
 class OffScopeNavigation(RuntimeError):
     """A navigation tried to leave the authorised origins. The run must stop, not continue on
     whatever page it did or did not reach."""
+
+
+class WriteBlocked(OffScopeNavigation):
+    """A request that changes state (anything but GET, HEAD or OPTIONS) outside the window the
+    driver opens for the spec's navigate steps. CLAUDE.md never-rule 7: no write-back into a
+    client portal in v1. A scope violation like the rest of this module's, so the orchestrator
+    refuses the run instead of retrying it."""
+
+
+# Requests that do not change state. Everything else is a write.
+_SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _is_write(method: str) -> bool:
+    return method.upper() not in _SAFE_METHODS
+
+
+def _describe(method: str, url: str) -> str:
+    """`POST https://host/path` -- never the query or fragment, which can carry an identifier
+    and end up in a log line, an error message and a heal event."""
+    parts = urlsplit(url)
+    return f"{method.upper()} {parts.scheme}://{parts.netloc}{parts.path}"
 
 
 def origin_of(url: str) -> str | None:
@@ -86,13 +109,30 @@ class RequestLedger:
     requested_urls: list[str] = field(default_factory=list)
     blocked_urls: list[str] = field(default_factory=list)
     off_scope_navigation: str | None = None
+    # Never-rule 7. `writes_allowed` is true only inside PageHandle.submitting_forms(), which the
+    # pipeline opens around the spec's navigate steps (logging in is a POST). Any other write
+    # is refused, recorded here as `METHOD scheme://host/path`, and stops the run.
+    writes_allowed: bool = False
+    blocked_writes: list[str] = field(default_factory=list)
+    write_attempt: str | None = None
 
     def refuse(self, url: str, *, navigation: bool) -> None:
         self.blocked_urls.append(url)
         if navigation and self.off_scope_navigation is None:
             self.off_scope_navigation = url
 
+    def refuse_write(self, method: str, url: str) -> None:
+        described = _describe(method, url)
+        self.blocked_writes.append(described)
+        if self.write_attempt is None:
+            self.write_attempt = described
+
     def off_scope_error(self) -> OffScopeNavigation | None:
+        if self.write_attempt is not None:
+            return WriteBlocked(
+                f"{self.write_attempt} was refused: the product does not write into a portal "
+                "(CLAUDE.md never-rule 7)"
+            )
         if self.off_scope_navigation is None:
             return None
         return OffScopeNavigation(
@@ -132,6 +172,10 @@ async def install(
     async def _route(route: Route) -> None:
         request = route.request
         if origin_of(request.url) in allowed:
+            if _is_write(request.method) and not ledger.writes_allowed:
+                ledger.refuse_write(request.method, request.url)
+                await route.abort("blockedbyclient")
+                return
             ledger.requested_urls.append(request.url)
             await route.continue_()
         else:
@@ -143,6 +187,10 @@ async def install(
         if request.redirected_from is None:
             return
         if origin_of(request.url) in allowed:
+            if _is_write(request.method) and not ledger.writes_allowed:
+                # A 307/308 keeps the method. The hop cannot be aborted from here, only recorded
+                # so the run stops on its next operation.
+                ledger.refuse_write(request.method, request.url)
             ledger.requested_urls.append(request.url)
         else:
             ledger.refuse(request.url, navigation=is_main_frame_navigation(request))
