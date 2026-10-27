@@ -60,6 +60,39 @@ def _user_agent(target: AuthorisedTarget) -> str:
     return f"Mozilla/5.0 (compatible; {agent}; +{target.user_agent_contact})"
 
 
+# What Chromium needs from its parent environment to start and render, and nothing else. An
+# allowlist: Playwright gives the browser the parent's whole environment unless `env=` is passed,
+# and the worker's holds the database password, the redaction key and any credential KEK. With
+# --no-sandbox a renderer compromise could read them from /proc/<pid>/environ.
+_BROWSER_ENV_ALLOW = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LD_LIBRARY_PATH",
+        "FONTCONFIG_PATH",
+        "XDG_RUNTIME_DIR",
+        "DISPLAY",
+        # Windows: Chromium will not start without these.
+        "SYSTEMROOT",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "APPDATA",
+    }
+)
+
+
+def _browser_env() -> dict[str, str | float | bool]:
+    # The wide value type is Playwright's own signature for `env`; dict is invariant.
+    return {k: v for k, v in os.environ.items() if k in _BROWSER_ENV_ALLOW}
+
+
 def _launch_args() -> list[str]:
     # WebRTC UDP bypasses both the egress proxy and the route handler (H2): allow only
     # proxied UDP, which with a dead proxy is none.
@@ -241,7 +274,10 @@ async def open(
     ledger = RequestLedger()
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
-            headless=True, args=_launch_args(), proxy=allowlist.proxy_for(target)
+            headless=True,
+            args=_launch_args(),
+            proxy=allowlist.proxy_for(target),
+            env=_browser_env(),
         )
         try:
             # Fixed viewport on every context (Task 19): recorded boxes are only comparable
