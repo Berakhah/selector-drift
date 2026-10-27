@@ -184,12 +184,23 @@ def test_the_worker_is_refused(worker_engine: Engine, statement: str) -> None:
 
 @pytest.mark.integration
 def test_every_granted_table_with_a_serial_id_has_a_usable_sequence() -> None:
+    # Sequences owned by a column, found through pg_depend: pg_get_serial_sequence(t, 'id')
+    # raises for a table with no `id` column.
     with engine.connect() as c:
+        owned = c.execute(
+            text(
+                "select t.relname, c.relname from pg_class c "
+                "join pg_depend d on d.objid = c.oid and d.deptype in ('a', 'i') "
+                "join pg_class t on t.oid = d.refobjid "
+                "where c.relkind = 'S' and c.relnamespace = 'public'::regnamespace"
+            )
+        ).all()
+        granted = [(t, s) for t, s in owned if t not in NEVER]
+        assert granted, "no owned sequence found: the query, not the grants, is broken"
         missing = [
-            t
-            for t in sorted(set(_tables()) - NEVER)
-            if (seq := c.scalar(text("select pg_get_serial_sequence(:t, 'id')"), {"t": t}))
-            and not c.scalar(
+            seq
+            for _table, seq in granted
+            if not c.scalar(
                 text("select has_sequence_privilege(:r, :s, 'USAGE')"), {"r": ROLE, "s": seq}
             )
         ]
