@@ -132,18 +132,13 @@ def worker_database_url(url: str, worker: str) -> str:
     return parsed.set(database=f"{base}_{worker}_test").render_as_string(hide_password=False)
 
 
-def _provision_worker_database(url: str) -> None:
-    """Drop and recreate the worker's database, then migrate it to head. Recreated every run so
-    no state survives from a previous one."""
-    parsed = make_url(url)
-    admin = create_engine(parsed.set(database="postgres"), isolation_level="AUTOCOMMIT")
-    try:
-        with admin.connect() as c:
-            c.execute(text(f'DROP DATABASE IF EXISTS "{parsed.database}" WITH (FORCE)'))
-            c.execute(text(f'CREATE DATABASE "{parsed.database}"'))
-    finally:
-        admin.dispose()
-    result = subprocess.run(
+# Arbitrary constant, shared by every worker; ASCII "SDPROV". Advisory locks are per database
+# and every worker takes this one on the `postgres` maintenance database, so they all collide.
+_PROVISION_LOCK_KEY = 0x53445052_4F56
+
+
+def _migrate_to_head(url: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=REPO,
         env={**os.environ, "SD_DATABASE_URL": url},
@@ -151,6 +146,29 @@ def _provision_worker_database(url: str) -> None:
         text=True,
         check=False,
     )
+
+
+def _provision_worker_database(url: str) -> None:
+    """Drop and recreate the worker's database, then migrate it to head. Recreated every run so
+    no state survives from a previous one."""
+    parsed = make_url(url)
+    admin = create_engine(parsed.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as c:
+            # Serialise the workers. Migration 0002 creates and ALTERs a CLUSTER-wide role
+            # (`sd_scorer`); it tolerates losing the create race, but concurrent `ALTER ROLE`
+            # on one pg_authid row fails with "tuple concurrently updated", and that took down
+            # every `-n auto` run (found setting up CI, 2026-10-20). The lock lives on this
+            # connection, so it is released on unlock or, if the worker dies, on disconnect.
+            c.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _PROVISION_LOCK_KEY})
+            try:
+                c.execute(text(f'DROP DATABASE IF EXISTS "{parsed.database}" WITH (FORCE)'))
+                c.execute(text(f'CREATE DATABASE "{parsed.database}"'))
+                result = _migrate_to_head(url)
+            finally:
+                c.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _PROVISION_LOCK_KEY})
+    finally:
+        admin.dispose()
     if result.returncode != 0:
         raise RuntimeError(
             f"alembic upgrade head failed for worker database {parsed.database!r}:\n{result.stderr}"
