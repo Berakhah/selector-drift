@@ -6,6 +6,7 @@ the selector cache, and to evidence (API spec 7.2).
                                                                             hold(), nothing else
         for each heal: write_heal_bundle   its 'before' is last-accepted AS IT IS NOW
                        replay_bundle       -> heal_events.replayed_ok
+        a heal that did not replay         -> hold(), nothing else (like a redaction failure)
         ValidatedExtraction -> accept():   land.write -> cache.put -> last-accepted   (C2)
         QuarantinedRun      -> hold():     candidate parquet + quarantine row; nothing else
 
@@ -228,10 +229,11 @@ def bundle_and_replay(
     field_target: FieldTarget,
     cached_before: CachedSelector | None,
     node_id: str,
-) -> None:
+) -> bool:
     """Write the heal bundle (its 'before' is last-accepted AS IT IS NOW), then prove the heal
-    reproduces from what was stored. EvidenceCorrupted propagates: a bundle that fails its own
-    hash seconds after being written is a disk fault, and the run fails loudly."""
+    reproduces from what was stored; returns whether it did. EvidenceCorrupted propagates: a
+    bundle that fails its own hash seconds after being written is a disk fault, and the run fails
+    loudly."""
     uri = write_heal_bundle(heal.id, target, after, Plane.CLIENT)
     try:
         replay_bundle(
@@ -250,6 +252,18 @@ def bundle_and_replay(
         row.evidence_uri = uri
         row.replayed_ok = reproduced
         s.commit()
+    return reproduced
+
+
+def reproducibility_verdict(fields: Sequence[str]) -> Verdict:
+    """Field names come from the task spec, never from the page."""
+    return Verdict(
+        check="HealReproducibility",
+        outcome=Outcome.FAIL,
+        threshold="every heal replays to the same element from its stored evidence",
+        observed=f"did not replay: {', '.join(fields)}",
+        reason="a heal that cannot be replayed from its stored evidence is not accepted",
+    )
 
 
 def settle(
@@ -281,15 +295,28 @@ def settle(
         return "quarantined"
 
     fields = {t.name: t for t in spec.targets}
-    for heal in heals:  # before last-accepted can move
-        bundle_and_replay(
+    unreproduced: list[str] = []
+    for heal in heals:  # before last-accepted can move; every heal keeps its evidence
+        if not bundle_and_replay(
             heal,
             target.target,
             redacted,
             fields[heal.field],
             cache_before.get(heal.field),
             elements[heal.field].node_id,
+        ):
+            unreproduced.append(heal.field)
+
+    if unreproduced and isinstance(result, ValidatedExtraction):
+        # The gate passed, but a heal nobody can replay is an anecdote (B5): hold it, like a
+        # redaction failure. A human can still promote it after reading the evidence.
+        hold(
+            candidate.run_key,
+            "a heal did not replay from its stored evidence",
+            [reproducibility_verdict(unreproduced), *result.verdicts],
+            candidate,
         )
+        return "quarantined"
 
     if isinstance(result, ValidatedExtraction):
         # Only a heal changes what a field's selector is. A rung-1 hit already IS its cache
