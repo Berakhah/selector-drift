@@ -250,6 +250,11 @@ class Session:
     def blocked_urls(self) -> list[str]:
         return list(self._ledger.blocked_urls)
 
+    @property
+    def blocked_writes(self) -> list[str]:
+        """`METHOD scheme://host/path` of every write the browser refused (never-rule 7)."""
+        return list(self._ledger.blocked_writes)
+
 
 def _playwright_cookies(cookies: Sequence[Mapping[str, Any]]) -> list[_Cookie]:
     """The provider has already narrowed every cookie to a host-only clone for an authorised
