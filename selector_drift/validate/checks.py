@@ -19,6 +19,7 @@ from selector_drift.validate.assertions.independence import (
     IndependentRungAgreement,
     RowKeyContinuity,
 )
+from selector_drift.validate.assertions.row_count import RowCountContinuity
 
 
 def checks_for(
@@ -59,5 +60,9 @@ def checks_for(
     out.append(continuity)
     if field.distributional:
         out.append(DistributionalAssertion(warmup_runs=warmup_runs))
+    if spec.targets and field.name == spec.targets[0].name:
+        # A property of the run, not of a field: filed under one field so the heal log prints
+        # one verdict, not one per field.
+        out.append(RowCountContinuity(warmup_runs=warmup_runs))
     out.append(FirstHealConfirmation(first_heal_policy))
     return out

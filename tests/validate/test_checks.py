@@ -76,10 +76,12 @@ def test_an_assertion_missing_its_argument_is_refused(kind):
 
 @pytest.mark.unit
 def test_every_field_gets_both_confirmers_and_the_first_heal_check():
+    # CLAIM is the first target, so it also carries the run-level RowCountContinuity.
     assert names(CLAIM) == [
         "FormatAssertion",
         "IndependentRungAgreement",
         "RowKeyContinuity",
+        "RowCountContinuity",
         "FirstHealConfirmation",
     ]
 
