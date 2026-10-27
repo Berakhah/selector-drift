@@ -33,6 +33,13 @@ class RowCountContinuity:
     name = "RowCountContinuity"
     threshold = f"at least {ROW_COUNT_RATIO:g} of the trailing median row count"
 
+    def __init__(self, warmup_runs: int = ROW_COUNT_MIN_WINDOWS) -> None:
+        """`warmup_runs` is the scope record's: how much history the target needs before it is
+        judged. A run's size needs no more than the shared minimum, but a target that declares a
+        shorter warm-up is judged sooner, as the distributional check is."""
+        self.warmup_runs = warmup_runs
+        self.min_runs = max(1, min(ROW_COUNT_MIN_WINDOWS, warmup_runs))
+
     def _v(self, outcome: Outcome, observed: str | None, reason: str) -> Verdict:
         return Verdict(
             check=self.name,
@@ -46,12 +53,12 @@ class RowCountContinuity:
         self, candidate: CandidateExtraction, history: History | None, ctx: HealContext
     ) -> Verdict:
         counts = [len(run.rows) for run in history.trailing(REFERENCE_RUNS).runs] if history else []
-        if len(counts) < ROW_COUNT_MIN_WINDOWS:
+        if len(counts) < self.min_runs:
             return self._v(
                 Outcome.INSUFFICIENT,
                 None,
                 f"{len(counts)} accepted run(s) of history; no judgement of a run's size "
-                f"before {ROW_COUNT_MIN_WINDOWS}",
+                f"before {self.min_runs}",
             )
         median = float(statistics.median(counts))
         bar = ROW_COUNT_RATIO * median
