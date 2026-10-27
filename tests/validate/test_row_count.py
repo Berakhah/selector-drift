@@ -88,6 +88,38 @@ def test_fewer_than_three_accepted_runs_is_no_basis_not_a_pass(counts):
 
 
 @pytest.mark.unit
+def test_a_short_declared_warmup_lowers_the_history_needed():
+    """The scope record's warmup_runs says how much history a target needs before it is judged
+    (the bench_mutated fixture declares one). The check must not demand more than that."""
+    one = history_with_counts([100])
+    check = RowCountContinuity(warmup_runs=1)
+    assert check.check(run_of(40), one, ctx(AMOUNT, healed=True, rung=3)).outcome is Outcome.FAIL
+    assert check.check(run_of(60), one, ctx(AMOUNT, healed=True, rung=3)).outcome is Outcome.PASS
+
+
+@pytest.mark.unit
+def test_a_long_declared_warmup_does_not_raise_the_minimum_above_three():
+    """A client's 30-run warm-up governs the distributional check; a run's size needs only the
+    three runs the shared threshold names."""
+    three = history_with_counts([100, 100, 100])
+    v = RowCountContinuity(warmup_runs=30).check(run_of(40), three, ctx(AMOUNT))
+    assert v.outcome is Outcome.FAIL
+
+
+@pytest.mark.unit
+def test_checks_for_passes_the_targets_warmup_to_the_check():
+    first = SPEC.targets[0]
+    (check,) = [
+        c
+        for c in checks_for(
+            SPEC, first, [], warmup_runs=1, first_heal_policy=FirstHealPolicy.REQUIRED
+        )
+        if isinstance(c, RowCountContinuity)
+    ]
+    assert check.warmup_runs == 1
+
+
+@pytest.mark.unit
 def test_no_history_is_no_basis():
     v = RowCountContinuity().check(run_of(5), None, ctx(AMOUNT, healed=False, rung=1))
     assert v.outcome is Outcome.INSUFFICIENT
