@@ -35,8 +35,21 @@ ROLE = "sd_worker"
 AUDIT = "audit_log"
 # What the worker must never reach: the API's credentials and sessions, and alembic's own table.
 NEVER = {"operators", "sessions", "alembic_version"}
-# The one table whose rows the product deletes (orchestrate.cache_writer).
-DELETABLE = {"selector_cache"}
+# The tables whose rows the product deletes: orchestrate.cache_writer (selector_cache) and
+# quality.contracts._persist, which replaces a run's findings on every evaluation (findings).
+DELETABLE = {"selector_cache", "findings"}
+# The tables whose existing rows the product updates. Everything else the worker may only read and
+# append to: a compromised worker cannot rewrite a deploy, a finding, an intervention or a
+# resolution it (or anyone) wrote earlier.
+UPDATABLE = {
+    "heal_events",
+    "heartbeats",
+    "quarantine",
+    "run_attempts",
+    "runs",
+    "scope_records",
+    "selector_cache",
+}
 INSUFFICIENT_PRIVILEGE = "42501"
 PROBE = "worker_role_probe"
 
@@ -131,14 +144,18 @@ def test_audit_log_is_readable_and_appendable_and_nothing_more() -> None:
 
 
 @pytest.mark.integration
-def test_the_data_tables_can_be_read_written_and_updated() -> None:
+def test_the_data_tables_can_be_read_and_appended_to() -> None:
     data = set(_tables()) - NEVER - {AUDIT}
     assert _holding("INSERT") == data | {AUDIT}
-    assert _holding("UPDATE") == data
 
 
 @pytest.mark.integration
-def test_only_the_selector_cache_can_have_rows_deleted() -> None:
+def test_only_the_tables_the_product_updates_can_be_updated() -> None:
+    assert _holding("UPDATE") == UPDATABLE
+
+
+@pytest.mark.integration
+def test_only_the_tables_the_product_deletes_from_can_have_rows_deleted() -> None:
     assert _holding("DELETE") == DELETABLE
 
 
