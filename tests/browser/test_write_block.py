@@ -59,13 +59,16 @@ def _target() -> Any:
 
 
 class _Request:
-    def __init__(self, url: str, method: str = "GET", *, redirected: bool = False) -> None:
+    def __init__(
+        self, url: str, method: str = "GET", *, redirected: bool = False, navigation: bool = True
+    ) -> None:
         self.url, self.method = url, method
         self.redirected_from = object() if redirected else None
         self.frame = SimpleNamespace(parent_frame=None)
+        self._navigation = navigation
 
     def is_navigation_request(self) -> bool:
-        return True
+        return self._navigation
 
 
 class _Route:
@@ -103,8 +106,14 @@ async def _installed(ledger: RequestLedger | None = None) -> tuple[_Context, Req
     return context, ledger
 
 
-async def _send(context: _Context, url: str, method: str) -> _Route:
-    route = _Route(_Request(url, method))
+async def _send(
+    context: _Context,
+    url: str,
+    method: str,
+    *,
+    navigation: bool = True,
+) -> _Route:
+    route = _Route(_Request(url, method, navigation=navigation))
     await context.route_handler(route)
     return route
 
@@ -162,6 +171,45 @@ async def test_a_write_inside_the_window_goes_through() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_the_window_lets_exactly_one_write_through() -> None:
+    """Logging in is one POST. A second write in the same window -- a click that lands on
+    'Delete' after the sign-in -- is refused."""
+    context, ledger = await _installed()
+    ledger.writes_allowed = True
+    await _send(context, f"{ORIGIN}/login", "POST")
+    second = await _send(context, f"{ORIGIN}/claims/7/delete", "POST")
+    assert second.aborted == "blockedbyclient" and not second.continued
+    with pytest.raises(WriteBlocked):
+        ledger.raise_if_off_scope()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_refused_subresource_write_is_aborted_and_recorded_but_does_not_stop_the_run() -> (
+    None
+):
+    """An analytics beacon or a POST-based search XHR is not a navigation. It is refused -- the
+    portal never receives it -- and recorded, but one of them must not fail every run on a
+    portal that fires them."""
+    context, ledger = await _installed()
+    route = await _send(context, f"{ORIGIN}/beacon", "POST", navigation=False)
+    assert route.aborted == "blockedbyclient" and not route.continued
+    assert ledger.blocked_writes == [f"POST {ORIGIN}/beacon"]
+    ledger.raise_if_off_scope()  # still running
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_refused_document_write_stops_the_run_even_after_a_refused_beacon() -> None:
+    context, ledger = await _installed()
+    await _send(context, f"{ORIGIN}/beacon", "POST", navigation=False)
+    await _send(context, f"{ORIGIN}/claims/7/delete", "POST")  # a form submit
+    with pytest.raises(WriteBlocked, match="delete"):
+        ledger.raise_if_off_scope()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_a_write_to_another_origin_is_an_off_scope_refusal_even_inside_the_window() -> None:
     context, ledger = await _installed()
     ledger.writes_allowed = True
@@ -177,6 +225,21 @@ async def test_a_redirect_hop_that_writes_outside_the_window_is_recorded() -> No
     does, and cannot abort it -- so it must at least stop the run."""
     context, ledger = await _installed()
     context.request_handler(_Request(f"{ORIGIN}/after", "POST", redirected=True))
+    with pytest.raises(WriteBlocked):
+        ledger.raise_if_off_scope()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_redirect_hop_that_writes_after_the_sign_in_stops_the_run() -> None:
+    """The sign-in spent the window, so a 307/308 hop of that POST is a second write. It cannot
+    be aborted (see allowlist._route_write), but it is recorded and the run stops on its next
+    operation."""
+    context, ledger = await _installed()
+    ledger.writes_allowed = True
+    await _send(context, f"{ORIGIN}/login", "POST")
+    context.request_handler(_Request(f"{ORIGIN}/claims/7/delete", "POST", redirected=True))
+    assert ledger.blocked_writes == [f"POST {ORIGIN}/claims/7/delete"]
     with pytest.raises(WriteBlocked):
         ledger.raise_if_off_scope()
 
@@ -204,9 +267,10 @@ async def test_the_window_closes_even_when_the_steps_fail() -> None:
 
 
 @pytest.mark.unit
-def test_only_the_pipeline_opens_the_window() -> None:
-    """The window is the one place a write may pass. A heal, an extractor or a rung that opened
-    it would reintroduce the hole, so the call has exactly one home."""
+def test_only_the_navigate_steps_open_the_window() -> None:
+    """The window is the one place a write may pass. A heal, an extractor, a rung or the
+    pipeline opening it would reintroduce the hole, so the call has exactly one home -- the
+    code that runs the spec's navigate steps, which opens it around a sign-in click only."""
     root = Path(__file__).resolve().parents[2] / "selector_drift"
     callers = sorted(
         str(p.relative_to(root).as_posix())
@@ -217,4 +281,4 @@ def test_only_the_pipeline_opens_the_window() -> None:
         )
         and p.name != "driver.py"
     )
-    assert callers == ["orchestrate/pipeline.py"]
+    assert callers == ["browser/navigate.py"]

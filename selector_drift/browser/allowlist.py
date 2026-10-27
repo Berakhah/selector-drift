@@ -109,9 +109,10 @@ class RequestLedger:
     requested_urls: list[str] = field(default_factory=list)
     blocked_urls: list[str] = field(default_factory=list)
     off_scope_navigation: str | None = None
-    # Never-rule 7. `writes_allowed` is true only inside PageHandle.submitting_forms(), which the
-    # pipeline opens around the spec's navigate steps (logging in is a POST). Any other write
-    # is refused, recorded here as `METHOD scheme://host/path`, and stops the run.
+    # Never-rule 7. `writes_allowed` is true only inside PageHandle.submitting_forms(), which
+    # navigate.run_steps opens around a sign-in click (logging in is a POST) and which lets ONE
+    # write through. Any other write is refused and recorded here as `METHOD scheme://host/path`;
+    # a refused write that is a document navigation (a form submit) also stops the run.
     writes_allowed: bool = False
     blocked_writes: list[str] = field(default_factory=list)
     write_attempt: str | None = None
@@ -121,10 +122,12 @@ class RequestLedger:
         if navigation and self.off_scope_navigation is None:
             self.off_scope_navigation = url
 
-    def refuse_write(self, method: str, url: str) -> None:
+    def refuse_write(self, method: str, url: str, *, stops_run: bool = True) -> None:
+        """Record a refused write. A beacon or a POST-based XHR is aborted and listed but, being
+        no navigation, does not fail the run (`stops_run=False`): the portal never saw it."""
         described = _describe(method, url)
         self.blocked_writes.append(described)
-        if self.write_attempt is None:
+        if stops_run and self.write_attempt is None:
             self.write_attempt = described
 
     def off_scope_error(self) -> OffScopeNavigation | None:
@@ -172,15 +175,30 @@ async def install(
     async def _route(route: Route) -> None:
         request = route.request
         if origin_of(request.url) in allowed:
-            if _is_write(request.method) and not ledger.writes_allowed:
-                ledger.refuse_write(request.method, request.url)
-                await route.abort("blockedbyclient")
+            if _is_write(request.method):
+                await _route_write(route, ledger)
                 return
             ledger.requested_urls.append(request.url)
             await route.continue_()
         else:
             ledger.refuse(request.url, navigation=is_main_frame_navigation(request))
             await route.abort("blockedbyclient")
+
+    async def _route_write(route: Route, ledger: RequestLedger) -> None:
+        request = route.request
+        if not ledger.writes_allowed:
+            ledger.refuse_write(
+                request.method, request.url, stops_run=is_main_frame_navigation(request)
+            )
+            await route.abort("blockedbyclient")
+            return
+        # The window lets one write through: the sign-in itself. Playwright routes only the first
+        # hop of a redirect chain, so a 307/308 from that POST is replayed at its Location before
+        # `_on_request` can do more than record it (and `route.fetch(max_redirects=0)` cannot
+        # carry the login: it goes through the dead egress proxy on Playwright's side).
+        ledger.writes_allowed = False
+        ledger.requested_urls.append(request.url)
+        await route.continue_()
 
     def _on_request(request: Request) -> None:
         # Only redirect hops: the first hop of every chain went through `_route` above.
