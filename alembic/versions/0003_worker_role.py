@@ -14,10 +14,14 @@ privilege, not a trigger, because the administrator (the migrating role, and the
 must stay able to clear it. It gets no access at all to `operators`, `sessions` (the API's
 password hashes and session tokens) or `alembic_version`, and no DDL.
 
-Every other table is readable, insertable and updatable; only `selector_cache` may have rows
-deleted (orchestrate.cache_writer is the one place the product deletes). UPDATE is granted
-broadly rather than per column: tests/orchestrate/test_worker_role_pipeline.py runs the real
-product as this role, so a grant that is too narrow fails in CI, not at 04:12 on the VM.
+Every other table is readable and insertable. UPDATE is granted only on the tables whose existing
+rows the product rewrites (UPDATABLE), and DELETE only where it deletes (DELETABLE: the selector
+cache's revert, and `findings`, which quality.contracts replaces on every evaluation). A
+compromised worker therefore cannot rewrite a deploy, a finding, an intervention or a resolution.
+It still can on the UPDATABLE tables (a run's state, a heal's `replayed_ok`): the pipeline writes
+those legitimately, and column grants would not stop a worker lying in a column it must write.
+The grants are per table, not per column, and tests/orchestrate/test_worker_role_pipeline.py runs
+the real product as this role, so a grant that is too narrow fails in CI, not at 04:12 on the VM.
 
 The role has no password here; the deploy sets it from .env (see .env.example). A role is
 cluster-wide while every test worker migrates its own database, so creation is idempotent and
@@ -37,7 +41,7 @@ depends_on: Sequence[str] | str | None = None
 
 ROLE = "sd_worker"
 AUDIT = "audit_log"
-# Read, insert and update. A table added later is NOT granted automatically: tests/db/
+# Read and insert. A table added later is NOT granted automatically: tests/db/
 # test_worker_role.py fails until the next migration classifies it.
 DATA = (
     "deploys",
@@ -52,7 +56,18 @@ DATA = (
     "scope_records",
     "selector_cache",
 )
-DELETABLE = ("selector_cache",)
+# Existing rows the product rewrites: runs and attempts move through states, a heal records its
+# replay, a quarantine is resolved, heartbeats close, the scope mirror and the cache are upserted.
+UPDATABLE = (
+    "heal_events",
+    "heartbeats",
+    "quarantine",
+    "run_attempts",
+    "runs",
+    "scope_records",
+    "selector_cache",
+)
+DELETABLE = ("selector_cache", "findings")
 
 
 def _owned_sequences(tables: Sequence[str], verb: str, preposition: str) -> str:
@@ -98,7 +113,9 @@ def upgrade() -> None:
         f"ALTER ROLE {ROLE} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS LOGIN"
     )
     for table in DATA:
-        op.execute(f"GRANT SELECT, INSERT, UPDATE ON {table} TO {ROLE}")
+        op.execute(f"GRANT SELECT, INSERT ON {table} TO {ROLE}")
+    for table in UPDATABLE:
+        op.execute(f"GRANT UPDATE ON {table} TO {ROLE}")
     for table in DELETABLE:
         op.execute(f"GRANT DELETE ON {table} TO {ROLE}")
     op.execute(f"GRANT SELECT, INSERT ON {AUDIT} TO {ROLE}")
@@ -110,5 +127,7 @@ def downgrade() -> None:
     op.execute(f"REVOKE SELECT, INSERT ON {AUDIT} FROM {ROLE}")
     for table in DELETABLE:
         op.execute(f"REVOKE DELETE ON {table} FROM {ROLE}")
+    for table in UPDATABLE:
+        op.execute(f"REVOKE UPDATE ON {table} FROM {ROLE}")
     for table in DATA:
-        op.execute(f"REVOKE SELECT, INSERT, UPDATE ON {table} FROM {ROLE}")
+        op.execute(f"REVOKE SELECT, INSERT ON {table} FROM {ROLE}")

@@ -38,7 +38,15 @@ def test_a_run_a_promotion_and_a_cache_hit_run_need_only_the_workers_grants(
         first = run(W0)
         assert state_of(first) == "quarantined"  # a cold start is held
         promote(first)  # lands the rows, writes the cache, audits the decision
-        assert state_of(run(W1)) == "completed"  # the next day is an ordinary cache hit
+        second = run(W1)
+        assert state_of(second) == "completed"  # the next day is an ordinary cache hit
+        # pipeline._evaluate swallows a quality failure into the run's error and an alert, so a
+        # missing grant on `findings` leaves every state above untouched. Look for the note.
+        with engine.connect() as admin:
+            errors = admin.scalars(
+                text("select error from runs where run_key in (:a, :b)"), {"a": first, "b": second}
+            ).all()
+        assert [e for e in errors if e and "quality not evaluated" in e] == []
     finally:
         Session.configure(bind=engine)
         acting.dispose()
