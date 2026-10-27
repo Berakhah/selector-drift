@@ -16,6 +16,7 @@ append-onl".
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.orm import Session as OrmSession
 
 from selector_drift.db.session import Session, engine
@@ -32,6 +33,8 @@ def test_a_run_a_promotion_and_a_cache_hit_run_need_only_the_workers_grants(
     acting = _engine_as(ROLE)
     Session.configure(bind=acting)  # every Session() the product opens now runs as sd_worker
     try:
+        with Session() as s:  # the rebind took effect, or this test proves nothing
+            assert s.scalar(text("select current_user")) == ROLE
         first = run(W0)
         assert state_of(first) == "quarantined"  # a cold start is held
         promote(first)  # lands the rows, writes the cache, audits the decision
