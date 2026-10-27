@@ -6,6 +6,8 @@ exercised against a fake Playwright page below, and end to end by the pipeline t
 from __future__ import annotations
 
 import ast
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,14 @@ class Recorder:
     async def click_role(self, role: str, name: str) -> None:
         self.calls.append(("click", role, name))
 
+    @asynccontextmanager
+    async def submitting_forms(self) -> AsyncIterator[None]:
+        self.calls.append(("window", "open"))
+        try:
+            yield
+        finally:
+            self.calls.append(("window", "close"))
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio
@@ -51,9 +61,40 @@ async def test_steps_run_in_order_through_the_page_handle() -> None:
         ("goto", "/login"),
         ("fill", "username", "demo"),
         ("fill", "password", "not-a-real-password"),
+        ("window", "open"),
         ("click", "button", "Sign in"),
+        ("window", "close"),
         ("goto", "/results"),
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_the_write_window_opens_around_the_sign_in_click_and_nothing_else() -> None:
+    """Never-rule 7: logging in is a POST, so the click that follows the credential fills may
+    write. A later click -- 'Approve', say -- is outside the window."""
+    steps = [*STEPS, NavStep(step="click", role="button", name="Approve")]
+    page = Recorder()
+    await run_steps(page, steps, DEMO)  # type: ignore[arg-type]
+    opened = [c for c in page.calls if c[0] in ("window", "click")]
+    assert opened == [
+        ("window", "open"), ("click", "button", "Sign in"), ("window", "close"),
+        ("click", "button", "Approve"),
+    ]  # fmt: skip
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_click_nothing_was_filled_for_never_gets_the_window() -> None:
+    """A cookie-injected session has no sign-in form, so its spec has no credential fill and no
+    click of its own may write."""
+    steps = [
+        NavStep(step="goto", path="/results"),
+        NavStep(step="click", role="button", name="Delete"),
+    ]
+    page = Recorder()
+    await run_steps(page, steps, None)  # type: ignore[arg-type]
+    assert not any(c[0] == "window" for c in page.calls)
 
 
 @pytest.mark.unit
