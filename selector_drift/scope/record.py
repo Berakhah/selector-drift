@@ -17,7 +17,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from bok_core.boundary.sensitivity import Sensitivity
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Aliased (not `from ... import _MINT`), so this module's own namespace never re-exports the
 # mint token or the minting flag -- see fix round 1, I-2. Aliased to a name distinct from the
@@ -63,6 +63,10 @@ _TARGET_SLUG = TARGET_SLUG  # internal alias kept for readability at each call s
 # URL -- deliberately excludes '<' and '>' so an unresolved `<REAL-ACCOUNT>`-style placeholder
 # (ruling 3, deferred Task 2 finding) fails here rather than loading as a plausible URL.
 _URL_UNSAFE_CHARS = re.compile(r"[\s<>\"^`{|}\\]")
+
+
+# The warm-up a client target may not go below (methodology.md: the bench 5 runs, clients 30).
+CLIENT_MIN_WARMUP_RUNS = 30
 
 
 @dataclass(frozen=True)
@@ -140,6 +144,26 @@ class ScopeRecord(BaseModel):
         for origin in origins:
             parse_origin(origin)
         return origins
+
+    @model_validator(mode="after")
+    def _a_client_target_keeps_the_first_heal_controls(self) -> ScopeRecord:
+        """Only a self-owned target may relax them. auto_promote skips the human confirmation of
+        a first heal and a short warm-up shortens the window with no distributional basis; a
+        client's system of record gets neither (CLAUDE.md never-rule 5). Refused at load, so no
+        YAML file can lower what a test over the repo's own files would otherwise have to catch."""
+        if self.basis is Basis.SELF_OWNED:
+            return self
+        if self.first_heal_policy is not FirstHealPolicy.REQUIRED:
+            raise ValueError(
+                f"first_heal_policy must be 'required' for a {self.basis.value} target, "
+                f"got {self.first_heal_policy.value!r}"
+            )
+        if self.warmup_runs < CLIENT_MIN_WARMUP_RUNS:
+            raise ValueError(
+                f"warmup_runs must be at least {CLIENT_MIN_WARMUP_RUNS} for a "
+                f"{self.basis.value} target, got {self.warmup_runs}"
+            )
+        return self
 
     @property
     def sensitivity(self) -> Sensitivity:
