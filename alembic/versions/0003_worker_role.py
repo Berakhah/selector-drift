@@ -18,8 +18,23 @@ Every other table is readable and insertable. UPDATE is granted only on the tabl
 rows the product rewrites (UPDATABLE), and DELETE only where it deletes (DELETABLE: the selector
 cache's revert, and `findings`, which quality.contracts replaces on every evaluation). A
 compromised worker therefore cannot rewrite a deploy, a finding, an intervention or a resolution.
-It still can on the UPDATABLE tables (a run's state, a heal's `replayed_ok`): the pipeline writes
-those legitimately, and column grants would not stop a worker lying in a column it must write.
+It still can on the UPDATABLE tables (a run's state, a heal's `replayed_ok`, the scope mirror, the
+selector cache, a quarantine's `resolved_as`): the pipeline writes those legitimately, and column
+grants would not stop a worker lying in a column it must write.
+
+What this role does and does not protect -- do not read "least privilege" as more than this:
+
+- It stops the worker erasing or rewriting history it must not touch (`audit_log`, deploys,
+  findings, interventions, resolutions) and reaching the API's tables or any DDL.
+- It does NOT stop a compromised worker lying in a table it writes. It can `UPDATE scope_records`
+  (relabel `basis`, move `expires_on`), `UPDATE selector_cache` (the validation gate that decides
+  what is written lives in code, not in a privilege), and `INSERT` forged `audit_log` rows (a
+  `marked_expected` row mutes a drift alert). Append-only prevents erasure, not forgery.
+- Closing that needs the scope mirror written by a different role, in a process the browser
+  worker does not share. Until then the readers that matter do not trust the mirror alone:
+  heallog.evidence derives a stored artefact's sensitivity from the mirror AND the repo's scope
+  YAML, which the database cannot change (tests/heallog/test_stored_sensitivity.py).
+
 The grants are per table, not per column, and tests/orchestrate/test_worker_role_pipeline.py runs
 the real product as this role, so a grant that is too narrow fails in CI, not at 04:12 on the VM.
 
