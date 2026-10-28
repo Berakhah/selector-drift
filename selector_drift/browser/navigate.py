@@ -9,7 +9,6 @@ navigation waits twice), and `fill_field` addresses a plain form field name, nev
 from __future__ import annotations
 
 from collections.abc import Sequence
-from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
 from selector_drift.credentials.provider import Credentials
@@ -29,9 +28,7 @@ class Navigable(Protocol):
 
     async def fill_field(self, field: str, value: str) -> None: ...
 
-    async def click_role(self, role: str, name: str) -> None: ...
-
-    def submitting_forms(self) -> AbstractAsyncContextManager[None]: ...
+    async def click_role(self, role: str, name: str, *, signs_in: bool = False) -> None: ...
 
 
 def _value(i: int, ref: str | None, creds: Credentials | None) -> str:
@@ -62,9 +59,5 @@ async def run_steps(page: Navigable, steps: Sequence[NavStep], creds: Credential
             case "click":
                 if step.role is None or step.name is None:
                     raise NavError(f"step {i}: click needs a role and an accessible name")
-                if signing_in:
-                    signing_in = False
-                    async with page.submitting_forms():
-                        await page.click_role(step.role, step.name)
-                else:
-                    await page.click_role(step.role, step.name)
+                await page.click_role(step.role, step.name, signs_in=signing_in)
+                signing_in = False

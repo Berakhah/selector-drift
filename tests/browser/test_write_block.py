@@ -247,40 +247,111 @@ async def test_a_redirect_hop_that_writes_after_the_sign_in_stops_the_run() -> N
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_the_window_opens_for_the_steps_and_closes_after_them() -> None:
+async def test_a_script_write_inside_the_window_is_refused_and_does_not_spend_it() -> None:
+    """A heartbeat, a beacon or a hostile page's fetch() fires while the sign-in click is
+    running. It must not be the one write the window lets through: the sign-in POST that
+    follows still has to get in."""
+    context, ledger = await _installed()
+    ledger.writes_allowed = True
+    script = await _send(context, f"{ORIGIN}/heartbeat", "POST", navigation=False)
+    assert script.aborted == "blockedbyclient" and not script.continued
+    sign_in = await _send(context, f"{ORIGIN}/login", "POST")
+    assert sign_in.continued and sign_in.aborted is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["PUT", "PATCH", "DELETE"])
+async def test_only_a_post_may_use_the_window(method: str) -> None:
+    """A sign-in form submits with POST. A page whose 'sign in' goes out as DELETE is not one."""
+    context, ledger = await _installed()
+    ledger.writes_allowed = True
+    route = await _send(context, f"{ORIGIN}/login", method)
+    assert route.aborted == "blockedbyclient" and not route.continued
+    with pytest.raises(WriteBlocked):
+        ledger.raise_if_off_scope()
+
+
+class _ClickPage:
+    def get_by_role(self, role: str, *, name: str, exact: bool) -> Any:
+        async def click() -> None:
+            self.window_during_click = self.ledger.writes_allowed
+
+        return SimpleNamespace(click=click)
+
+    async def wait_for_load_state(self, state: str) -> None:
+        return None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_the_window_opens_only_after_the_rate_limit_token_and_closes_after_the_click(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The token can block for a long time while the login page's scripts are live. The window
+    must not be open for that wait, only for the click."""
     ledger = RequestLedger()
-    handle = PageHandle(None, _target(), PAGE, ledger)  # type: ignore[arg-type]
-    assert ledger.writes_allowed is False
-    async with handle.submitting_forms():
-        assert ledger.writes_allowed is True
+    page = _ClickPage()
+    page.ledger, page.window_during_click = ledger, None  # type: ignore[attr-defined]
+    seen_by_token: list[bool] = []
+    monkeypatch.setattr(
+        "selector_drift.browser.ratelimit.acquire",
+        lambda t: seen_by_token.append(ledger.writes_allowed),
+    )
+    handle = PageHandle(page, _target(), PAGE, ledger)  # type: ignore[arg-type]
+    await handle.click_role("button", "Sign in", signs_in=True)
+    assert seen_by_token == [False]
+    assert page.window_during_click is True  # type: ignore[attr-defined]
     assert ledger.writes_allowed is False
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_the_window_closes_even_when_the_steps_fail() -> None:
+async def test_the_window_closes_even_when_the_click_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     ledger = RequestLedger()
-    handle = PageHandle(None, _target(), PAGE, ledger)  # type: ignore[arg-type]
+
+    class _Boom(_ClickPage):
+        def get_by_role(self, role: str, *, name: str, exact: bool) -> Any:
+            async def click() -> None:
+                raise RuntimeError("the click failed")
+
+            return SimpleNamespace(click=click)
+
+    monkeypatch.setattr("selector_drift.browser.ratelimit.acquire", lambda t: None)
+    handle = PageHandle(_Boom(), _target(), PAGE, ledger)  # type: ignore[arg-type]
     with pytest.raises(RuntimeError):
-        async with handle.submitting_forms():
-            raise RuntimeError("a navigate step failed")
+        await handle.click_role("button", "Sign in", signs_in=True)
     assert ledger.writes_allowed is False
 
 
 @pytest.mark.unit
-def test_only_the_navigate_steps_open_the_window() -> None:
+@pytest.mark.asyncio
+async def test_a_click_that_does_not_sign_in_never_opens_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = RequestLedger()
+    page = _ClickPage()
+    page.ledger, page.window_during_click = ledger, None  # type: ignore[attr-defined]
+    monkeypatch.setattr("selector_drift.browser.ratelimit.acquire", lambda t: None)
+    await PageHandle(page, _target(), PAGE, ledger).click_role("button", "Approve")  # type: ignore[arg-type]
+    assert page.window_during_click is False  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+def test_only_the_navigate_steps_ask_for_the_window() -> None:
     """The window is the one place a write may pass. A heal, an extractor, a rung or the
-    pipeline opening it would reintroduce the hole, so the call has exactly one home -- the
-    code that runs the spec's navigate steps, which opens it around a sign-in click only."""
+    pipeline asking for it would reintroduce the hole, so `signs_in=` has exactly one home --
+    the code that runs the spec's navigate steps, on the click after a credential fill."""
     root = Path(__file__).resolve().parents[2] / "selector_drift"
     callers = sorted(
         str(p.relative_to(root).as_posix())
         for p in root.rglob("*.py")
         if any(
-            isinstance(n, ast.Attribute) and n.attr == "submitting_forms"
+            isinstance(n, ast.keyword) and n.arg == "signs_in"
             for n in ast.walk(ast.parse(p.read_text("utf-8")))
         )
-        and p.name != "driver.py"
     )
     assert callers == ["browser/navigate.py"]
 

@@ -184,14 +184,21 @@ class PageHandle:
             raise
         self._ledger.raise_if_off_scope()
 
-    async def click_role(self, role: str, name: str) -> None:
+    async def click_role(self, role: str, name: str, *, signs_in: bool = False) -> None:
         """A spec's `click` step: the element with this ARIA role and exact accessible name.
         It owns the rate-limit token, like `click()` (ruling, Important 5): a click may
-        navigate, and navigate.run_steps takes no token of its own."""
+        navigate, and navigate.run_steps takes no token of its own.
+
+        `signs_in` is for the click that submits the credentials just filled, and only
+        navigate.run_steps passes it (pinned by tests/browser/test_write_block.py). It opens the
+        write window (never-rule 7) for this click alone -- after the token, which can wait a
+        long time while the page's scripts are live -- and closes it when the click and the load
+        it causes are done, or have failed."""
         if not _ROLE.fullmatch(role):
             raise ValueError(f"{role!r} is not an ARIA role name")
         self._ledger.raise_if_off_scope()
         await asyncio.to_thread(ratelimit.acquire, self._target)
+        self._ledger.writes_allowed = signs_in
         try:
             await self._page.get_by_role(role, name=name, exact=True).click()  # type: ignore[arg-type]
             await self._page.wait_for_load_state("load")
@@ -200,6 +207,8 @@ class PageHandle:
             if error is not None:
                 raise error from exc
             raise
+        finally:
+            self._ledger.writes_allowed = False
         self._ledger.raise_if_off_scope()
 
     async def fill_field(self, field: str, value: str) -> None:
@@ -216,19 +225,6 @@ class PageHandle:
                 f"could not fill the field {field!r} ({type(exc).__name__}); "
                 "the value is deliberately not reported"
             ) from None
-
-    @asynccontextmanager
-    async def submitting_forms(self) -> AsyncIterator[None]:
-        """The one window in which a write (a POST, say) may reach the portal: the spec's
-        navigate steps, where logging in happens. Outside it the route handler refuses every
-        request that is not GET, HEAD or OPTIONS (never-rule 7). Only the pipeline opens it
-        (pinned by tests/browser/test_write_block.py); it closes even if a step fails."""
-        previous = self._ledger.writes_allowed
-        self._ledger.writes_allowed = True
-        try:
-            yield
-        finally:
-            self._ledger.writes_allowed = previous
 
     async def goto_step(self, step: Mapping[str, object]) -> None:
         """`{"step": "goto", "path": "/results"}` -- a path, resolved against the registry URL."""
