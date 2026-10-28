@@ -309,6 +309,7 @@ async def open(
             )
             try:
                 await allowlist.install(context, target, ledger)
+                await allowlist.guard_redirects(context, ledger)
                 if credentials is not None and credentials.cookies:
                     await context.add_cookies(_playwright_cookies(credentials.cookies))
                 page = await context.new_page()
