@@ -104,6 +104,11 @@ def _launch_args() -> list[str]:
     return args
 
 
+class FillFailed(RuntimeError):
+    """A `fill` step could not set a form control. Names the field and nothing else: the value
+    may be a credential, and Playwright's own message echoes it in its call log (never-rule 4)."""
+
+
 class PortalUnavailable(RuntimeError):
     """A navigation the portal answered with a server error (5xx). The run fails and is retried;
     nothing is resolved or extracted from an error page (Task 26A)."""
@@ -179,14 +184,21 @@ class PageHandle:
             raise
         self._ledger.raise_if_off_scope()
 
-    async def click_role(self, role: str, name: str) -> None:
+    async def click_role(self, role: str, name: str, *, signs_in: bool = False) -> None:
         """A spec's `click` step: the element with this ARIA role and exact accessible name.
         It owns the rate-limit token, like `click()` (ruling, Important 5): a click may
-        navigate, and navigate.run_steps takes no token of its own."""
+        navigate, and navigate.run_steps takes no token of its own.
+
+        `signs_in` is for the click that submits the credentials just filled, and only
+        navigate.run_steps passes it (pinned by tests/browser/test_write_block.py). It opens the
+        write window (never-rule 7) for this click alone -- after the token, which can wait a
+        long time while the page's scripts are live -- and closes it when the click and the load
+        it causes are done, or have failed."""
         if not _ROLE.fullmatch(role):
             raise ValueError(f"{role!r} is not an ARIA role name")
         self._ledger.raise_if_off_scope()
         await asyncio.to_thread(ratelimit.acquire, self._target)
+        self._ledger.writes_allowed = signs_in
         try:
             await self._page.get_by_role(role, name=name, exact=True).click()  # type: ignore[arg-type]
             await self._page.wait_for_load_state("load")
@@ -195,6 +207,8 @@ class PageHandle:
             if error is not None:
                 raise error from exc
             raise
+        finally:
+            self._ledger.writes_allowed = False
         self._ledger.raise_if_off_scope()
 
     async def fill_field(self, field: str, value: str) -> None:
@@ -203,7 +217,14 @@ class PageHandle:
         if not _FIELD.fullmatch(field):
             raise ValueError("fill takes a plain form field name, never a selector")
         self._ledger.raise_if_off_scope()
-        await self._page.locator(f"[name='{field}']").fill(value)
+        try:
+            await self._page.locator(f"[name='{field}']").fill(value)
+        except PlaywrightError as exc:
+            # `from None`: the original, call log and all, must not ride along in a traceback.
+            raise FillFailed(
+                f"could not fill the field {field!r} ({type(exc).__name__}); "
+                "the value is deliberately not reported"
+            ) from None
 
     async def goto_step(self, step: Mapping[str, object]) -> None:
         """`{"step": "goto", "path": "/results"}` -- a path, resolved against the registry URL."""
@@ -236,6 +257,11 @@ class Session:
     @property
     def blocked_urls(self) -> list[str]:
         return list(self._ledger.blocked_urls)
+
+    @property
+    def blocked_writes(self) -> list[str]:
+        """`METHOD scheme://host/path` of every write the browser refused (never-rule 7)."""
+        return list(self._ledger.blocked_writes)
 
 
 def _playwright_cookies(cookies: Sequence[Mapping[str, Any]]) -> list[_Cookie]:
@@ -291,9 +317,11 @@ async def open(
             )
             try:
                 await allowlist.install(context, target, ledger)
+                guard = await allowlist.guard_redirects(context, ledger)
                 if credentials is not None and credentials.cookies:
                     await context.add_cookies(_playwright_cookies(credentials.cookies))
                 page = await context.new_page()
+                await guard(page)  # Fetch is on before the page's first request
                 handle = PageHandle(page, target, base, ledger)
                 await asyncio.to_thread(ratelimit.acquire, target)
                 await _navigate(page, base, ledger)

@@ -28,7 +28,7 @@ class Navigable(Protocol):
 
     async def fill_field(self, field: str, value: str) -> None: ...
 
-    async def click_role(self, role: str, name: str) -> None: ...
+    async def click_role(self, role: str, name: str, *, signs_in: bool = False) -> None: ...
 
 
 def _value(i: int, ref: str | None, creds: Credentials | None) -> str:
@@ -42,6 +42,11 @@ def _value(i: int, ref: str | None, creds: Credentials | None) -> str:
 
 
 async def run_steps(page: Navigable, steps: Sequence[NavStep], creds: Credentials | None) -> None:
+    """Never-rule 7: nothing here may write into the portal -- except signing in, which is a
+    POST. So the one click that follows a credential fill runs in the browser's write window
+    (one write, closed afterwards); every other step, a cookie-injected session's included, has
+    none. The window is spent by that click: a later 'Approve' gets no window."""
+    signing_in = False
     for i, step in enumerate(steps):
         match step.step:
             case "goto":
@@ -50,7 +55,9 @@ async def run_steps(page: Navigable, steps: Sequence[NavStep], creds: Credential
                 if step.field is None:
                     raise NavError(f"step {i}: fill needs a plain field name")
                 await page.fill_field(step.field, _value(i, step.value_from, creds))
+                signing_in = True
             case "click":
                 if step.role is None or step.name is None:
                     raise NavError(f"step {i}: click needs a role and an accessible name")
-                await page.click_role(step.role, step.name)
+                await page.click_role(step.role, step.name, signs_in=signing_in)
+                signing_in = False
