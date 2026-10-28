@@ -7,6 +7,8 @@ A stdlib `http.server` on 127.0.0.1:<random port> stands in for an authorised po
                 origin string* from the authorised ``http://127.0.0.1:<port>``, so it is off
                 scope. Nothing needs to answer there: the driver must never send the request.
 - ``/results``  a page embedding an off-origin ``<img src="http://localhost:<port>/x.png">``
+- ``/signin``   a form whose POST is answered 307 to ``/landed``; a 307 keeps the method, so
+                Chromium replays the POST there. ``Bench.posts`` records both
 - ``/framed``   a page embedding an off-origin ``<iframe src="http://localhost:<port>/widget">``
                 -- a sub-frame navigation, aborted and recorded, but not the run leaving scope
 
@@ -40,6 +42,7 @@ class Bench:
     base_url: str
     origin: str
     seen: list[tuple[str, str]] = field(default_factory=list)  # (Host header, path)
+    posts: list[str] = field(default_factory=list)  # path of every POST the server received
 
     @property
     def off_origin(self) -> str:
@@ -79,6 +82,13 @@ def _handler(bench: Bench) -> type[BaseHTTPRequestHandler]:
                     + f'<img src="{bench.off_origin}/x.png" alt="">'.encode()
                     + b"</body></html>",
                 )
+            elif self.path == "/signin":
+                self._send(
+                    200,
+                    b"<!doctype html><html><head><title>sign in</title></head><body>"
+                    b'<form method="post" action="/signin"><input name="u" value="x">'
+                    b'<button type="submit">Sign in</button></form></body></html>',
+                )
             elif self.path == "/framed":
                 self._send(
                     200,
@@ -89,6 +99,18 @@ def _handler(bench: Bench) -> type[BaseHTTPRequestHandler]:
                 )
             else:
                 self._send(404, b"not found", "text/plain")
+
+        def do_POST(self) -> None:
+            bench.posts.append(self.path)
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            if self.path == "/signin":
+                self.send_response(307)
+                self.send_header("Location", "/landed")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._send(200, b"<!doctype html><title>landed</title>")
 
     return Handler
 

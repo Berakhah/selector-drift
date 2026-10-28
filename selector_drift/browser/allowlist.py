@@ -26,11 +26,12 @@ but does not mark the run off-scope: the page the run is on is still the authori
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Final
 from urllib.parse import urlsplit
 
-from playwright.async_api import BrowserContext, ProxySettings, Request, Route
+from playwright.async_api import BrowserContext, CDPSession, Page, ProxySettings, Request, Route
 from playwright.async_api import Error as PlaywrightError
 
 from selector_drift.scope.origin import origin_of_url, parse_origin
@@ -193,9 +194,8 @@ async def install(
             await route.abort("blockedbyclient")
             return
         # The window lets one write through: the sign-in itself. Playwright routes only the first
-        # hop of a redirect chain, so a 307/308 from that POST is replayed at its Location before
-        # `_on_request` can do more than record it (and `route.fetch(max_redirects=0)` cannot
-        # carry the login: it goes through the dead egress proxy on Playwright's side).
+        # hop of a redirect chain, so a 307/308 replay of that POST is failed by `guard_redirects`
+        # (a CDP Fetch session), not here.
         ledger.writes_allowed = False
         ledger.requested_urls.append(request.url)
         await route.continue_()
@@ -206,8 +206,8 @@ async def install(
             return
         if origin_of(request.url) in allowed:
             if _is_write(request.method) and not ledger.writes_allowed:
-                # A 307/308 keeps the method. The hop cannot be aborted from here, only recorded
-                # so the run stops on its next operation.
+                # Backstop: `guard_redirects` fails a replayed write before it is sent. If that
+                # guard is not attached, the hop can only be recorded here, after the fact.
                 ledger.refuse_write(request.method, request.url)
             ledger.requested_urls.append(request.url)
         else:
@@ -215,3 +215,43 @@ async def install(
 
     context.on("request", _on_request)
     await context.route("**/*", _route)
+
+
+async def guard_redirects(context: BrowserContext, ledger: RequestLedger) -> None:
+    """Fail a redirect hop that would replay a write, before Chromium sends it.
+
+    A 307/308 keeps the method and body, so the portal's answer to the sign-in POST can make
+    Chromium send that POST again at the `Location`. Playwright's route handler never sees
+    the hop (see the module docstring) and the `request` listener only hears of it once it is
+    on the wire. A raw CDP `Fetch` session does see it, flagged by `redirectedRequestId`, and
+    can refuse it: never-rule 7 holds for the replay as it does for the first hop. A page the
+    run opens later (a popup) is guarded the same way. Call after `install`, before any page.
+    """
+
+    async def _decide(session: CDPSession, paused: dict[str, object]) -> None:
+        request = paused["request"]
+        assert isinstance(request, dict)
+        method, url = str(request["method"]), str(request["url"])
+        is_replay = paused.get("redirectedRequestId") is not None and _is_write(method)
+        try:
+            if is_replay:
+                ledger.refuse_write(method, url)
+                await session.send(
+                    "Fetch.failRequest",
+                    {"requestId": paused["requestId"], "errorReason": "BlockedByClient"},
+                )
+            else:
+                await session.send("Fetch.continueRequest", {"requestId": paused["requestId"]})
+        except PlaywrightError:
+            pass  # the page or its target closed while the request was paused
+
+    async def _guard(page: Page) -> None:
+        session = await context.new_cdp_session(page)
+        session.on("Fetch.requestPaused", lambda p: asyncio.ensure_future(_decide(session, p)))
+        await session.send(
+            "Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}
+        )
+
+    context.on("page", lambda page: asyncio.ensure_future(_guard(page)))
+    for page in context.pages:
+        await _guard(page)
