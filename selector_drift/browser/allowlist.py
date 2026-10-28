@@ -112,10 +112,11 @@ class RequestLedger:
     requested_urls: list[str] = field(default_factory=list)
     blocked_urls: list[str] = field(default_factory=list)
     off_scope_navigation: str | None = None
-    # Never-rule 7. `writes_allowed` is true only inside PageHandle.submitting_forms(), which
-    # navigate.run_steps opens around a sign-in click (logging in is a POST) and which lets ONE
-    # write through. Any other write is refused and recorded here as `METHOD scheme://host/path`;
-    # a refused write that is a document navigation (a form submit) also stops the run.
+    # Never-rule 7. `writes_allowed` is true only inside PageHandle.click_role(signs_in=True),
+    # which navigate.run_steps uses for the click after a credential fill (logging in is a
+    # POST) and which lets ONE write through: a main-frame POST. Any other write is refused
+    # and recorded here as `METHOD scheme://host/path`; a refused write that is a document
+    # navigation (a form submit) also stops the run.
     writes_allowed: bool = False
     blocked_writes: list[str] = field(default_factory=list)
     write_attempt: str | None = None
@@ -189,15 +190,17 @@ async def install(
 
     async def _route_write(route: Route, ledger: RequestLedger) -> None:
         request = route.request
-        if not ledger.writes_allowed:
-            ledger.refuse_write(
-                request.method, request.url, stops_run=is_main_frame_navigation(request)
-            )
+        navigation = is_main_frame_navigation(request)
+        # The window lets exactly one write through, and only the sign-in's own: a POST that is
+        # a main-frame navigation (the form submit). A script's fetch/XHR/beacon, a PUT or a
+        # DELETE inside the window is refused and does not spend it, so a heartbeat fired during
+        # the click cannot take the place of the sign-in.
+        if not (ledger.writes_allowed and request.method.upper() == "POST" and navigation):
+            ledger.refuse_write(request.method, request.url, stops_run=navigation)
             await route.abort("blockedbyclient")
             return
-        # The window lets one write through: the sign-in itself. Playwright routes only the first
-        # hop of a redirect chain, so a 307/308 replay of that POST is failed by `guard_redirects`
-        # (a CDP Fetch session), not here.
+        # Playwright routes only the first hop of a redirect chain, so a 307/308 replay of that
+        # POST is failed by `guard_redirects` (a CDP Fetch session), not here.
         ledger.writes_allowed = False
         ledger.requested_urls.append(request.url)
         await route.continue_()
