@@ -28,9 +28,8 @@ async def test_a_307_from_the_sign_in_post_is_never_replayed_at_the_portal(
     bench.posts.clear()
     async with driver.open(authorised_testbench) as session:
         await session.page.goto_step({"step": "goto", "path": "/signin"})
-        async with session.page.submitting_forms():
-            with contextlib.suppress(WriteBlocked):  # the run stops; the server is what we check
-                await session.page.click_role("button", "Sign in")
+        with contextlib.suppress(WriteBlocked):  # the run stops; the server is what we check
+            await session.page.click_role("button", "Sign in", signs_in=True)
     assert bench.posts == ["/signin"]  # the sign-in itself, and no replay at /landed
 
 
@@ -42,5 +41,4 @@ async def test_a_307_from_the_sign_in_post_stops_the_run(
     async with driver.open(authorised_testbench) as session:
         await session.page.goto_step({"step": "goto", "path": "/signin"})
         with pytest.raises(WriteBlocked, match="/landed"):
-            async with session.page.submitting_forms():
-                await session.page.click_role("button", "Sign in")
+            await session.page.click_role("button", "Sign in", signs_in=True)
