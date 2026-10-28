@@ -73,7 +73,11 @@ services:
       SD_CHROMIUM_NO_SANDBOX: "1"
       PREFECT_API_URL: http://prefect-server:4200/api
       PREFECT_HOME: /tmp/prefect                 # the rootfs is read-only
-      SD_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-selector_drift}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env -- see .env.example}@postgres:5432/${POSTGRES_DB:-selector_drift}
+      # Not the superuser: this process renders hostile HTML with --no-sandbox, and its
+      # environment is what a renderer compromise would read. sd_worker (alembic 0003) can read
+      # and append to audit_log and nothing else; migrations run as POSTGRES_USER, outside this
+      # container.
+      SD_DATABASE_URL: postgresql+psycopg://sd_worker:${SD_WORKER_PASSWORD:?set SD_WORKER_PASSWORD in .env -- see .env.example}@postgres:5432/${POSTGRES_DB:-selector_drift}
       SD_SPEC_DIR: /app/specs
       SD_SCOPE_DIR: /app/scopes
       SD_LAKE_ROOT: /data/lake
