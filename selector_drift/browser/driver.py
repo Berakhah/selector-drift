@@ -104,6 +104,11 @@ def _launch_args() -> list[str]:
     return args
 
 
+class FillFailed(RuntimeError):
+    """A `fill` step could not set a form control. Names the field and nothing else: the value
+    may be a credential, and Playwright's own message echoes it in its call log (never-rule 4)."""
+
+
 class PortalUnavailable(RuntimeError):
     """A navigation the portal answered with a server error (5xx). The run fails and is retried;
     nothing is resolved or extracted from an error page (Task 26A)."""
@@ -203,7 +208,14 @@ class PageHandle:
         if not _FIELD.fullmatch(field):
             raise ValueError("fill takes a plain form field name, never a selector")
         self._ledger.raise_if_off_scope()
-        await self._page.locator(f"[name='{field}']").fill(value)
+        try:
+            await self._page.locator(f"[name='{field}']").fill(value)
+        except PlaywrightError as exc:
+            # `from None`: the original, call log and all, must not ride along in a traceback.
+            raise FillFailed(
+                f"could not fill the field {field!r} ({type(exc).__name__}); "
+                "the value is deliberately not reported"
+            ) from None
 
     @asynccontextmanager
     async def submitting_forms(self) -> AsyncIterator[None]:
