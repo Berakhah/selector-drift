@@ -27,8 +27,10 @@ but does not mark the run off-scope: the page the run is on is still the authori
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Any, Final
 from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, CDPSession, Page, ProxySettings, Request, Route
@@ -217,41 +219,72 @@ async def install(
     await context.route("**/*", _route)
 
 
-async def guard_redirects(context: BrowserContext, ledger: RequestLedger) -> None:
+async def guard_redirects(
+    context: BrowserContext, ledger: RequestLedger
+) -> Callable[[Page], Awaitable[None]]:
     """Fail a redirect hop that would replay a write, before Chromium sends it.
 
     A 307/308 keeps the method and body, so the portal's answer to the sign-in POST can make
     Chromium send that POST again at the `Location`. Playwright's route handler never sees
     the hop (see the module docstring) and the `request` listener only hears of it once it is
     on the wire. A raw CDP `Fetch` session does see it, flagged by `redirectedRequestId`, and
-    can refuse it: never-rule 7 holds for the replay as it does for the first hop. A page the
-    run opens later (a popup) is guarded the same way. Call after `install`, before any page.
-    """
+    can refuse it: never-rule 7 holds for the replay as it does for the first hop.
 
-    async def _decide(session: CDPSession, paused: dict[str, object]) -> None:
-        request = paused["request"]
-        assert isinstance(request, dict)
-        method, url = str(request["method"]), str(request["url"])
-        is_replay = paused.get("redirectedRequestId") is not None and _is_write(method)
+    Returns `guard(page)`, which resolves once Fetch is enabled on that page. The driver awaits
+    it before the page's first navigation, so no request precedes the guard; a popup is guarded
+    by the context's 'page' event, once. Residual: the session is on the page target, so a
+    cross-origin iframe's own redirect chain is not seen -- a write there would need the sign-in
+    window, which only a main-frame click opens.
+
+    A request the guard cannot judge is failed, not continued and not left paused.
+    """
+    guarded: dict[Page, asyncio.Task[None]] = {}
+    pending: set[asyncio.Task[None]] = set()  # a task nothing references can be collected early
+
+    def _spawn(coro: Coroutine[object, object, None]) -> asyncio.Task[None]:
+        task = asyncio.ensure_future(coro)
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+        return task
+
+    async def _decide(session: CDPSession, paused: dict[str, Any]) -> None:
+        request_id = paused.get("requestId")
         try:
-            if is_replay:
+            request = paused["request"]
+            method, url = str(request["method"]), str(request["url"])
+            if paused.get("redirectedRequestId") is not None and _is_write(method):
                 ledger.refuse_write(method, url)
                 await session.send(
-                    "Fetch.failRequest",
-                    {"requestId": paused["requestId"], "errorReason": "BlockedByClient"},
+                    "Fetch.failRequest", {"requestId": request_id, "errorReason": "BlockedByClient"}
                 )
             else:
-                await session.send("Fetch.continueRequest", {"requestId": paused["requestId"]})
+                await session.send("Fetch.continueRequest", {"requestId": request_id})
         except PlaywrightError:
             pass  # the page or its target closed while the request was paused
+        except Exception:
+            # Fail closed: a request we cannot judge is neither sent nor left paused.
+            with contextlib.suppress(PlaywrightError):
+                await session.send(
+                    "Fetch.failRequest", {"requestId": request_id, "errorReason": "BlockedByClient"}
+                )
 
-    async def _guard(page: Page) -> None:
+    async def _attach(page: Page) -> None:
         session = await context.new_cdp_session(page)
-        session.on("Fetch.requestPaused", lambda p: asyncio.ensure_future(_decide(session, p)))
+        session.on("Fetch.requestPaused", lambda p: _spawn(_decide(session, p)))
         await session.send(
             "Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}
         )
 
-    context.on("page", lambda page: asyncio.ensure_future(_guard(page)))
+    def guard(page: Page) -> Awaitable[None]:
+        if page not in guarded:
+            guarded[page] = asyncio.ensure_future(_attach(page))
+        return guarded[page]
+
+    context.on("page", lambda page: _spawn(_as_coro(guard(page))))
     for page in context.pages:
-        await _guard(page)
+        await guard(page)
+    return guard
+
+
+async def _as_coro(awaitable: Awaitable[None]) -> None:
+    await awaitable

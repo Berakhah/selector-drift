@@ -20,6 +20,7 @@ bench".
 from __future__ import annotations
 
 import ast
+import asyncio
 import datetime as dt
 from pathlib import Path
 from types import SimpleNamespace
@@ -282,3 +283,60 @@ def test_only_the_navigate_steps_open_the_window() -> None:
         and p.name != "driver.py"
     )
     assert callers == ["browser/navigate.py"]
+
+
+class _CdpSession:
+    """Just enough of a Playwright CDPSession: records what the guard sends."""
+
+    def __init__(self) -> None:
+        self.handlers: dict[str, Any] = {}
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+
+    def on(self, event: str, handler: Any) -> None:
+        self.handlers[event] = handler
+
+    async def send(self, method: str, params: dict[str, Any] | None = None) -> None:
+        self.sent.append((method, params or {}))
+
+
+class _GuardedContext:
+    def __init__(self) -> None:
+        self.pages: list[Any] = []
+        self.sessions: list[_CdpSession] = []
+
+    def on(self, event: str, handler: Any) -> None:
+        pass
+
+    async def new_cdp_session(self, page: Any) -> _CdpSession:
+        self.sessions.append(_CdpSession())
+        return self.sessions[-1]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_paused_request_the_guard_cannot_judge_is_failed_not_left_hanging() -> None:
+    """If deciding raises, the request must not stay paused for ever (the page would hang until
+    the run times out) and must not be waved through: it is failed, closed."""
+    context = _GuardedContext()
+    guard = await allowlist.guard_redirects(context, RequestLedger())  # type: ignore[arg-type]
+    await guard(object())  # type: ignore[arg-type]
+    session = context.sessions[0]
+    session.handlers["Fetch.requestPaused"]({"requestId": "r1"})  # no "request": cannot judge
+    await asyncio.sleep(0.05)
+    assert ("Fetch.failRequest", {"requestId": "r1", "errorReason": "BlockedByClient"}) in (
+        session.sent
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_the_guard_is_active_once_awaited_and_attaches_once_per_page() -> None:
+    """The driver awaits the guard before the page's first navigation, so Fetch is enabled
+    before any request exists; the 'page' event for the same page must not attach a second."""
+    context = _GuardedContext()
+    guard = await allowlist.guard_redirects(context, RequestLedger())  # type: ignore[arg-type]
+    page = object()
+    await guard(page)  # type: ignore[arg-type]
+    await guard(page)  # type: ignore[arg-type]
+    assert len(context.sessions) == 1
+    assert [m for m, _ in context.sessions[0].sent] == ["Fetch.enable"]

@@ -309,10 +309,11 @@ async def open(
             )
             try:
                 await allowlist.install(context, target, ledger)
-                await allowlist.guard_redirects(context, ledger)
+                guard = await allowlist.guard_redirects(context, ledger)
                 if credentials is not None and credentials.cookies:
                     await context.add_cookies(_playwright_cookies(credentials.cookies))
                 page = await context.new_page()
+                await guard(page)  # Fetch is on before the page's first request
                 handle = PageHandle(page, target, base, ledger)
                 await asyncio.to_thread(ratelimit.acquire, target)
                 await _navigate(page, base, ledger)
