@@ -99,7 +99,9 @@ from selector_drift.heallog.capture import (
 )
 from selector_drift.heallog.scrub import credential_controls, parse, scrub_dom_counted
 from selector_drift.resolve.cascade import parse_run_key
+from selector_drift.scope.errors import ScopeRefusal
 from selector_drift.scope.record import Basis
+from selector_drift.spec.loader import load_scope, scope_file
 
 _TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")  # scope.record.TARGET_SLUG
 _FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
@@ -842,15 +844,34 @@ def promote_heal_bundle_to_last_accepted(heal_id: int, target: str, plane: Plane
     return final
 
 
+def _scope_file_basis(target: str) -> str | None:
+    """The basis the repo's scope YAML for `target` states, or None when there is no readable,
+    valid file. A file the database cannot change: the mirror's counterpart for the decision
+    below."""
+    try:
+        return load_scope(scope_file(f"{target}.yaml")).basis.value
+    except ScopeRefusal:
+        return None
+
+
+def _sensitivity_for(mirror_basis: str | None, file_basis: str | None) -> Sensitivity:
+    """SYNTHETIC only when both the mirror row and the scope file say `self-owned`; anything
+    else -- a disagreement, a missing row, an unreadable file -- is CLIENT_CONFIDENTIAL. The
+    worker writes the mirror every run, so on its own the mirror could be made to relabel a
+    client's evidence (and drop its retention cutoff)."""
+    both_self_owned = mirror_basis == Basis.SELF_OWNED and file_basis == Basis.SELF_OWNED
+    return Sensitivity.SYNTHETIC if both_self_owned else Sensitivity.CLIENT_CONFIDENTIAL
+
+
 def _stored_sensitivity(target: str) -> Sensitivity:
     """The label re-attached when stored files are re-written: derived from the scope record's
-    basis exactly as ScopeRecord.sensitivity derives it (R4), fail-closed to
-    CLIENT_CONFIDENTIAL when there is no record."""
+    basis as ScopeRecord.sensitivity derives it (R4), checked against the scope file as well as
+    the database mirror, and fail-closed to CLIENT_CONFIDENTIAL."""
     with Session() as s:
         basis = s.scalars(
             select(ScopeRecordRow.basis).where(ScopeRecordRow.target == target).limit(1)
         ).first()
-    return Sensitivity.SYNTHETIC if basis == Basis.SELF_OWNED else Sensitivity.CLIENT_CONFIDENTIAL
+    return _sensitivity_for(basis, _scope_file_basis(target))
 
 
 def store(evidence: Evidence, plane: Plane, *, target: str, heal_id: int | None = None) -> str:
