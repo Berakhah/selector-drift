@@ -70,8 +70,11 @@ control (closes audit H3):
 | Session | 32 random bytes, sent as cookie `sd_session`, `HttpOnly; Secure; SameSite=Strict; Path=/`. **Stored as its SHA-256** in `sessions`, so a database read does not yield a usable cookie. Absolute lifetime 12 h, no sliding renewal |
 | CSRF | `SameSite=Strict` plus an `Origin` check on every non-GET: the header must equal the configured web origin, else `403` |
 | Brute force | 5 failed logins per username per 15 min → `429` with `Retry-After`. Failures are counted in the audit log, not in memory, so a restart does not reset the count |
+| Verify cap | At most `VERIFY_CAP=4` argon2 verifies run concurrently per process. A login that cannot take a slot is refused `429` `busy` with `Retry-After: 1`, before any verify. A refused attempt is not a guess and does not count toward the 5 |
+| Unknown username | A failure for a username with no `operators` row writes **no** `audit_log` row (unauthenticated input must not grow the table the 90-day log publishes from). Unknown names are throttled **in memory** instead, with the same 5 failures per 15 minutes and the same `429` and `Retry-After` as a real username, so the response never reveals whether a name exists. The table is per process, bounded (10 000 keys, oldest evicted), keyed by an HMAC-SHA256 of the name under a per-process random key, so no typed name is stored or logged; a restart resets it. **Deploy a single API worker:** with N workers an unknown name tolerates about 5*N failures before its `429`, and after a restart or an eviction flood it answers `401` again, while a real name stays throttled in the DB; either reopens a username-existence oracle. Moving the table to shared state is required before multi-worker. It also increments `unknown_user_failures()` and emits a warning log without the username. Below the limit the response is the same `401` as a wrong password |
+| Unlock | `python -m selector_drift unlock-operator <username>` writes an audited `login_unlock` row. The throttle counts only failures after the latest `login_unlock` (a future-dated one, from clock skew, is ignored); the earlier failure rows stay as history, none are deleted |
 | Actor | Always `current_operator.username` from `Depends(current_operator)`. **No request model declares an `actor` field**, and every request model sets `extra="forbid"`, so a body carrying `actor` gets `422`. An audit trail whose actor is supplied by the party being audited is not an audit trail |
-| Audit | login success, login failure, logout, promote, discard → `audit_log` rows |
+| Audit | login success, login failure (known username), login unlock, logout, promote, discard → `audit_log` rows |
 
 **Two tables join the day-one schema (plan Task 3).** `operators(id, username UNIQUE, password_hash,
 created_at, disabled_at)` and `sessions(token_sha256 PK, operator_id FK, created_at, expires_at,
@@ -525,3 +528,33 @@ Added:
 - `test_stats_and_the_published_log_agree` — `derive.stats()` vs `heallog.publish` on the same fixture
 - `test_api_imports_nothing_that_can_start_a_run` — the `api-is-read-side` contract
 - `test_generated_types_are_current` — the CI drift check, runnable locally
+
+---
+
+## 10. Addendum 2026-10-19 — pre-flight against the code as built
+
+Written before Task 34 starts, after Tasks 1–33 and 26A–C landed. The rest of this document stands.
+
+1. **`StatsView` gains `false_accepts: int | None`** (amends §4.3). A wrong heal the gate let
+   through is the figure the published log most needs, and the bench scorer already records it:
+   `audit_log` rows with `actor="testbench.score"`, `action="scored"`, `detail.judgement ==
+   "false_accept"`. `derive.py` counts them by actor and date window, exactly as it counts
+   `quarantines_refused_correctly` (`judgement == "correct_refusal"`), and never parses `subject`.
+   `None` for targets without an answer key. It is published beside `quarantines_refused_correctly`
+   from day one; the answer key still never enters `selector_drift/`.
+2. **Dependencies (Task 34 step 1).** `argon2-cffi` is added. `uvicorn` moves from the `testbench`
+   dependency group into the main dependencies, because `serve-api` is a product entrypoint.
+3. **Test environment.** `tests/api` truncates `operators`, `sessions` and `audit_log`, so it needs
+   the Postgres the other DB tests use. The main checkout has no `.venv`; commands run as
+   `python -m uv run --frozen …` where `uv` is not on PATH. Bringing Postgres up is a prerequisite
+   step of the Task 34 plan, not an assumption.
+4. **Unchanged from §6.2.** The vendored bok-core has no `QuerySource`, so `StatsView` stays plain
+   numbers with `method_url`; the proposal remains a document (Task 34B).
+5. **`api-is-read-side` as built.** The contract forbids only `resolve.cascade`, `resolve.rungs`,
+   `resolve.cache`, `land.writer`, `land.compact`, `heallog.replay`, `heallog.retention`,
+   `browser`, `orchestrate` and `credentials`. The API reaches `resolve.page` and the aria types
+   only through the type modules (`resolve.trace`, `heallog.capture`), which are pure lxml. Section
+   2's prose "the rest of `resolve/`, `land/`" is read as the contract states it.
+6. **`create_app` gains `actions`.** In Task 34C `create_app` takes a keyword-only
+   `actions: QuarantineActions`, REQUIRED: tests pass a fake, and there is never a silent no-op
+   default that would let promote/discard appear to succeed.
