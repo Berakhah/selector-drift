@@ -1,4 +1,6 @@
+import os
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -270,12 +272,23 @@ def test_replay_writes_no_resolutions_row(captured_heal: CapturedHeal) -> None:
 
 @pytest.mark.unit
 def test_heallog_cannot_import_browser() -> None:
+    # Same pattern as tests/test_import_contracts.py: call the entry-point function with this
+    # interpreter, so the test needs neither `uv` nor the venv's Scripts/ directory on PATH. The
+    # contract must be NAMED in the output, so an unknown or absent contract cannot pass vacuously.
+    code = (
+        "from importlinter.cli import lint_imports_command; "
+        "lint_imports_command(['--contract', 'heallog-cannot-refetch'])"
+    )
     r = subprocess.run(
-        ["uv", "run", "lint-imports", "--contract", "heallog-cannot-refetch"],
+        [sys.executable, "-c", code],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        cwd=Path(__file__).resolve().parents[2],
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     assert r.returncode == 0, r.stdout + r.stderr
+    assert "Replay uses stored evidence, never a live page KEPT" in r.stdout, r.stdout
+    assert "1 kept, 0 broken" in r.stdout, r.stdout
 
 
 # -- fix round 1, R1: a live heal's node id is a data-sd-node token, replay's is an lxml path --
