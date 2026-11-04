@@ -1,6 +1,6 @@
 # Selector Drift — API contract and evidence bundle
 
-**Status:** approved in brainstorming 2026-09-26 · **Parent:** [design](2024-11-07-selector-drift-design.md) §3.3
+**Status:** approved in brainstorming 2026-09-26 · **Parent:** [design](2026-08-29-selector-drift-design.md) §3.3
 **Plan tasks:** 2 (`evidence_retention_days`), 3 (`operators`, `sessions`, `heartbeats`), 6, 19, 26A, 33 (evidence bundle), 34, 34B (`derive.py`), 40A
 **Siblings:** [web UI](2026-09-26-selector-drift-web-ui.md) · [test bench](2026-09-26-selector-drift-testbench-portal.md) · [`bok-ui` slice](2026-09-26-selector-drift-bok-ui-slice.md)
 

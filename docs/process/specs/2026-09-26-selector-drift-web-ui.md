@@ -1,6 +1,6 @@
 # Selector Drift — web UI
 
-**Status:** approved in brainstorming 2026-09-26 · **Parent:** [design](2024-11-07-selector-drift-design.md) §10
+**Status:** approved in brainstorming 2026-09-26 · **Parent:** [design](2026-08-29-selector-drift-design.md) §10
 **Plan tasks:** 35, 36, 37, 38, 39, 39A (rewritten) · **Consumes:** [API contract](2026-09-26-selector-drift-api-contract.md), [`bok-ui` slice](2026-09-26-selector-drift-bok-ui-slice.md)
 **Sibling:** [test bench](2026-09-26-selector-drift-testbench-portal.md)
 

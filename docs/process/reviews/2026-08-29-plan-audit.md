@@ -1,7 +1,7 @@
 # Selector Drift — spec and plan audit
 
 **Date:** 2026-08-29 · **Auditor:** fresh session, no prior context
-**Subjects:** `docs/superpowers/specs/2024-11-07-selector-drift-design.md` (452 ln), `docs/superpowers/plans/2024-11-07-selector-drift.md` (2730 ln, 41 tasks)
+**Subjects:** `docs/process/specs/2026-08-29-selector-drift-design.md` (452 ln), `docs/process/plans/2026-08-29-selector-drift.md` (2730 ln, 41 tasks)
 **Checked against:** `Starting_Documents/00-SHARED-FOUNDATION.md`, `Starting_Documents/03-SELECTOR-DRIFT.md`, `../backoffice-kit/docs/INTERFACE-CONTRACT.md` v0.1
 
 ---

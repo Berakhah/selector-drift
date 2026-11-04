@@ -1,6 +1,6 @@
 # Selector Drift — the minimal `bok-ui` slice
 
-**Status:** approved in brainstorming 2026-09-26 · **Parent:** [design](2024-11-07-selector-drift-design.md) §3.3
+**Status:** approved in brainstorming 2026-09-26 · **Parent:** [design](2026-08-29-selector-drift-design.md) §3.3
 **Plan task:** new 34A (before Task 35) · **Built in:** `../backoffice-kit`, not in this repo
 **Siblings:** [API contract](2026-09-26-selector-drift-api-contract.md) · [web UI](2026-09-26-selector-drift-web-ui.md) · [test bench](2026-09-26-selector-drift-testbench-portal.md)
 
