@@ -104,18 +104,26 @@ redacted form.
 - Re-running the 60-day campaign table in `docs/methodology.md`.
 - A product-side database connect timeout (a separate decision).
 
-## 6a. Known blocker: no container image of this product builds from the repo today
+## 6a. Resolved: P-1 vendored wheel
 
-`pyproject.toml` pins `bok-core` as an absolute host-path editable dependency (the documented
-TEMPORARY workaround, P-1, `pyproject.toml:7-21`; `uv.lock` records the same path). `uv sync`
-therefore cannot run inside any image, and the product's own `./Dockerfile` (the worker) hits it
-exactly as `docker/Dockerfile.bench-scorer` does. This design does not change that. The scorer
-image was verified in a scratch build outside the repo with `bok-core` vendored and `--frozen`
-dropped (all 121 resolved packages matched `uv.lock`): imports resolve, uid is 10001, there are no
-browser binaries, the deployment entrypoint inside the image is
-`testbench/score.py:score_pending_flow`, and it loads under `--read-only --cap-drop ALL
---security-opt no-new-privileges`. Resolving P-1 (a PyPI release, a merged branch, or a vendored
-wheel) unblocks both images.
+`bok-core` is now a pre-built wheel vendored at `vendor/bok_core-0.0.1-py3-none-any.whl`, built
+from backoffice-kit branch `bok-core-minimal` at commit `3a4044d`, and referenced by a
+repo-relative path in `pyproject.toml` and `uv.lock`. This replaces the absolute host-path
+editable dependency. Both Dockerfiles run `COPY vendor ./vendor` before the first `uv sync`. On
+2026-10-19 the worker image (`./Dockerfile`) and `docker/Dockerfile.bench-scorer` were both built
+from the repo with `uv sync --frozen`; in each, `bok_core` loaded from
+`/opt/venv/lib/python3.12/site-packages/` and the uid was 10001. The earlier scratch-build
+evidence (`bok-core` vendored outside the repo, `--frozen` dropped) is superseded.
+
+Unit tests and `mypy` now run against the wheel too. `pyproject.toml` and `uv.lock` no longer
+point at an editable checkout, so a venv built with `uv sync --frozen` installs `bok-core` from
+`vendor/`. Observed 2026-10-20 in the Task 34 worktree venv: `bok_core` imports from
+`.venv/Lib/site-packages/` and its `direct_url.json` names the vendored wheel (non-editable).
+The earlier statement here, that tests ran against an editable install in a shared venv with
+source "byte-identical to the wheel's apart from line endings", described a venv outside the
+repo and is withdrawn: it was never checked by anything in the repo. A stale pre-P-1 venv can
+still carry an editable install; rebuild it with `uv sync --frozen` before trusting its results.
+
 
 ## 7. Operational note
 
