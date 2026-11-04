@@ -9,3 +9,6 @@ node_modules/
 .coverage
 htmlcov/
 *.egg-info/
+
+# Private project briefs (kept outside the public repo)
+Starting_Documents/
