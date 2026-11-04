@@ -301,7 +301,7 @@ def test_fail_post_auth_then_fail_pre_auth_alerts_exactly_twice(
     ever reaches its own alert branch again. `alert_on_flow_failure` (on_failure) must still
     alert for attempt 2, because the value it must compare against is the run_count of the
     attempt that actually failed last, not a flag that merely remembers some earlier attempt
-    alerted. On e218ab0, `_ALERTED_IN_FLOW` is a bare bool that stays True across the retry, so
+    alerted. On bd7d782, `_ALERTED_IN_FLOW` is a bare bool that stays True across the retry, so
     the hook wrongly skips attempt 2's alert -- this must go red there."""
     calls: list[AlertCall] = []
     monkeypatch.setattr(
