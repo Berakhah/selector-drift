@@ -225,12 +225,15 @@ wheels = [
 [[package]]
 name = "bok-core"
 version = "0.0.1"
-source = { editable = "D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-core-minimal" }
+source = { path = "vendor/bok_core-0.0.1-py3-none-any.whl" }
 dependencies = [
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "structlog" },
+]
+wheels = [
+    { filename = "bok_core-0.0.1-py3-none-any.whl", hash = "sha256:f3fca74c90f92d1001a2249b4205e1237bb14740cf69bad2f3743043ef637ddf" },
 ]
 
 [package.metadata]
@@ -239,18 +242,6 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "structlog", specifier = ">=24.1" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "hypothesis", specifier = ">=6.100" },
-    { name = "jsonschema", specifier = ">=4.22" },
-    { name = "mypy", specifier = ">=1.10" },
-    { name = "pip-audit", specifier = ">=2.7" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "pytest-cov", specifier = ">=5" },
-    { name = "ruff", specifier = ">=0.5" },
-    { name = "types-pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]
@@ -1907,8 +1898,8 @@ name = "pendulum"
 version = "3.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "python-dateutil" },
-    { name = "tzdata" },
+    { name = "python-dateutil", marker = "python_full_version < '3.13'" },
+    { name = "tzdata", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cb/72/9a51afa0a822b09e286c4cb827ed7b00bc818dac7bd11a5f161e493a217d/pendulum-3.2.0.tar.gz", hash = "sha256:e80feda2d10fa3ff8b1526715f7d33dcb7e08494b3088f2c8a3ac92d4a4331ce", size = 86912, upload-time = "2026-01-30T11:22:24.093Z" }
 wheels = [
@@ -3014,7 +3005,7 @@ testbench = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.19.1" },
-    { name = "bok-core", editable = "D:/Project/Portifolio Projects/Upwork_Projects/backoffice-kit/.worktrees/bok-core-minimal" },
+    { name = "bok-core", path = "vendor/bok_core-0.0.1-py3-none-any.whl" },
     { name = "croniter", specifier = ">=6.2.4" },
     { name = "cryptography", specifier = ">=50.0.1" },
     { name = "cssselect", specifier = ">=1.5.0" },
@@ -3398,8 +3389,8 @@ name = "whenever"
 version = "0.10.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "tzdata", marker = "sys_platform == 'win32'" },
-    { name = "tzlocal", marker = "sys_platform != 'darwin' and sys_platform != 'linux'" },
+    { name = "tzdata", marker = "python_full_version >= '3.13' and sys_platform == 'win32'" },
+    { name = "tzlocal", marker = "python_full_version >= '3.13' and sys_platform != 'darwin' and sys_platform != 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d2/09/9ec61cfa69047a75af61e8db53e7782ed5b3995bc8a08132b951202c8aaf/whenever-0.10.5.tar.gz", hash = "sha256:bc8fd6208d50be50e490a3628fa6346d006b02df5de64c43170df8a809ded8d4", size = 437531, upload-time = "2026-08-07T15:03:30.933Z" }
 wheels = [
