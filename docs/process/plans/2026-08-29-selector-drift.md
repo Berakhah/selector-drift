@@ -8,8 +8,8 @@
 
 **Tech Stack:** Python 3.12+, `uv`, `ruff`, `mypy --strict`, `import-linter`, Pydantic v2, Playwright (containerised, pinned), Prefect 3, Postgres + Alembic, Parquet + DuckDB, FastAPI, Next.js 15 + `bok-ui` (minimal slice, absolute `file:` path until published), `bok-core` (minimal slice, absolute editable path until published), test bench on FastAPI + Jinja2 + `lxml`, pytest + hypothesis, axe-core.
 
-**Spec:** [`docs/superpowers/specs/2024-11-07-selector-drift-design.md`](../specs/2024-11-07-selector-drift-design.md), plus four sub-specs added 2026-09-26 that the rewritten tasks implement: [API contract and evidence bundle](../specs/2026-09-26-selector-drift-api-contract.md) · [web UI](../specs/2026-09-26-selector-drift-web-ui.md) · [test-bench portal](../specs/2026-09-26-selector-drift-testbench-portal.md) · [`bok-ui` slice](../specs/2026-09-26-selector-drift-bok-ui-slice.md). Executors read the design and the sub-spec named in their task.
-**Audit:** [`docs/superpowers/reviews/2026-08-29-plan-audit.md`](../reviews/2026-08-29-plan-audit.md) — 63 findings; revisions R1–R17 are applied below and each carries its finding id. The 2026-09-26 revision is logged at the end.
+**Spec:** [`docs/process/specs/2026-08-29-selector-drift-design.md`](../specs/2026-08-29-selector-drift-design.md), plus four sub-specs added 2026-09-26 that the rewritten tasks implement: [API contract and evidence bundle](../specs/2026-09-26-selector-drift-api-contract.md) · [web UI](../specs/2026-09-26-selector-drift-web-ui.md) · [test-bench portal](../specs/2026-09-26-selector-drift-testbench-portal.md) · [`bok-ui` slice](../specs/2026-09-26-selector-drift-bok-ui-slice.md). Executors read the design and the sub-spec named in their task.
+**Audit:** [`docs/process/reviews/2026-08-29-plan-audit.md`](../reviews/2026-08-29-plan-audit.md) — 63 findings; revisions R1–R17 are applied below and each carries its finding id. The 2026-09-26 revision is logged at the end.
 
 ## Week numbering
 
@@ -37717,7 +37717,7 @@ gh repo edit --visibility public --accept-visibility-change-consequences  # firs
 
 ## Revision log
 
-Applied 2026-08-29 from [`docs/superpowers/reviews/2026-08-29-plan-audit.md`](../reviews/2026-08-29-plan-audit.md).
+Applied 2026-08-29 from [`docs/process/reviews/2026-08-29-plan-audit.md`](../reviews/2026-08-29-plan-audit.md).
 Each edit carries its finding id inline, so the reasoning is readable at the point of change rather
 than only in the audit.
 

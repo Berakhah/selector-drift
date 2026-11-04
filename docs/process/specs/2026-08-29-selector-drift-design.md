@@ -1,6 +1,6 @@
 # Selector Drift — Design
 
-**Status:** approved 2024-11-07 · **amended 2026-08-29** ([audit](../reviews/2026-08-29-plan-audit.md)) · **sub-specs added 2026-09-26** (§3.3) · **Phase:** build weeks 1–8 · **Capacity:** 35–40 h/week (~300 h)
+**Status:** approved 2026-08-29 · **amended 2026-08-29** ([audit](../reviews/2026-08-29-plan-audit.md)) · **sub-specs added 2026-09-26** (§3.3) · **Phase:** build weeks 1–8 · **Capacity:** 35–40 h/week (~300 h)
 **Depends on:** `../Starting_Documents/00-SHARED-FOUNDATION.md`, `../Starting_Documents/03-SELECTOR-DRIFT.md`
 **Licence:** Apache-2.0 · **Repo visibility:** public at first release (build week 8) · **Accent:** drift indigo `oklch(0.55 0.14 268)`
 

@@ -1,6 +1,6 @@
 # Selector Drift — the test-bench portal
 
-**Status:** approved in brainstorming 2026-09-26 · **Parent:** [design](2024-11-07-selector-drift-design.md) §7
+**Status:** approved in brainstorming 2026-09-26 · **Parent:** [design](2026-08-29-selector-drift-design.md) §7
 **Plan tasks:** 7, 8, 12 (rewritten); 9–11A (unchanged engine, one data amendment)
 **Siblings:** [API contract](2026-09-26-selector-drift-api-contract.md) · [web UI](2026-09-26-selector-drift-web-ui.md) · [`bok-ui` slice](2026-09-26-selector-drift-bok-ui-slice.md)
 

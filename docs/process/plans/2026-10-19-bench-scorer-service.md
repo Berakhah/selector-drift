@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12, uv, Prefect 3 `serve()`, SQLAlchemy 2 + psycopg 3, alembic, Postgres 16, Docker Compose, pytest, import-linter.
 
-**Spec:** `docs/superpowers/specs/2026-10-19-bench-scorer-service-design.md`
+**Spec:** `docs/process/specs/2026-10-19-bench-scorer-service-design.md`
 
 ## Global Constraints
 
