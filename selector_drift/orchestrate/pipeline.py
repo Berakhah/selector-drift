@@ -256,7 +256,7 @@ async def run_once(
     contexts: dict[str, HealContext] = {}
     escalated: list[Verdict] = []
     async with driver.open(target, creds) as session:
-        await run_steps(session.page, spec.navigate, creds)
+        await run_steps(session.page, spec.navigate, creds)  # opens the sign-in write window
         page = await LivePageSource.snapshot(session.page)
         live = LiveCapture.of(session.page, page.dom())
         evidence = await capture(
