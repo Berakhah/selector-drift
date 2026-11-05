@@ -12,12 +12,12 @@ When a portal's UI changes, Selector Drift re-finds each field and then has to p
 flowchart TD
     A[Task spec and target] --> B{Scope record valid?}
     B -- "unknown or expired" --> X[Refuse the run]
-    B -- yes --> C[1. Cached selector]
+    B -- yes --> C[Rung 1: Cached selector]
     C -- "still valid" --> G
-    C -- broken --> D[2. Accessibility tree]
-    D -- miss --> E[3. Text anchors]
-    E -- miss --> F[4. Structural heuristics]
-    F -- miss --> R[5. Escalate to a person]
+    C -- broken --> D[Rung 2: Accessibility tree]
+    D -- miss --> E[Rung 3: Text anchors]
+    E -- miss --> F[Rung 4: Structural heuristics]
+    F -- miss --> R[Rung 5: Escalate to a person]
     D -- found --> G{Validation gate}
     E -- found --> G
     F -- found --> G
