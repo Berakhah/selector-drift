@@ -105,7 +105,7 @@ selector_drift/
   orchestrate/  the Prefect pipeline and rung statistics
   heallog/      evidence store, redaction, replay
 testbench/      mutating portal, mutation engine, answer-key scorer
-tests/          1,434 test functions (counted 2026-11-05)
+tests/          1,434 Python test functions (counted 2026-11-05)
 ```
 
 Built with Python 3.12, Playwright, Pydantic, PostgreSQL, Alembic, Prefect, Parquet, DuckDB and Docker Compose.
