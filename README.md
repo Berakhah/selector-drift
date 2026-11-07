@@ -6,6 +6,10 @@ When a portal's UI changes, Selector Drift re-finds each field and then has to p
 
 **Status: in development.** The pipeline, validation gate, evidence store and test bench exist. The web UI and HTTP API don't, and a fresh clone won't install yet ([details](#status-and-known-limitations)).
 
+## How this was built
+
+I designed it, wrote the specifications and evaluation criteria, directed the implementation, and reviewed and tested the changes. Claude Code generated a substantial part of the code under my direction. Counted on 7 Nov 2026: 152 of 157 commits were made through my second account, [@Berakhah-sys](https://github.com/Berakhah-sys), and 155 carry a `Co-Authored-By: Claude` trailer. The suite has 1,434 test functions by static count; a fresh clone doesn't install yet because it needs a private dependency. The first commit originally carried a wrong date; its spec files were named 2024-11-07, but the commit is co-authored by Claude Opus 5, which didn't exist then. On 4 Nov 2026 I re-dated it to one hour before the second commit (29 Aug 2026); the follow-up commit says so.
+
 ## How a run works
 
 ```mermaid
