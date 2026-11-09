@@ -38,8 +38,8 @@ class Recorder:
     async def fill_field(self, field: str, value: str) -> None:
         self.calls.append(("fill", field, value))
 
-    async def click_role(self, role: str, name: str) -> None:
-        self.calls.append(("click", role, name))
+    async def click_role(self, role: str, name: str, *, signs_in: bool = False) -> None:
+        self.calls.append(("click", role, name, "signs_in") if signs_in else ("click", role, name))
 
 
 @pytest.mark.unit
@@ -51,9 +51,38 @@ async def test_steps_run_in_order_through_the_page_handle() -> None:
         ("goto", "/login"),
         ("fill", "username", "demo"),
         ("fill", "password", "not-a-real-password"),
-        ("click", "button", "Sign in"),
+        ("click", "button", "Sign in", "signs_in"),
         ("goto", "/results"),
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_the_write_window_opens_around_the_sign_in_click_and_nothing_else() -> None:
+    """Never-rule 7: logging in is a POST, so the click that follows the credential fills may
+    write. A later click -- 'Approve', say -- is outside the window."""
+    steps = [*STEPS, NavStep(step="click", role="button", name="Approve")]
+    page = Recorder()
+    await run_steps(page, steps, DEMO)  # type: ignore[arg-type]
+    clicks = [c for c in page.calls if c[0] == "click"]
+    assert clicks == [
+        ("click", "button", "Sign in", "signs_in"),
+        ("click", "button", "Approve"),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_click_nothing_was_filled_for_never_gets_the_window() -> None:
+    """A cookie-injected session has no sign-in form, so its spec has no credential fill and no
+    click of its own may write."""
+    steps = [
+        NavStep(step="goto", path="/results"),
+        NavStep(step="click", role="button", name="Delete"),
+    ]
+    page = Recorder()
+    await run_steps(page, steps, None)  # type: ignore[arg-type]
+    assert page.calls[-1] == ("click", "button", "Delete")  # no `signs_in`
 
 
 @pytest.mark.unit
