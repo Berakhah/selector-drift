@@ -1,0 +1,57 @@
+name: release
+
+# Runs only when a version tag is pushed. It refuses to publish unless the tagged commit already
+# has a green run of the test workflow, then creates the GitHub Release with the matching
+# CHANGELOG.md section as its notes. Write permission is granted here and nowhere else.
+#
+# To cut a release: merge to main through a green PR, then
+#   git tag -a v0.1.0 -m "v0.1.0" <merge-commit> && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write  # create the release
+  actions: read    # look up the test workflow's result for the tagged commit
+
+env:
+  TEST_WORKFLOW: tests.yml
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Tests passed on this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          n="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$TEST_WORKFLOW" \
+                --commit "$GITHUB_SHA" --status success --json databaseId --jq 'length')"
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::No successful $TEST_WORKFLOW run for $GITHUB_SHA. Tag a commit that merged through a green PR."
+            exit 1
+          fi
+
+      - name: Notes from CHANGELOG.md
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section. Add it before tagging."
+            exit 1
+          fi
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file notes.md --verify-tag
