@@ -4,6 +4,8 @@ Self-healing data extraction for business portals with no API.
 
 When a portal's UI changes, Selector Drift re-finds each field and then has to prove the new match is right before any data is written. If it can't, the run is held for a person to review. A selector that breaks throws an error, but one that heals onto the wrong column returns plausible, wrong numbers for weeks, so the validation gate is the centre of the design.
 
+![Two renders of the test bench's claims table. Left: the unmutated page, which the gate writes. Right: the same page with a 'Previous Amount' decoy column inserted before Amount; rung 2 finds the real Amount column again, and the gate writes the run when it has history and quarantines it on a first run](docs/assets/hero.png)
+
 [![tests](https://github.com/Berakhah/selector-drift/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Berakhah/selector-drift/actions/workflows/tests.yml) [![release](https://img.shields.io/github/v/release/Berakhah/selector-drift)](https://github.com/Berakhah/selector-drift/releases) [![license](https://img.shields.io/github/license/Berakhah/selector-drift)](LICENSE)
 
 ## Quickstart
