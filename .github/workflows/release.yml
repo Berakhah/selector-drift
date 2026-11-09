@@ -1,20 +1,28 @@
 name: release
 
-# Runs only when a version tag is pushed. It refuses to publish unless the tagged commit already
-# has a green run of the test workflow, then creates the GitHub Release with the matching
-# CHANGELOG.md section as its notes. Write permission is granted here and nowhere else.
+# Creates a GitHub Release with the matching CHANGELOG.md section as its notes, and refuses unless
+# the commit already has a green run of the test workflow. Write permission is granted here and
+# nowhere else.
 #
-# To cut a release: merge to main through a green PR, then
-#   git tag -a v0.1.0 -m "v0.1.0" <merge-commit> && git push origin v0.1.0
+# Two ways to cut a release, after merging to main through a green PR:
+#   - push a tag:  git tag -a v0.1.0 -m "v0.1.0" <merge-commit> && git push origin v0.1.0
+#   - or run this workflow from the Actions tab on main with version 0.1.0; it tags main's head.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, without the v (for example 0.1.0)
+        required: true
 
 permissions:
   contents: write  # create the release
   actions: read    # look up the test workflow's result for the tagged commit
 
 env:
+  # A pushed tag names itself; a manual run takes the version input and tags this commit.
+  TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
   TEST_WORKFLOW: tests.yml
 
 jobs:
@@ -35,9 +43,13 @@ jobs:
             exit 1
           fi
 
+      - name: A manual run releases main only
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main" || { echo "::error::Run this from main, not $GITHUB_REF."; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must look like 1.2.3, got ${TAG#v}."; exit 1; }
+
       - name: Notes from CHANGELOG.md
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
           awk -v v="$version" '
@@ -53,5 +65,10 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file notes.md --verify-tag
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # Creates the tag at exactly the commit whose tests were checked above.
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file notes.md --target "$GITHUB_SHA"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file notes.md --verify-tag
+          fi
