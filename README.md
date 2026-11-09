@@ -4,13 +4,28 @@ Self-healing data extraction for business portals with no API.
 
 When a portal's UI changes, Selector Drift re-finds each field and then has to prove the new match is right before any data is written. If it can't, the run is held for a person to review. A selector that breaks throws an error, but one that heals onto the wrong column returns plausible, wrong numbers for weeks, so the validation gate is the centre of the design.
 
-[![license](https://img.shields.io/github/license/Berakhah/selector-drift)](LICENSE)
+![Two renders of the test bench's claims table. Left: the unmutated page, which the gate writes. Right: the same page with a 'Previous Amount' decoy column inserted before Amount; rung 2 finds the real Amount column again, and the gate writes the run when it has history and quarantines it on a first run](docs/assets/hero.png)
 
-**Status: in development.** The pipeline, validation gate, evidence store and test bench exist. The web UI and HTTP API don't, and a fresh clone won't install yet ([details](#status-and-known-limitations)).
+[![tests](https://github.com/Berakhah/selector-drift/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Berakhah/selector-drift/actions/workflows/tests.yml) [![release](https://img.shields.io/github/v/release/Berakhah/selector-drift)](https://github.com/Berakhah/selector-drift/releases) [![license](https://img.shields.io/github/license/Berakhah/selector-drift)](LICENSE)
+
+## Quickstart
+
+Needs Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+
+```bash
+git clone https://github.com/Berakhah/selector-drift && cd selector-drift
+uv sync
+uv run pytest -m unit -q        # about 2,300 tests: no browser, no database, no network
+uv run uvicorn testbench.portal.app:create_app --factory --port 8080   # the mutating test bench
+```
+
+The integration suite needs Postgres and Chromium; `.github/workflows/tests.yml` shows the exact setup CI uses.
+
+**Status: in development.** The pipeline, validation gate, evidence store and test bench exist. The web UI and HTTP API don't, and there are no results from a live portal yet ([details](#status-and-known-limitations)).
 
 ## How this was built
 
-I designed it, wrote the specifications with Claude Code, set the evaluation criteria, directed the implementation, and reviewed and tested the changes. Claude Code generated a substantial part of the code under my direction. Counted on 7 Nov 2026: 152 of 157 commits were made through my second account, [@Berakhah-sys](https://github.com/Berakhah-sys), and 155 carry a `Co-Authored-By: Claude` trailer. The suite has 1,434 test functions by static count; a fresh clone doesn't install yet because it needs a private dependency. The first commit originally carried a wrong date; its spec files were named 2024-11-07, but the commit is co-authored by Claude Opus 5, which didn't exist then. On 4 Nov 2026 I re-dated it to one hour before the second commit (29 Aug 2026); the follow-up commit says so.
+I designed it, wrote the specifications with Claude Code, set the evaluation criteria, directed the implementation, and reviewed and tested the changes. Claude Code generated a substantial part of the code under my direction. Counted on 7 Nov 2026: 152 of 157 commits were made through my second account, [@Berakhah-sys](https://github.com/Berakhah-sys), and 155 carry a `Co-Authored-By: Claude` trailer. The suite has 1,434 test functions by static count. The first commit originally carried a wrong date; its spec files were named 2024-11-07, but the commit is co-authored by Claude Opus 5, which didn't exist then. On 4 Nov 2026 I re-dated it to one hour before the second commit (29 Aug 2026); the follow-up commit says so.
 
 ## How a run works
 
@@ -75,13 +90,11 @@ An earlier 60-day campaign measured which rung resolved each field: rung 1 16.9%
 - There is no web UI or HTTP API. The API work is in open [PR #1](https://github.com/Berakhah/selector-drift/pull/1).
 - The ninety-day live heal log hasn't been run, so there are no results from a live portal.
 
-**Install**
+**Install and CI**
 
-- `bok-core` isn't on PyPI, and `pyproject.toml` points to an absolute path on the author's machine. Until that changes, `uv sync` won't work on a fresh clone.
-
-**CI**
-
-- Tests don't run in CI on `main`, which only builds the test bench image. The test workflow is in draft [PR #4](https://github.com/Berakhah/selector-drift/pull/4). Conflicts need resolving before it can merge.
+- `bok-core` isn't on PyPI. It is vendored as a pre-built wheel in [`vendor/`](vendor/README.md), with its source commit, build command and sha256, so `uv sync` works on a fresh clone.
+- CI runs static checks, the unit suite and the integration suite (Postgres and a real Chromium) on every push and PR. The 63 end-to-end tests (`-m e2e`) don't run in CI yet.
+- One unit test is deselected in CI: the guard that refuses a scope record still carrying template placeholders. The scope records are templates until the ninety-day-log targets are chosen, so it can't pass yet; it still fails a local run on purpose.
 
 **Hardening still in draft PRs**
 
@@ -115,6 +128,10 @@ tests/          1,434 Python test functions (counted 2026-11-05)
 ```
 
 Built with Python 3.12, Playwright, Pydantic, PostgreSQL, Alembic, Prefect, Parquet, DuckDB and Docker Compose.
+
+## Security
+
+Report a vulnerability privately through GitHub; see [SECURITY.md](SECURITY.md).
 
 ## License
 
