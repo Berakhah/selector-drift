@@ -36,10 +36,12 @@ from selector_drift.validate.assertions.distribution import (
     REFERENCE_RUNS,
     DistributionalAssertion,
 )
+from selector_drift.validate.assertions.row_count import (
+    ROW_COUNT_MIN_WINDOWS,
+    ROW_COUNT_RATIO,
+)
 from selector_drift.validate.history import History
 
-ROW_COUNT_RATIO: Final = 0.5
-ROW_COUNT_MIN_WINDOWS: Final = 3
 ROW_COUNT_REASON: Final = (
     "fewer than half the trailing median means rows were lost -- a pagination change, a "
     "virtualised table or a row scope that shrank -- not a quiet day; the median, not the mean, "
